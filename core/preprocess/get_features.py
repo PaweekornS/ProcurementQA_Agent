@@ -1,24 +1,47 @@
 import json
+import re
 from core.prompt import get_prompt
 
 
 def get_features(model, cases):
-    fact = cases["description"]
-    name = cases["name"]
+    fact = cases.get("description", "")
+    name = cases.get("name", "ผู้สอบถาม")
 
-    prompt_formatted = get_prompt("GET_FEATURES_PROMPT") + get_prompt(
-        "GET_FEATURES_INPUT_TEMPLATE"
-    ).format(name=name, fact=fact)
+    input_template = get_prompt("GET_FEATURES_INPUT_TEMPLATE")
+    try:
+        formatted_input = input_template.format(name=name, fact=fact)
+    except KeyError:
+        formatted_input = f"\nคำถาม/ข้อหารือ: {fact}"
+
+    prompt_formatted = get_prompt("GET_FEATURES_PROMPT") + formatted_input
     response = model.generate_response(prompt_formatted)
-    first = response.find("{")
-    last = response.rfind("}") + 1
+    
     json_data = {}
+    # Strip markdown code blocks if present
+    cleaned = re.sub(r"^```(?:json)?", "", response.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE)
+    
+    first = cleaned.find("{")
+    last = cleaned.rfind("}") + 1
     if first != -1 and last != -1:
-        json_str = response[first:last]
+        json_str = cleaned[first:last]
         try:
             json_data = json.loads(json_str)
-        except json.JSONDecodeError:
-            print("JSON解析错误")
-    else:
-        print("未找到有效的JSON字符串")
+        except Exception:
+            pass
+
+    # Ensure required keys for graph traversal
+    if not isinstance(json_data, dict):
+        json_data = {}
+
+    if "defendant_info" not in json_data:
+        json_data["defendant_info"] = ["หน่วยงานของรัฐ / ผู้สอบถาม"]
+    if "criminal_acts" not in json_data:
+        # Represents inquiry actions/topics in procurement
+        json_data["criminal_acts"] = [fact[:80]] if fact else ["การจัดซื้อจัดจ้าง"]
+    if "victim_property_details" not in json_data:
+        json_data["victim_property_details"] = ["พัสดุ / ขอบเขตงาน (TOR) / สัญญา"]
+    if "intent_remorse" not in json_data:
+        json_data["intent_remorse"] = []
+
     return json_data

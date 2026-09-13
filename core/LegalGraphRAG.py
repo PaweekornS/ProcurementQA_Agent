@@ -15,9 +15,9 @@ from core.graph_construct.graph_db import GraphDBManager
 @dataclass
 class ModelConfig:
     """Model configuration"""
-    model_name: str = "qwen3"
+    model_name: str = "openrouter"
     device: str = "cuda:0"
-    prompt_language: str = "zh"
+    prompt_language: str = "en"
     # OpenAI-type model configuration
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -28,15 +28,19 @@ class ModelConfig:
     def __post_init__(self):
         """Validate model name"""
         valid_models = [
-            "qwen3", "qwen2_5", "gemma3", "internlm3", 
+            "openrouter", "qwen3", "qwen2_5", "gemma3", "internlm3", 
             "glm4", "deepseek_v3", "gpt4o_mini"
         ]
-        if self.model_name not in valid_models:
+        if (
+            self.model_name not in valid_models
+            and "/" not in self.model_name
+            and not self.model_name.startswith("openrouter:")
+        ):
             raise ValueError(
                 f"Invalid model_name: {self.model_name}. "
-                f"Must be one of {valid_models}"
+                f"Must be one of {valid_models} or an OpenRouter model string (e.g. 'google/gemma-3-4b-it')"
             )
-        valid_prompt_languages = ["en", "zh", "cn", "chinese", "english"]
+        valid_prompt_languages = ["en", "zh", "cn", "chinese", "english", "th", "thai", "default"]
         if self.prompt_language.lower() not in valid_prompt_languages:
             raise ValueError(
                 f"Invalid prompt_language: {self.prompt_language}. "
@@ -110,13 +114,34 @@ class LegalGraphRAGConfig:
         # The selected experiment file is authoritative over inherited shell values.
         load_dotenv(dotenv_path=dotenv_path, override=True)
         
+        # If API key is not present, check workspace root .env
+        if not (os.getenv("api_key") or os.getenv("OPENROUTER_API_KEY") or os.getenv("\ufeffOPENROUTER_API_KEY")):
+            for candidate in ["../.env", "../../.env", ".env"]:
+                cand_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(dotenv_path)), candidate))
+                if os.path.exists(cand_path):
+                    load_dotenv(dotenv_path=cand_path, override=False)
+                    if os.getenv("OPENROUTER_API_KEY") or os.getenv("\ufeffOPENROUTER_API_KEY") or os.getenv("api_key"):
+                        break
+
         # Model configuration
+        env_model_name = os.getenv("model_name") or os.getenv("LLM_MODEL") or "openrouter"
+        env_api_key = (
+            os.getenv("api_key")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("\ufeffOPENROUTER_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        )
+        env_base_url = (
+            os.getenv("base_url")
+            or os.getenv("OPENROUTER_BASE_URL")
+            or ("https://openrouter.ai/api/v1" if (os.getenv("OPENROUTER_API_KEY") or env_model_name == "openrouter" or "/" in env_model_name) else None)
+        )
         model_config = ModelConfig(
-            model_name=os.getenv("model_name", "qwen3"),
+            model_name=env_model_name,
             device=os.getenv("device", "cuda:0"),
-            prompt_language=os.getenv("prompt_language", "zh"),
-            api_key=os.getenv("api_key"),
-            base_url=os.getenv("base_url"),
+            prompt_language=os.getenv("prompt_language", "en"),
+            api_key=env_api_key,
+            base_url=env_base_url,
             max_length=int(os.getenv("max_length", 4096)),
             temperature=float(os.getenv("temperature", 0.1))
         )
@@ -270,10 +295,34 @@ class LegalGraphRAG:
         """Initialize model"""
         from core.models import (
             QwenChatbot, Qwen2Chatbot, GemmaChatbot, InternlmChatbot,
-            GlmChatbot, DeepSeekChatbot, GPT4OMiniChatbot
+            GlmChatbot, DeepSeekChatbot, GPT4OMiniChatbot, OpenRouterChatbot
         )
         
+        # Check if OpenRouter model
+        is_openrouter = (
+            self.config.model.model_name == "openrouter"
+            or "/" in self.config.model.model_name
+            or self.config.model.model_name.startswith("openrouter:")
+            or (self.config.model.base_url and "openrouter" in self.config.model.base_url)
+        ) and self.config.model.model_name not in [
+            "qwen3", "qwen2_5", "gemma3", "internlm3", "glm4", "deepseek_v3", "gpt4o_mini"
+        ]
+
+        if is_openrouter or self.config.model.model_name == "openrouter":
+            actual_model = self.config.model.model_name
+            if actual_model == "openrouter":
+                actual_model = os.getenv("LLM_MODEL", "google/gemma-3-4b-it")
+            elif actual_model.startswith("openrouter:"):
+                actual_model = actual_model.split(":", 1)[1]
+            return OpenRouterChatbot(
+                model_name=actual_model,
+                device=self.config.model.device,
+                api_key=self.config.model.api_key,
+                base_url=self.config.model.base_url
+            )
+
         model_map = {
+            "openrouter": OpenRouterChatbot,
             "qwen3": QwenChatbot,
             "qwen2_5": Qwen2Chatbot,
             "gemma3": GemmaChatbot,
@@ -283,11 +332,10 @@ class LegalGraphRAG:
             "gpt4o_mini": GPT4OMiniChatbot,
         }
         
-        model_class = model_map[self.config.model.model_name]
+        model_class = model_map.get(self.config.model.model_name, OpenRouterChatbot)
         
         # OpenAI-type models need special handling
-        if self.config.model.model_name in ["deepseek_v3", "gpt4o_mini"]:
-            # OpenAI-type models need model_name, api_key, base_url
+        if self.config.model.model_name in ["openrouter", "deepseek_v3", "gpt4o_mini"]:
             init_kwargs = {
                 "device": self.config.model.device,
             }
@@ -297,7 +345,6 @@ class LegalGraphRAG:
                 init_kwargs["base_url"] = self.config.model.base_url
             return model_class(**init_kwargs)
         else:
-            # Transformers-type models only need device
             return model_class(device=self.config.model.device)
     
     def _load_cases_db(self) -> List[Dict[str, Any]]:
@@ -381,7 +428,7 @@ class LegalGraphRAG:
         
         Args:
             description: Feature dictionary containing defendant_info, criminal_acts, 
-                        victim_property_details, intent_remorse fields
+                        victim_property_details, intent_remorse fields, or generic fields
             
         Returns:
             Concatenated description string
@@ -390,11 +437,22 @@ class LegalGraphRAG:
         if description.get("defendant_info"):
             res += "Defendant Info: " + ", ".join(description.get("defendant_info", [])) + ". "
         if description.get("criminal_acts"):
-            res += "Criminal Acts: " + ", ".join(description.get("criminal_acts", [])) + ". "
+            res += "Criminal Acts / Topics: " + ", ".join(description.get("criminal_acts", [])) + ". "
         if description.get("victim_property_details"):
-            res += "Victim/Property Characteristics: " + ", ".join(description.get("victim_property_details", [])) + ". "
+            res += "Target / Property Details: " + ", ".join(description.get("victim_property_details", [])) + ". "
         if description.get("intent_remorse"):
-            res += "Intent and Remorse: " + ", ".join(description.get("intent_remorse", [])) + ". "
+            res += "Intent / Remarks: " + ", ".join(description.get("intent_remorse", [])) + ". "
+        
+        # Support generic inquiry fields
+        if not res.strip():
+            parts = []
+            for k, v in description.items():
+                if isinstance(v, list) and v:
+                    parts.append(f"{k}: {', '.join(str(x) for x in v)}")
+                elif isinstance(v, str) and v.strip():
+                    parts.append(f"{k}: {v.strip()}")
+            res = " ".join(parts)
+            
         return res
     
     def _prepare_nodes_data(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -410,30 +468,20 @@ class LegalGraphRAG:
         
         # Process case nodes
         for case in tqdm(self.cases_db, desc="Preparing case nodes"):
-            # Check if features field exists (new format) or use fact directly (old format)
-            if "features" in case:
-                features = case["features"]
-                # Check if criminal_acts field exists
-                if features.get("criminal_acts") and len(features.get("criminal_acts", [])) > 0:
-                    description = self._concat_feature_descriptions(features)
-                    case_nodes_data.append({
-                        'id': str(uuid.uuid4()),
-                        'description': description,
-                        'caseId': case.get("id", ""),
-                        'crime': case.get("crime", []),
-                        'law': case.get("law", []),
-                        'type': 'case'
-                    })
-            elif "fact" in case:
-                # Old format: use fact directly as description
-                case_nodes_data.append({
-                    'id': str(uuid.uuid4()),
-                    'description': case.get("fact", ""),
-                    'caseId': case.get("id", ""),
-                    'crime': case.get("crime", []),
-                    'law': case.get("laws", case.get("law", [])),
-                    'type': 'case'
-                })
+            description = ""
+            if "features" in case and case["features"]:
+                description = self._concat_feature_descriptions(case["features"])
+            if not description.strip():
+                description = case.get("fact") or case.get("description") or case.get("question", "")
+
+            case_nodes_data.append({
+                'id': str(uuid.uuid4()),
+                'description': description,
+                'caseId': str(case.get("id", "")),
+                'crime': case.get("crime", []),
+                'law': [str(l) for l in case.get("laws", case.get("law", []))],
+                'type': 'case'
+            })
         
         # Process law nodes and crime nodes
         crimes = set()
@@ -441,7 +489,7 @@ class LegalGraphRAG:
             text_id = law.get("id")
             
             # Process items field
-            if "items" in law:
+            if "items" in law and law["items"]:
                 for item in law["items"]:
                     # Collect crimes
                     if "crime" in item:
@@ -453,8 +501,8 @@ class LegalGraphRAG:
                     # Create law node
                     law_nodes_data.append({
                         'id': str(uuid.uuid4()),
-                        'entry': text_id,
-                        'description': item.get("text", ""),
+                        'entry': str(text_id),
+                        'description': item.get("text", item.get("description", "")),
                         'crimes': item.get("crime", []),
                         "judge_dep": str(item.get("judge_dep", [])),
                         "related_laws": str(item.get("related_laws", [])),
@@ -470,7 +518,7 @@ class LegalGraphRAG:
                 
                 law_nodes_data.append({
                     'id': str(uuid.uuid4()),
-                    'entry': text_id,
+                    'entry': str(text_id),
                     'description': law.get("text", law.get("description", "")),
                     'crimes': law.get("crime", []),
                     "judge_dep": str(law.get("judge_dep", [])),
@@ -478,13 +526,13 @@ class LegalGraphRAG:
                     'type': 'law'
                 })
         
-        # Create crime nodes
+        # Create crime / topic nodes
         crimes = list(crimes)
         for crime in crimes:
-            if crime and crime != "":
+            if crime and str(crime).strip():
                 crime_nodes_data.append({
                     'id': str(uuid.uuid4()),
-                    'description': crime,
+                    'description': str(crime).strip(),
                     'type': 'crime'
                 })
         
@@ -530,9 +578,8 @@ class LegalGraphRAG:
     
     def __del__(self):
         """Destructor, auto-save graph database"""
-        if self.config.graph.auto_save and self.config.graph.graph_db_path:
+        if hasattr(self, 'config') and self.config.graph.auto_save and self.config.graph.graph_db_path:
             try:
                 self.save_graph_db()
             except Exception as e:
                 print(f"Failed to auto-save graph database: {e}")
-

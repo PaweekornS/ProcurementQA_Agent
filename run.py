@@ -1,10 +1,18 @@
 import argparse
 import os
+import sys
 import json
 from tqdm import tqdm
 import multiprocessing
 import time
 from typing import List, Dict, Any, Optional
+
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
 
@@ -28,6 +36,13 @@ def process_cases_worker(
     output_file: str,
     model_name: str
 ):
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
     config = LegalGraphRAGConfig.from_dict(config_dict)
     
     config.model.device = device
@@ -39,30 +54,92 @@ def process_cases_worker(
     rag = LegalGraphRAG(config=config)
     
     results = []
-    correct_count = 0
+    section_hits = 0
+    category_hits = 0
     
     try:
         for case in tqdm(cases, desc=f"Processing on {device} with {model_name}"):
-            fact = case.get("fact", "")
-            true_charge = case.get("crime", "")
-            law_article = case.get("laws", [])
-            term_of_imprisonment = case.get("term_of_imprisonment", {})
+            question = case.get("fact", "")
+            true_category = case.get("crime", [])
+            true_section = case.get("laws", [])
+            ground_truth = case.get("ground_truth", "")
             
             case_res = rag.analyze_case(case)
             
+            pred_answer = ""
+            pred_direct_answer = ""
+            pred_laws = []
+            pred_category = []
+            exceptions = ""
+            
+            if case_res and isinstance(case_res, list) and len(case_res) > 0:
+                judge_result = case_res[0].get("judge_result", {})
+                pred_answer = judge_result.get("answer", "")
+                pred_direct_answer = judge_result.get("direct_answer", "")
+                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
+                pred_category = list(judge_result.get("category", judge_result.get("charge_name", [])))
+                exceptions = judge_result.get("exceptions_or_conditions", "")
+                
+                # Also include used laws from graph traversal
+                used_laws = case_res[0].get("used_laws", [])
+                for ul in used_laws:
+                    entry = ul.get("entry", "")
+                    if entry and entry not in pred_laws:
+                        pred_laws.append(entry)
+
+            # Check Section hit (does any predicted law contain true_section?)
+            is_section_hit = False
+            for ts in true_section:
+                ts_clean = str(ts).strip()
+                if not ts_clean:
+                    continue
+                for pl in pred_laws:
+                    if ts_clean in str(pl) or str(pl) in ts_clean:
+                        is_section_hit = True
+                        break
+                if is_section_hit:
+                    break
+            if is_section_hit:
+                section_hits += 1
+
+            # Check Category hit
+            is_category_hit = False
+            for tc in true_category:
+                tc_clean = str(tc).strip()
+                if not tc_clean:
+                    continue
+                for pc in pred_category:
+                    if tc_clean in str(pc) or str(pc) in tc_clean:
+                        is_category_hit = True
+                        break
+                if is_category_hit:
+                    break
+            if is_category_hit:
+                category_hits += 1
+
             results.append({
                 "id": case.get("id"),
-                "fact": fact,
-                "true_charge": true_charge,
+                "question": question,
+                "direct_answer": pred_direct_answer,
+                "answer": pred_answer,
+                "ground_truth": ground_truth,
+                "expected_section": true_section,
+                "predicted_laws": pred_laws,
+                "is_section_hit": is_section_hit,
+                "expected_category": true_category,
+                "predicted_category": pred_category,
+                "is_category_hit": is_category_hit,
+                "exceptions_or_conditions": exceptions,
+                # Backward compatibility keys
+                "fact": question,
+                "law_article": true_section,
                 "judge_res": case_res,
-                "law_article": law_article,
-                "term_of_imprisonment": term_of_imprisonment,
             })
         
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         
-        return correct_count, len(cases)
+        return section_hits, category_hits, len(cases)
     
     finally:
         if hasattr(rag, 'model') and hasattr(rag.model, 'release_model'):
@@ -136,9 +213,16 @@ def run_evaluation(
     print(f"Loaded {len(test_cases)} test cases from {datasets} dataset")
     
     if devices is None:
-        devices = ["cuda:2", "cuda:3"]
+        if config.model.device and config.model.device != "auto":
+            devices = [config.model.device]
+        else:
+            try:
+                import torch
+                devices = ["cuda:0"] if torch.cuda.is_available() else ["cpu"]
+            except ImportError:
+                devices = ["cpu"]
     if not devices or len(devices) == 0:
-        raise ValueError("At least one device must be specified")
+        devices = ["cpu"]
     num_processes = len(devices)
     
     chunks = [[] for _ in range(num_processes)]
@@ -178,18 +262,24 @@ def run_evaluation(
     time_after = time.time()
     elapsed_time = time_after - time_before
     
-    total_correct = 0
+    total_section_hits = 0
+    total_category_hits = 0
     total_cases = 0
     for res in async_results:
-        correct, count = res.get()
-        total_correct += correct
+        sec_hits, cat_hits, count = res.get()
+        total_section_hits += sec_hits
+        total_category_hits += cat_hits
         total_cases += count
+    
+    sec_rate = (total_section_hits / total_cases * 100) if total_cases > 0 else 0.0
+    cat_rate = (total_category_hits / total_cases * 100) if total_cases > 0 else 0.0
     
     print(f"\n{'='*60}")
     print(f"Model: {model_name}")
     print(f"Dataset: {datasets}")
-    print(f"Total cases processed: {total_cases}")
-    print(f"Correctly classified: {total_correct}/{total_cases}")
+    print(f"Total questions evaluated: {total_cases}")
+    print(f"Section Retrieval Hit Rate: {total_section_hits}/{total_cases} ({sec_rate:.1f}%)")
+    print(f"Category Match Rate: {total_category_hits}/{total_cases} ({cat_rate:.1f}%)")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
     print(f"{'='*60}\n")
     
@@ -206,14 +296,18 @@ def run_evaluation(
     with open(combined_file, "w", encoding="utf-8") as f:
         json.dump(combined_results, f, ensure_ascii=False, indent=2)
     
-    print(f"Combined results saved to {combined_file}")
+    print(f"Combined QA results saved to {combined_file}")
     
     stats_file = os.path.join(output_dir, f"{model_name}_stats.json")
     stats = {
         "model_name": model_name,
         "dataset": datasets,
         "total_cases": total_cases,
-        "correct_count": total_correct,
+        "section_hits": total_section_hits,
+        "section_hit_rate": sec_rate,
+        "category_hits": total_category_hits,
+        "category_hit_rate": cat_rate,
+        "correct_count": total_section_hits,
         "elapsed_time": elapsed_time,
         "output_file": combined_file
     }
@@ -230,16 +324,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         required=True,
-        choices=[
-            "qwen3",
-            "qwen2_5",
-            "gemma3",
-            "internlm3",
-            "glm4",
-            "deepseek_v3",
-            "gpt4o_mini",
-        ],
-        help="Model to use for analysis",
+        help="Model to use for analysis (e.g. openrouter, google/gemma-3-4b-it, qwen3, gpt4o_mini, etc.)",
     )
     parser.add_argument(
         "--dotenv_path",
@@ -250,7 +335,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--datasets",
         type=str,
-        default="CAIL",
+        default="THAI",
         help="Dataset name (e.g., CAIL)",
     )
     parser.add_argument(
