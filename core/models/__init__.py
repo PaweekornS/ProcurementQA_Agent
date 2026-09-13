@@ -7,6 +7,7 @@ from .transformers_base import TransformersBaseModel
 
 # OpenAI type models
 from .openai import DeepSeekChatbot, GPT4OMiniChatbot
+from .openrouter import OpenRouterChatbot
 
 # Transformers type models
 from .transformers import (
@@ -25,6 +26,7 @@ __all__ = [
     # OpenAI type
     "DeepSeekChatbot",
     "GPT4OMiniChatbot",
+    "OpenRouterChatbot",
     # Transformers type
     "QwenChatbot",
     "Qwen2Chatbot",

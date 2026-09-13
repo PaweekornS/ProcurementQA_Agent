@@ -77,9 +77,9 @@ def retrieve(chatbot, cases, law_to_crime, cases_db, retrieve_config):
     retrieved_laws = retrieved_laws + augmented_laws
     for item in retrieved_facts:
         for case in cases_db:
-            if case["id"] == item["caseId"]:
-                item["crime"] = case["crime"]
-                item["law"] = case["law"]
+            if str(case.get("id", "")) == str(item.get("caseId", "")):
+                item["crime"] = case.get("crime", [])
+                item["law"] = case.get("law", [])
                 break
     final_retrieved_laws = []
     seen_law_ids = set()
@@ -87,8 +87,22 @@ def retrieve(chatbot, cases, law_to_crime, cases_db, retrieve_config):
         if law["id"] in seen_law_ids:
             continue
         seen_law_ids.add(law["id"])
-        law["judge_dep"] = eval(law["judge_dep"])
-        law["related_laws"] = eval(law["related_laws"])
+        if isinstance(law.get("judge_dep"), str):
+            try:
+                law["judge_dep"] = eval(law["judge_dep"])
+            except Exception:
+                law["judge_dep"] = []
+        elif not isinstance(law.get("judge_dep"), list):
+            law["judge_dep"] = []
+            
+        if isinstance(law.get("related_laws"), str):
+            try:
+                law["related_laws"] = eval(law["related_laws"])
+            except Exception:
+                law["related_laws"] = []
+        elif not isinstance(law.get("related_laws"), list):
+            law["related_laws"] = []
+            
         final_retrieved_laws.append(law)
 
     return original_retrieved_res, final_retrieved_laws, retrieved_facts
@@ -107,24 +121,24 @@ def naive_retrieve(chatbot, cases, law_to_crime, cases_db):
     retrieved_laws = [str(law['entry']) for law in retrieved_laws]
     for item in retrieved_facts:
         for case in cases_db:
-            if case["id"] == item["caseId"]:
-                item["crime"] = case["crime"]
-                item["law"] = case["law"]
-                retrieved_laws.extend(case["law"])
+            if str(case.get("id", "")) == str(item.get("caseId", "")):
+                item["crime"] = case.get("crime", [])
+                item["law"] = case.get("law", [])
+                retrieved_laws.extend(case.get("law", []))
                 break
     retrieved_laws = list(set(retrieved_laws))
     final_retrieved_laws = []
     for x in retrieved_laws:
-        if (int(x) < 102):
-            continue
         try:
             for item in law_to_crime:
-                if item["id"] == int(x):
-                    for entry in item["items"]:
+                item_id = str(item.get("id", ""))
+                x_str = str(x)
+                if item_id == x_str or (x_str and (x_str in item_id or item_id in x_str)):
+                    for entry in item.get("items", []):
                         final_retrieved_laws.append(
                             {"id": item["id"], "text": entry["text"], "crime": entry["crime"], "judge_dep": entry["judge_dep"], "related_laws": entry["related_laws"]})
                     break
-        except IndexError:
+        except Exception:
             continue
 
     return final_retrieved_laws, retrieved_facts
@@ -138,25 +152,44 @@ def locate_law(law, laws):
 
 
 def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config):
+    names = case.get("name")
+    if not names:
+        names = ["ผู้สอบถาม"]
+    elif isinstance(names, str):
+        names = [names]
+
     case_by_defendant = segment_case_text_withname(
-        chatbot, case["fact"][:1024], case["name"])
+        chatbot, case["fact"][:1024], names)
+    if not case_by_defendant:
+        case_by_defendant = [{"name": names[0], "description": case["fact"][:1024]}]
+
     for item in case_by_defendant:
         item["feature"] = get_features(chatbot, item)
         original_retrieved_res, retrieved_laws, retrieved_facts = retrieve(
             chatbot, item, law_to_crime, cases_db, retrieve_config)
-        if not (retrieved_laws and retrieved_facts):
+        if not (retrieved_laws or retrieved_facts):
+            item["judge_result"] = {"charge_name": [], "law_article": [], "term_of_imprisonment": {}}
+            item["retrieved_laws"] = []
+            item["retrieved_facts"] = []
+            item["original_retrieved_res"] = original_retrieved_res
+            item["used_laws"] = []
+            item["used_facts"] = []
             continue
+            
         law_used = []
         for law in retrieved_laws:
             used, _ = judge_law(
-                chatbot, f"被告人：{item['name']}，描述：{item['description']}", law)
+                chatbot, item['description'], law)
             if used:
                 law_used.append(law)
-        fact_used = filter_facts(law_used, retrieved_facts)
-        # crime = judge_crime(
-        #     chatbot, law_used, fact_used, f"被告人：{item['name']}，描述：{item['description']}")
+        
+        # If no laws confirmed by judge_law, fall back to top retrieved laws
+        if not law_used and retrieved_laws:
+            law_used = retrieved_laws[:3]
+            
+        fact_used = filter_facts(law_used, retrieved_facts) if retrieved_facts else []
         judge_result = judge_crime_all(
-            chatbot, law_used, fact_used, f"被告人：{item['name']}，描述：{item['description']}")
+            chatbot, law_used, fact_used, item['description'])
         item["judge_result"] = judge_result
         item["retrieved_laws"] = retrieved_laws
         item["retrieved_facts"] = retrieved_facts
