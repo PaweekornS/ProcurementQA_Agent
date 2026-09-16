@@ -51,8 +51,8 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     """Data path configuration"""
-    case_db_path: str = "./datas/cases_with_feature.json"
-    law_to_crime_path: str = "./datas/law_to_crime.json"
+    case_db_path: str = "./datas/thai_corpus/cases_with_feature.json" if os.path.exists("./datas/thai_corpus/cases_with_feature.json") else "./datas/cases_with_feature.json"
+    law_to_crime_path: str = "./datas/thai_corpus/law_to_crime.json" if os.path.exists("./datas/thai_corpus/law_to_crime.json") else "./datas/law_to_crime.json"
     datasets_path: Optional[str] = None  # Dataset root directory
     output_dir: str = "./outputs"
     
@@ -86,7 +86,7 @@ class GraphConfig:
     """Graph database configuration"""
     graph_db_path: Optional[str] = None  # Graph database save/load path
     embedding_api_url: str = "http://localhost:11434/api/embed"
-    embedding_model: str = "bge-m3"
+    embedding_model: str = "unsloth/embeddinggemma-300m"
     auto_save: bool = True  # Whether to auto-save graph database
     auto_build: bool = True  # Whether to auto-build if graph doesn't exist
 
@@ -147,9 +147,11 @@ class LegalGraphRAGConfig:
         )
         
         # Data configuration
+        default_case_db = "./datas/thai_corpus/cases_with_feature.json" if os.path.exists("./datas/thai_corpus/cases_with_feature.json") else "./datas/cases_with_feature.json"
+        default_law_to_crime = "./datas/thai_corpus/law_to_crime.json" if os.path.exists("./datas/thai_corpus/law_to_crime.json") else "./datas/law_to_crime.json"
         data_config = DataConfig(
-            case_db_path=os.getenv("case_db_path", "./datas/cases_with_feature.json"),
-            law_to_crime_path=os.getenv("law_to_crime_path", "./datas/law_to_crime.json"),
+            case_db_path=os.getenv("case_db_path", default_case_db),
+            law_to_crime_path=os.getenv("law_to_crime_path", default_law_to_crime),
             datasets_path=os.getenv("datasets_path"),
             output_dir=os.getenv("output_dir", "./outputs")
         )
@@ -167,7 +169,7 @@ class LegalGraphRAGConfig:
         graph_config = GraphConfig(
             graph_db_path=os.getenv("graph_db_path"),
             embedding_api_url=os.getenv("embedding_api_url", "http://localhost:11434/api/embed"),
-            embedding_model=os.getenv("embedding_model", "bge-m3"),
+            embedding_model=os.getenv("embedding_model", "unsloth/embeddinggemma-300m"),
             auto_save=os.getenv("auto_save", "True") == "True",
             auto_build=os.getenv("auto_build", "True") == "True"
         )
