@@ -60,6 +60,8 @@ env/
 *.pkl
 *.pickle
 outputs/
+procurement_data/
+configs/
 
 # Jupyter Notebook
 .ipynb_checkpoints

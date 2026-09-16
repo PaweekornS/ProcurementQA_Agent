@@ -18,10 +18,16 @@ from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
 
 
 def load_test_cases(datasets: str, datasets_path: str = "./datasets") -> List[Dict[str, Any]]:
-    case_file = os.path.join(datasets_path, f"crime_data_{datasets}_small.json")
-    
-    if not os.path.exists(case_file):
-        raise FileNotFoundError(f"Test dataset not found: {case_file}")
+    if os.path.exists(datasets) and os.path.isfile(datasets):
+        case_file = datasets
+    else:
+        case_file = os.path.join(datasets_path, f"crime_data_{datasets}_small.json")
+        if not os.path.exists(case_file):
+            alt_file = os.path.join(datasets_path, datasets)
+            if os.path.exists(alt_file) and os.path.isfile(alt_file):
+                case_file = alt_file
+            else:
+                raise FileNotFoundError(f"Test dataset not found: {case_file}")
     
     with open(case_file, "r", encoding="utf-8") as f:
         cases = json.load(f)
@@ -326,11 +332,12 @@ if __name__ == "__main__":
         required=True,
         help="Model to use for analysis (e.g. openrouter, google/gemma-3-4b-it, qwen3, gpt4o_mini, etc.)",
     )
+    default_dotenv = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") and not os.path.exists(".env") else ".env"
     parser.add_argument(
         "--dotenv_path",
         type=str,
-        default=".env",
-        help="Path to the .env file",
+        default=default_dotenv,
+        help="Path to the .env file (default: configs/thai_procurement.env)",
     )
     parser.add_argument(
         "--datasets",

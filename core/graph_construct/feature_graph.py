@@ -8,74 +8,38 @@ from tqdm import tqdm
 
 
 _embedding_api_url = "http://localhost:11434/api/embed"
-_embedding_model = "bge-m3"
+_embedding_model = "unsloth/embeddinggemma-300m"
+_embedding_dim = 1024
 _local_embedder = None
 _vector_cache = {}
 _http_embedder_available = None
 
 
 def _init_vector_cache():
-    global _vector_cache
+    global _vector_cache, _embedding_dim
     if _vector_cache:
         return
-    # Check if 1_CRAG/storage/qdrant_db exists to seed vector cache
-    qdrant_paths = [
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../1_CRAG/storage/qdrant_db")),
-        os.path.abspath("1_CRAG/storage/qdrant_db"),
-        "../1_CRAG/storage/qdrant_db",
-    ]
-    for qp in qdrant_paths:
-        if os.path.exists(qp):
-            try:
-                from qdrant_client import QdrantClient
-                client = QdrantClient(path=qp)
-                if client.collection_exists("thai_procurement_statutes"):
-                    total = client.count("thai_procurement_statutes").count
-                    offset = None
-                    loaded = 0
-                    while loaded < total:
-                        records, next_offset = client.scroll(
-                            "thai_procurement_statutes",
-                            offset=offset,
-                            limit=100,
-                            with_payload=True,
-                            with_vectors=True
-                        )
-                        for r in records:
-                            vec = r.vector
-                            payload = r.payload or {}
-                            cid = str(payload.get("chunk_id", ""))
-                            content = str(payload.get("content", ""))
-                            heading = str(payload.get("heading", ""))
-                            if cid:
-                                _vector_cache[cid] = vec
-                            if heading:
-                                _vector_cache[heading] = vec
-                            if content:
-                                _vector_cache[content] = vec
-                                _vector_cache[content[:200]] = vec
-                        loaded += len(records)
-                        if next_offset is None or loaded >= total:
-                            break
-                        offset = next_offset
-                    break
-            except Exception:
-                pass
+    # Vector cache is maintained in-memory during execution
 
 
 def configure_embedding(api_url=None, model=None):
     """Configure the embedding backend used by graph construction and retrieval."""
-    global _embedding_api_url, _embedding_model
+    global _embedding_api_url, _embedding_model, _local_embedder, _http_embedder_available
     if api_url:
         _embedding_api_url = api_url
     if model:
+        if _embedding_model != model:
+            _local_embedder = None
+            _http_embedder_available = None
         _embedding_model = model
     _init_vector_cache()
 
 
 def get_embedding(text):
+    global _embedding_dim, _http_embedder_available, _local_embedder
+
     if not text:
-        return [0.0] * 1024
+        return [0.0] * _embedding_dim
 
     _init_vector_cache()
     # 1. Check in-memory cache
@@ -84,34 +48,14 @@ def get_embedding(text):
     if text[:200] in _vector_cache:
         return _vector_cache[text[:200]]
 
-    # 2. Try local SentenceTransformer
-    global _local_embedder
-    if _local_embedder is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            embed_name = os.getenv("EMBEDDING_MODEL") or _embedding_model or "VISAI-AI/nitibench-ccl-human-finetuned-bge-m3"
-            _local_embedder = SentenceTransformer(embed_name, device="cpu")
-        except Exception:
-            _local_embedder = False
-
-    if _local_embedder:
-        try:
-            vec = _local_embedder.encode(text, convert_to_numpy=True, normalize_embeddings=True)
-            emb = vec.tolist()
-            _vector_cache[text] = emb
-            return emb
-        except Exception:
-            pass
-
-    # 3. Try HTTP embedding endpoint (fail-fast if unreachable)
-    global _http_embedder_available
+    # 2. Try HTTP embedding endpoint first (e.g. Ollama with unsloth/embeddinggemma-300m)
     if _http_embedder_available is not False and _embedding_api_url:
         try:
             data = {
                 "model": _embedding_model,
                 "input": text
             }
-            response = requests.post(_embedding_api_url, json=data, timeout=1.0)
+            response = requests.post(_embedding_api_url, json=data, timeout=10.0)
             response.raise_for_status()
             result = response.json()
             embeddings = result.get('embeddings') or result.get('data')
@@ -120,15 +64,35 @@ def get_embedding(text):
                     vec = embeddings[0]['embedding']
                 else:
                     vec = embeddings[0]
+                _embedding_dim = len(vec)
                 _vector_cache[text] = vec
                 _http_embedder_available = True
                 return vec
         except Exception:
             _http_embedder_available = False
 
-    # 4. Deterministic fallback pseudo-vector based on hash
+    # 3. Try local SentenceTransformer as fallback
+    if _local_embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            embed_name = os.getenv("embedding_model") or os.getenv("EMBEDDING_MODEL") or _embedding_model
+            _local_embedder = SentenceTransformer(embed_name, device="cpu")
+        except Exception:
+            _local_embedder = False
+
+    if _local_embedder:
+        try:
+            vec = _local_embedder.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+            emb = vec.tolist()
+            _embedding_dim = len(emb)
+            _vector_cache[text] = emb
+            return emb
+        except Exception:
+            pass
+
+    # 4. Deterministic fallback pseudo-vector based on hash matching active dimension
     h = hashlib.sha256(text.encode('utf-8')).digest()
-    dim = 1024
+    dim = _embedding_dim
     np.random.seed(int.from_bytes(h[:4], 'big'))
     v = np.random.randn(dim).astype(np.float32)
     v /= np.linalg.norm(v)
@@ -165,34 +129,47 @@ def rerank_clusters(model, clusters, query_text):
 
 
 def rerank(model, query_text, neighbors):
-    from core.prompt import get_prompt
     if not neighbors:
         return []
 
-    neighbor_summaries = "\n".join(
-        [f"code{n['rank']}：{n['description']}\n" for n in neighbors])
-    prompt = get_prompt("RERANK_PROMPT_TEMPLATE").format(
-        neighbor_summaries=neighbor_summaries,
-        query_text=query_text
-    )
-    response = model.generate_response(prompt, max_length=512)
+    # Use GPU Cross-Encoder Reranker (BAAI/bge-reranker-v2-m3)
     try:
+        from .hybrid_reranker import get_reranker
+        reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+        reranker_device = os.getenv("reranker_device", "cuda:0")
+        reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+        
+        reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+        if reranker and reranker.model is not None:
+            reranked = reranker.rerank(query_text, neighbors, top_k=len(neighbors), threshold=reranker_thresh)
+            for idx, n in enumerate(reranked):
+                n['rank'] = idx + 1
+            return reranked
+    except Exception as e:
+        print(f"[Reranker fallback] GPU reranker unavailable: {e}")
+
+    # Fallback to LLM Prompting if CrossEncoder is not available
+    try:
+        from core.prompt import get_prompt
+        neighbor_summaries = "\n".join(
+            [f"code{n.get('rank', i+1)}：{n.get('description', '')}\n" for i, n in enumerate(neighbors)])
+        prompt = get_prompt("RERANK_PROMPT_TEMPLATE").format(
+            neighbor_summaries=neighbor_summaries,
+            query_text=query_text
+        )
+        response = model.generate_response(prompt, max_length=512)
         first_bracket = response.find('[')
         last_bracket = response.rfind(']')
         if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
             list_str = response[first_bracket:last_bracket + 1]
             ranked_indices = eval(list_str)
-        else:
-            ranked_indices = []
+            neighbors = [n for n in neighbors if n.get('rank') in ranked_indices]
+            neighbors = sorted(neighbors, key=lambda x: ranked_indices.index(x.get('rank')))
+            return neighbors
     except Exception as e:
-        print(f"Error parsing response: {e}")
-        ranked_indices = []
-    if not ranked_indices:
-        return neighbors[:3]
-    neighbors = [n for n in neighbors if n['rank'] in ranked_indices]
-    neighbors = sorted(
-        neighbors, key=lambda x: ranked_indices.index(x['rank']))
-    return neighbors
+        print(f"Error parsing LLM rerank response: {e}")
+
+    return neighbors[:3]
 
 
 def store_nodes_with_embeddings(nodes_data):
@@ -589,48 +566,202 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
     return clusters, cases, laws
 
 
+_bm25_initialized = False
+
+
+def _ensure_bm25_index(db):
+    """Build BM25 index on all Laws and Cases nodes in the graph if not already built."""
+    global _bm25_initialized
+    if _bm25_initialized:
+        return
+
+    try:
+        from .hybrid_reranker import get_bm25_index
+        bm25_idx = get_bm25_index()
+        docs = []
+        for node_id, node_info in db.nodes_data.items():
+            ntype = node_info.get('type')
+            data = node_info.get('data', {})
+            if ntype in ('Laws', 'Cases'):
+                # Gather descriptive text
+                text = data.get('description', '')
+                if ntype == 'Laws':
+                    entry = data.get('entry', '')
+                    if entry:
+                        text = f"{entry}\n{text}"
+                docs.append({
+                    'id': node_id,
+                    'type': ntype,
+                    'text': text,
+                    'data': data
+                })
+        if docs:
+            bm25_idx.build_index(docs)
+            print(f"[HybridRetrieval] Built Thai BM25 index with {len(docs)} legal and case nodes.")
+        _bm25_initialized = True
+    except Exception as e:
+        print(f"[HybridRetrieval] Could not initialize BM25 index: {e}")
+
+
 def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
     db = GraphDBManager.get_db()
-    
-    # 直接在所有Cases节点中查找最相似的节点
-    neighbor_results = db.find_similar_nodes(query_embedding, 'Cases', top_k=top_k)
+    use_hybrid = os.getenv("hybrid_retrieval", "True").lower() == "true"
+    dense_top_k = int(os.getenv("dense_top_k", "30"))
+    bm25_top_k = int(os.getenv("bm25_top_k", "30"))
+    reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+    reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+    reranker_device = os.getenv("reranker_device", "cuda:0")
 
-    if not neighbor_results:
-        return [], []
+    if not use_hybrid:
+        # Fallback to classical dense-only Cases retrieval
+        neighbor_results = db.find_similar_nodes(query_embedding, 'Cases', top_k=top_k)
+        if not neighbor_results:
+            return [], []
+        neighbors = []
+        for record in neighbor_results:
+            neighbors.append({
+                'id': record['id'],
+                'description': record.get('description', ''),
+                'caseId': record.get('caseId', ''),
+                'similarity': record['similarity'],
+                'type': 'Cases'
+            })
+        neighbors = rerank(model, query_text, neighbors)
+        cases, laws = [], []
+        for neighbor in neighbors:
+            law_neighbors = db.get_neighbors(neighbor['id'], 'RELATES_TO_LAW')
+            for law_id in law_neighbors:
+                law_data = db.get_node(law_id)
+                if law_data:
+                    laws.append({'id': law_id, **law_data})
+            cases.append(neighbor)
+        return cases, laws
 
-    neighbors = []
-    for record in neighbor_results:
-        neighbors.append({
-            'id': record['id'],
-            'description': record.get('description', ''),
-            'caseId': record.get('caseId', ''),
-            'similarity': record['similarity']
-        })
-    
-    neighbors = sorted(
-        neighbors, key=lambda x: x['similarity'], reverse=True)
-    for ids, neighbor in enumerate(neighbors):
-        neighbor['rank'] = ids + 1
-    neighbors = rerank(model, query_text, neighbors)
-    
+    # --- HYBRID RETRIEVAL BRANCH ---
+    _ensure_bm25_index(db)
+
+    # 1. Sparse Search (BM25 with PyThaiNLP)
+    from .hybrid_reranker import get_bm25_index, get_reranker, weighted_rrf
+    bm25_idx = get_bm25_index()
+    sparse_raw = bm25_idx.search(query_text, top_k=bm25_top_k)
+    sparse_results = []
+    for doc, score in sparse_raw:
+        sparse_results.append(({
+            'id': doc['id'],
+            'type': doc['type'],
+            'description': doc.get('text', ''),
+            'data': doc.get('data', {})
+        }, score))
+
+    # 2. Dense Search (Embedding Cosine Similarity) on Laws and Cases
+    dense_results = []
+    law_records = db.find_similar_nodes(query_embedding, 'Laws', top_k=dense_top_k)
+    for rec in law_records:
+        dense_results.append(({
+            'id': rec['id'],
+            'type': 'Laws',
+            'description': rec.get('description', ''),
+            'data': rec
+        }, rec.get('similarity', 0.0)))
+
+    case_records = db.find_similar_nodes(query_embedding, 'Cases', top_k=dense_top_k)
+    for rec in case_records:
+        dense_results.append(({
+            'id': rec['id'],
+            'type': 'Cases',
+            'description': rec.get('description', ''),
+            'data': rec
+        }, rec.get('similarity', 0.0)))
+
+    # 3. Weighted RRF Fusion
+    fused_candidates = weighted_rrf(
+        dense_results,
+        sparse_results,
+        dense_weight=1.0,
+        sparse_weight=1.0,
+        rrf_k=int(os.getenv("rrf_k", "60"))
+    )
+
+    # 4. GPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
+    reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+    if reranker and reranker.model is not None:
+        top_candidates = reranker.rerank(
+            query_text,
+            fused_candidates,
+            top_k=top_k,
+            threshold=reranker_thresh
+        )
+    else:
+        top_candidates = fused_candidates[:top_k]
+
+    # 5. Graph Traversal & Context Augmentation
     cases = []
     laws = []
-    for neighbor in neighbors:
-        # 获取关联的Laws节点
-        law_neighbors = db.get_neighbors(neighbor['id'], 'RELATES_TO_LAW')
-        for law_id in law_neighbors:
-            law_data = db.get_node(law_id)
-            if law_data:
+    seen_law_ids = set()
+    seen_case_ids = set()
+
+    for cand in top_candidates:
+        node_id = cand.get('id')
+        node_type = cand.get('type')
+        data = cand.get('data', {})
+
+        if node_type == 'Laws':
+            if node_id not in seen_law_ids:
                 laws.append({
-                    'id': law_id,
-                    'entry': law_data.get('entry'),
-                    'description': law_data.get('description'),
-                    'crimes': law_data.get('crimes'),
-                    'judge_dep': law_data.get('judge_dep'),
-                    'related_laws': law_data.get('related_laws'),
-                    'insights': law_data.get('insights', '')
+                    'id': node_id,
+                    'entry': data.get('entry'),
+                    'description': data.get('description'),
+                    'crimes': data.get('crimes'),
+                    'judge_dep': data.get('judge_dep'),
+                    'related_laws': data.get('related_laws'),
+                    'insights': data.get('insights', ''),
+                    'rerank_score': cand.get('rerank_score', 1.0)
                 })
-        cases.append(neighbor)
+                seen_law_ids.add(node_id)
+
+            # Traverse to related Laws connected in Graph
+            neighbors = db.get_neighbors(node_id, 'RELATED_TO')
+            for n_id in neighbors:
+                if n_id not in seen_law_ids:
+                    n_data = db.get_node(n_id)
+                    if n_data:
+                        laws.append({
+                            'id': n_id,
+                            'entry': n_data.get('entry'),
+                            'description': n_data.get('description'),
+                            'crimes': n_data.get('crimes'),
+                            'judge_dep': n_data.get('judge_dep'),
+                            'related_laws': n_data.get('related_laws'),
+                            'insights': n_data.get('insights', '')
+                        })
+                        seen_law_ids.add(n_id)
+
+        elif node_type == 'Cases':
+            if node_id not in seen_case_ids:
+                cases.append({
+                    'id': node_id,
+                    'description': data.get('description', cand.get('description', '')),
+                    'caseId': data.get('caseId', ''),
+                    'rerank_score': cand.get('rerank_score', 1.0),
+                })
+                seen_case_ids.add(node_id)
+
+            # Traverse from Case to Laws via RELATES_TO_LAW
+            law_neighbors = db.get_neighbors(node_id, 'RELATES_TO_LAW')
+            for law_id in law_neighbors:
+                if law_id not in seen_law_ids:
+                    law_data = db.get_node(law_id)
+                    if law_data:
+                        laws.append({
+                            'id': law_id,
+                            'entry': law_data.get('entry'),
+                            'description': law_data.get('description'),
+                            'crimes': law_data.get('crimes'),
+                            'judge_dep': law_data.get('judge_dep'),
+                            'related_laws': law_data.get('related_laws'),
+                            'insights': law_data.get('insights', '')
+                        })
+                        seen_law_ids.add(law_id)
 
     return cases, laws
 
@@ -845,35 +976,77 @@ def update_insights_in_graph(law_id, insights):
 
 
 def construct_feature_graph(model, nodes_data):
+    import torch
     GraphDBManager.initialize()
 
-    case_nodes_data, law_nodes_data, crime_nodes_data = nodes_data[
-        'case'], nodes_data['law'], nodes_data['crime']
-    # 为每个节点生成嵌入向量
-    for i, node in enumerate(tqdm(case_nodes_data, desc="Generating embeddings")):
-        node_embedding = get_embedding(node['description'])
-        if node_embedding is not None:
-            case_nodes_data[i]['embedding'] = node_embedding
-        else:
-            print(f"Failed to generate embedding for node {node['id']}")
+    case_nodes_data = nodes_data['case']
+    law_nodes_data = nodes_data['law']
+    crime_nodes_data = nodes_data['crime']
 
-    for i, node in enumerate(tqdm(law_nodes_data, desc="Generating embeddings")):
-        node_embedding = get_embedding(node['description'])
-        if node_embedding is not None:
-            law_nodes_data[i]['embedding'] = node_embedding
-        else:
-            print(f"Failed to generate embedding for node {node['id']}")
+    # Attempt fast batch encoding on GPU if CUDA is available
+    use_gpu_build = torch.cuda.is_available()
+    embedder_model_name = _embedding_model or "unsloth/embeddinggemma-300m"
 
-    for i, node in enumerate(tqdm(crime_nodes_data, desc="Generating embeddings")):
-        node_embedding = get_embedding(node['description'])
-        if node_embedding is not None:
-            crime_nodes_data[i]['embedding'] = node_embedding
-        else:
-            print(f"Failed to generate embedding for node {node['id']}")
+    if use_gpu_build:
+        print(f"[GraphConstruct] Acceleration: Encoding nodes with '{embedder_model_name}' on GPU (cuda:0, fp16)...")
+        try:
+            from sentence_transformers import SentenceTransformer
+            embedder = SentenceTransformer(
+                embedder_model_name,
+                device="cuda:0",
+                model_kwargs={"dtype": torch.float16}
+            )
+            embedder.max_seq_length = 512
 
-    # 存储节点和嵌入
+            # 1. Batch encode Cases
+            case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]
+            if case_texts:
+                case_embs = embedder.encode(case_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                for i, emb in enumerate(case_embs):
+                    case_nodes_data[i]['embedding'] = emb.tolist()
+
+            # 2. Batch encode Laws
+            law_texts = [str(n.get('description', ''))[:1500] for n in law_nodes_data]
+            if law_texts:
+                law_embs = embedder.encode(law_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                for i, emb in enumerate(law_embs):
+                    law_nodes_data[i]['embedding'] = emb.tolist()
+
+            # 3. Batch encode Crimes
+            crime_texts = [str(n.get('description', ''))[:1500] for n in crime_nodes_data]
+            if crime_texts:
+                crime_embs = embedder.encode(crime_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                for i, emb in enumerate(crime_embs):
+                    crime_nodes_data[i]['embedding'] = emb.tolist()
+
+            # Free GPU memory completely for Reranker and inference
+            del embedder
+            torch.cuda.empty_cache()
+            print("[GraphConstruct] Finished GPU batch encoding. Released GPU memory.")
+        except Exception as e:
+            print(f"[GraphConstruct] GPU batch encoding failed ({e}), falling back to sequential get_embedding...")
+            use_gpu_build = False
+
+    if not use_gpu_build:
+        # Fallback to sequential get_embedding (e.g. via HTTP Ollama)
+        for i, node in enumerate(tqdm(case_nodes_data, desc="Generating case embeddings")):
+            node_embedding = get_embedding(node['description'])
+            if node_embedding is not None:
+                case_nodes_data[i]['embedding'] = node_embedding
+
+        for i, node in enumerate(tqdm(law_nodes_data, desc="Generating law embeddings")):
+            node_embedding = get_embedding(node['description'])
+            if node_embedding is not None:
+                law_nodes_data[i]['embedding'] = node_embedding
+
+        for i, node in enumerate(tqdm(crime_nodes_data, desc="Generating crime embeddings")):
+            node_embedding = get_embedding(node['description'])
+            if node_embedding is not None:
+                crime_nodes_data[i]['embedding'] = node_embedding
+
+    # Store nodes and embeddings in graph DB
     store_nodes_with_embeddings(nodes_data)
 
-    # 运行KNN和聚类
+    # Run KNN and clustering
     run_knn(top_k=3)
     create_clusters(model)
