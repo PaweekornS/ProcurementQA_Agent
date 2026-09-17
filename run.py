@@ -157,12 +157,13 @@ def process_cases_worker(
 
 def run_evaluation(
     model_name: str,
-    datasets: str = "CAIL",
-    dotenv_path: str = ".env",
+    datasets: str = "THAI",
+    dotenv_path: str = "configs/thai_procurement.env",
     devices: Optional[List[str]] = None,
     datasets_path: str = "./datasets",
     build_graph: bool = True,
-    force_rebuild: bool = False
+    force_rebuild: bool = False,
+    limit: Optional[int] = None
 ):
     config = LegalGraphRAGConfig.from_env_file(dotenv_path)
     
@@ -192,6 +193,7 @@ def run_evaluation(
         build_config.model.model_name = model_name
         # run_evaluation controls graph construction explicitly below.
         build_config.graph.auto_build = False
+        build_config.graph.auto_save = False
         
         # Create LegalGraphRAG instance and build graph
         print(f"Using device {build_device} for graph construction...")
@@ -217,6 +219,9 @@ def run_evaluation(
     
     test_cases = load_test_cases(datasets, datasets_path)
     print(f"Loaded {len(test_cases)} test cases from {datasets} dataset")
+    if limit is not None and limit > 0:
+        test_cases = test_cases[:limit]
+        print(f"Limiting evaluation to first {len(test_cases)} test cases (--limit {limit})")
     
     if devices is None:
         if config.model.device and config.model.device != "auto":
@@ -332,7 +337,7 @@ if __name__ == "__main__":
         required=True,
         help="Model to use for analysis (e.g. openrouter, google/gemma-3-4b-it, qwen3, gpt4o_mini, etc.)",
     )
-    default_dotenv = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") and not os.path.exists(".env") else ".env"
+    default_dotenv = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") else ".env"
     parser.add_argument(
         "--dotenv_path",
         type=str,
@@ -343,7 +348,13 @@ if __name__ == "__main__":
         "--datasets",
         type=str,
         default="THAI",
-        help="Dataset name (e.g., CAIL)",
+        help="Dataset name (default: THAI)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="# of query to inference",
     )
     parser.add_argument(
         "--datasets_path",
@@ -380,5 +391,6 @@ if __name__ == "__main__":
         devices=args.devices,
         datasets_path=args.datasets_path if args.datasets_path else "./datasets",
         build_graph=not args.no_build_graph,
-        force_rebuild=args.force_rebuild
+        force_rebuild=args.force_rebuild,
+        limit=args.limit
     )

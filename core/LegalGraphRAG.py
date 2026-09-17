@@ -100,7 +100,7 @@ class LegalGraphRAGConfig:
     graph: GraphConfig = field(default_factory=GraphConfig)
     
     @classmethod
-    def from_env_file(cls, dotenv_path: str = ".env") -> "LegalGraphRAGConfig":
+    def from_env_file(cls, dotenv_path: str = None) -> "LegalGraphRAGConfig":
         """
         Load configuration from .env file
         
@@ -110,6 +110,8 @@ class LegalGraphRAGConfig:
         Returns:
             LegalGraphRAGConfig instance
         """
+        if dotenv_path is None:
+            dotenv_path = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") else ".env"
         from dotenv import load_dotenv
         # The selected experiment file is authoritative over inherited shell values.
         load_dotenv(dotenv_path=dotenv_path, override=True)
@@ -138,8 +140,8 @@ class LegalGraphRAGConfig:
         )
         model_config = ModelConfig(
             model_name=env_model_name,
-            device=os.getenv("device", "cuda:0"),
-            prompt_language=os.getenv("prompt_language", "en"),
+            device=os.getenv("device", "cpu"),
+            prompt_language=os.getenv("prompt_language", "th"),
             api_key=env_api_key,
             base_url=env_base_url,
             max_length=int(os.getenv("max_length", 4096)),
@@ -147,13 +149,13 @@ class LegalGraphRAGConfig:
         )
         
         # Data configuration
-        default_case_db = "./datas/thai_corpus/cases_with_feature.json" if os.path.exists("./datas/thai_corpus/cases_with_feature.json") else "./datas/cases_with_feature.json"
-        default_law_to_crime = "./datas/thai_corpus/law_to_crime.json" if os.path.exists("./datas/thai_corpus/law_to_crime.json") else "./datas/law_to_crime.json"
+        default_case_db = "./datas/thai_corpus/cases_with_feature.json"
+        default_law_to_crime = "./datas/thai_corpus/law_to_crime.json"
         data_config = DataConfig(
             case_db_path=os.getenv("case_db_path", default_case_db),
             law_to_crime_path=os.getenv("law_to_crime_path", default_law_to_crime),
-            datasets_path=os.getenv("datasets_path"),
-            output_dir=os.getenv("output_dir", "./outputs")
+            datasets_path=os.getenv("datasets_path", "./datasets"),
+            output_dir=os.getenv("output_dir", "./outputs/thai_procurement")
         )
         
         # Retrieval configuration
@@ -411,6 +413,10 @@ class LegalGraphRAG:
         save_path = filepath or self.config.graph.graph_db_path
         if not save_path:
             raise ValueError("Graph database path not specified")
+        db = GraphDBManager.get_db()
+        if len(db.nodes_data) == 0 and os.path.exists(save_path) and os.path.getsize(save_path) > 1000:
+            print(f"Warning: Attempted to save empty graph database over existing file ({save_path}). Aborting save.")
+            return
         GraphDBManager.save(save_path)
         print(f"Graph database saved to {save_path}")
     
@@ -582,6 +588,8 @@ class LegalGraphRAG:
         """Destructor, auto-save graph database"""
         if hasattr(self, 'config') and self.config.graph.auto_save and self.config.graph.graph_db_path:
             try:
-                self.save_graph_db()
+                db = GraphDBManager.get_db()
+                if len(db.nodes_data) > 0:
+                    self.save_graph_db()
             except Exception as e:
                 print(f"Failed to auto-save graph database: {e}")

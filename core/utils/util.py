@@ -33,15 +33,39 @@ def filter_facts(retrieved_laws, retrieved_facts):
     return filtered_facts
 
 
-def concat_feature_descriptions(description):
-    res = ""
-    res += "被告信息：" + ", ".join(description.get("defendant_info", [])) + "。"
-    res += "犯罪行为：" + ", ".join(description.get("criminal_acts", [])) + "。"
-    res += "犯罪对象特征：" + \
-        ", ".join(description.get("victim_property_details", [])) + "。"
-    res += "犯罪意图及悔罪表现：" + \
-        ", ".join(description.get("intent_remorse", [])) + "。"
-    return res
+def concat_feature_descriptions(description, raw_text=""):
+    """
+    Concat feature descriptions for retrieval query.
+    Extracts key procurement points in Thai and combines with original query text for optimal BM25/Dense matching.
+    """
+    if isinstance(description, str):
+        return description.strip()
+
+    parts = []
+    # Primary procurement issues
+    criminal_acts = description.get("criminal_acts", [])
+    if criminal_acts:
+        parts.append("ประเด็น: " + ", ".join(str(x) for x in criminal_acts))
+
+    # Procurement object, items, TOR, or budget
+    victim_property = description.get("victim_property_details", [])
+    if victim_property:
+        parts.append("พัสดุ/ขอบเขต: " + ", ".join(str(x) for x in victim_property))
+
+    # Intent, conditions, or exceptions
+    intent = description.get("intent_remorse", [])
+    if intent:
+        parts.append("เงื่อนไข: " + ", ".join(str(x) for x in intent))
+
+    # Defendant / entity info
+    defendant = description.get("defendant_info", [])
+    if defendant:
+        parts.append("หน่วยงาน/ผู้เกี่ยวข้อง: " + ", ".join(str(x) for x in defendant))
+
+    feature_summary = " | ".join(parts)
+    if raw_text and raw_text.strip():
+        return f"{raw_text.strip()}\n{feature_summary}" if feature_summary else raw_text.strip()
+    return feature_summary if feature_summary else str(raw_text)
 
 
 def retrieve_law(chatbot, case):
@@ -61,11 +85,14 @@ def retrieve_law(chatbot, case):
 
 
 def retrieve(chatbot, cases, law_to_crime, cases_db, retrieve_config):
-    features = cases["feature"]
+    features = cases.get("feature", {})
+    query_text = concat_feature_descriptions(features, raw_text=cases.get("description", ""))
     original_retrieved_res, retrieved_facts, retrieved_laws = query_similar_nodes(
-        chatbot, concat_feature_descriptions(features), retrieve_config)
+        chatbot, query_text, retrieve_config)
 
-    if not retrieved_facts:
+    # In Thai Procurement domain, knowledge base is predominantly statutory Laws (2,486 nodes)
+    # alongside FAQ cases (29 nodes). Proceed if either laws or facts are retrieved.
+    if not retrieved_facts and not retrieved_laws:
         return {}, [], []
 
     augmented_laws = []
@@ -109,9 +136,10 @@ def retrieve(chatbot, cases, law_to_crime, cases_db, retrieve_config):
 
 
 def naive_retrieve(chatbot, cases, law_to_crime, cases_db):
-    features = cases["feature"]
+    features = cases.get("feature", {})
+    query_text = concat_feature_descriptions(features, raw_text=cases.get("description", ""))
     retrieved_facts = query_similar_nodes_naive(
-        chatbot, concat_feature_descriptions(features), top_k=5)
+        chatbot, query_text, top_k=5)
 
     if not retrieved_facts:
         return None, None
@@ -176,16 +204,8 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config):
             item["used_facts"] = []
             continue
             
-        law_used = []
-        for law in retrieved_laws:
-            used, _ = judge_law(
-                chatbot, item['description'], law)
-            if used:
-                law_used.append(law)
-        
-        # If no laws confirmed by judge_law, fall back to top retrieved laws
-        if not law_used and retrieved_laws:
-            law_used = retrieved_laws[:3]
+        # Use top reranked laws (up to 5) directly for procurement legal reasoning
+        law_used = retrieved_laws[:5]
             
         fact_used = filter_facts(law_used, retrieved_facts) if retrieved_facts else []
         judge_result = judge_crime_all(

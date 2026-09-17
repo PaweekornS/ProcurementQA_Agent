@@ -816,62 +816,65 @@ def query_similar_nodes(model, query_text, retrieve_config):
     result_laws = []
     seen_ids_laws = set()  # 用于去重
 
-    # 处理 search_similar_nodes_top 的结果
-    if top_result_cases:  # 确保前三个元素不为None
-        neighbors = top_result_cases
-        for neighbor in neighbors:
-            if neighbor['id'] and neighbor['id'] not in seen_ids_cases:
-                result_cases.append({
-                    'id': neighbor['id'],
-                    'description': neighbor['description'],
-                    'caseId': neighbor['caseId'],
-                    'rank': neighbor['rank']
-                })
-                seen_ids_cases.add(neighbor['id'])
-
-    # 处理 search_similar_nodes_top 的结果
-    if top_result_laws:  # 确保前三个元素不为None
-        neighbors = top_result_laws
-        for neighbor in neighbors:
-            if neighbor['id'] and neighbor['id'] not in seen_ids_laws:
+    # 1. Process search_similar_nodes_direct first (BM25 + Dense + GPU Reranker)
+    if direct_result_laws:
+        for neighbor in direct_result_laws:
+            if neighbor.get('id') and neighbor['id'] not in seen_ids_laws:
                 result_laws.append({
                     'id': neighbor['id'],
-                    'entry': neighbor['entry'],
-                    'description': neighbor['description'],
-                    'crimes': neighbor['crimes'],
-                    'judge_dep': neighbor['judge_dep'],
-                    'related_laws': neighbor['related_laws'],
+                    'entry': neighbor.get('entry', ''),
+                    'description': neighbor.get('description', ''),
+                    'crimes': neighbor.get('crimes', []),
+                    'judge_dep': neighbor.get('judge_dep', []),
+                    'related_laws': neighbor.get('related_laws', []),
+                    'rerank_score': neighbor.get('rerank_score', 0.0)
                 })
                 seen_ids_laws.add(neighbor['id'])
 
-    # 处理 search_similar_nodes_direct 的结果
-    if direct_result_cases:  # 确保前三个元素不为None
-        neighbors = direct_result_cases
-        # 添加邻居节点
-        for neighbor in neighbors:
-            if neighbor['id'] and neighbor['id'] not in seen_ids_cases:
+    # 2. Process search_similar_nodes_top (cluster-level graph traversal)
+    if top_result_laws:
+        for neighbor in top_result_laws:
+            if neighbor.get('id') and neighbor['id'] not in seen_ids_laws:
+                result_laws.append({
+                    'id': neighbor['id'],
+                    'entry': neighbor.get('entry', ''),
+                    'description': neighbor.get('description', ''),
+                    'crimes': neighbor.get('crimes', []),
+                    'judge_dep': neighbor.get('judge_dep', []),
+                    'related_laws': neighbor.get('related_laws', []),
+                    'rerank_score': neighbor.get('rerank_score', 0.0)
+                })
+                seen_ids_laws.add(neighbor['id'])
+
+    result_laws.sort(key=lambda x: x.get('rerank_score', 0.0), reverse=True)
+
+    # 3. Process direct cases
+    if direct_result_cases:
+        for idx, neighbor in enumerate(direct_result_cases):
+            if neighbor.get('id') and neighbor['id'] not in seen_ids_cases:
                 result_cases.append({
                     'id': neighbor['id'],
-                    'description': neighbor['description'],
-                    'caseId': neighbor['caseId'],
-                    'rank': neighbor['rank']
+                    'description': neighbor.get('description', ''),
+                    'caseId': neighbor.get('caseId', ''),
+                    'rank': neighbor.get('rank', idx + 1),
+                    'rerank_score': neighbor.get('rerank_score', 0.0)
                 })
                 seen_ids_cases.add(neighbor['id'])
 
-    # 处理 search_similar_nodes_direct 的结果
-    if direct_result_laws:  # 确保前三个元素不为None
-        neighbors = direct_result_laws
-        for neighbor in neighbors:
-            if neighbor['id'] and neighbor['id'] not in seen_ids_laws:
-                result_laws.append({
+    # 4. Process top cases
+    if top_result_cases:
+        for idx, neighbor in enumerate(top_result_cases):
+            if neighbor.get('id') and neighbor['id'] not in seen_ids_cases:
+                result_cases.append({
                     'id': neighbor['id'],
-                    'entry': neighbor['entry'],
-                    'description': neighbor['description'],
-                    'crimes': neighbor['crimes'],
-                    'judge_dep': neighbor['judge_dep'],
-                    'related_laws': neighbor['related_laws'],
+                    'description': neighbor.get('description', ''),
+                    'caseId': neighbor.get('caseId', ''),
+                    'rank': neighbor.get('rank', idx + 1),
+                    'rerank_score': neighbor.get('rerank_score', 0.0)
                 })
-                seen_ids_laws.add(neighbor['id'])
+                seen_ids_cases.add(neighbor['id'])
+
+    result_cases.sort(key=lambda x: x.get('rerank_score', 0.0), reverse=True)
     original_retrieved_res = {
         "top": {
             "clusters": top_result_clusters,
