@@ -9,6 +9,7 @@ and relevance gating for LegalGraphRAG.
 
 import os
 import re
+import threading
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 
@@ -111,6 +112,7 @@ class GPUReranker:
         self.threshold = threshold
         self.device = self._resolve_device(device)
         self.model: Optional[CrossEncoder] = None
+        self._lock = threading.Lock()
         self._init_model()
 
     @staticmethod
@@ -138,7 +140,8 @@ class GPUReranker:
         if not self.model:
             return 1.0
         try:
-            return float(self.model.predict([(query, text)])[0])
+            with self._lock:
+                return float(self.model.predict([(query, text)])[0])
         except Exception:
             return 1.0
 
@@ -173,7 +176,8 @@ class GPUReranker:
             return candidates[:top_k]
 
         try:
-            scores = self.model.predict(pairs)
+            with self._lock:
+                scores = self.model.predict(pairs)
         except Exception as e:
             print(f"[GPUReranker] Error during reranking: {e}")
             return candidates[:top_k]

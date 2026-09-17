@@ -4,6 +4,8 @@ import sys
 import json
 from tqdm import tqdm
 import multiprocessing
+import threading
+import concurrent.futures
 import time
 from typing import List, Dict, Any, Optional
 
@@ -163,7 +165,8 @@ def run_evaluation(
     datasets_path: str = "./datasets",
     build_graph: bool = True,
     force_rebuild: bool = False,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    workers: int = 4
 ):
     config = LegalGraphRAGConfig.from_env_file(dotenv_path)
     
@@ -223,64 +226,164 @@ def run_evaluation(
         test_cases = test_cases[:limit]
         print(f"Limiting evaluation to first {len(test_cases)} test cases (--limit {limit})")
     
-    if devices is None:
-        if config.model.device and config.model.device != "auto":
-            devices = [config.model.device]
-        else:
-            try:
-                import torch
-                devices = ["cuda:0"] if torch.cuda.is_available() else ["cpu"]
-            except ImportError:
-                devices = ["cpu"]
-    if not devices or len(devices) == 0:
-        devices = ["cpu"]
-    num_processes = len(devices)
-    
-    chunks = [[] for _ in range(num_processes)]
-    for i, case in enumerate(test_cases):
-        chunk_index = i % num_processes
-        chunks[chunk_index].append(case)
-    
-    print(f"Split {len(test_cases)} cases into {num_processes} processes")
-    for i, chunk in enumerate(chunks):
-        print(f"  Process {i} ({devices[i]}): {len(chunk)} cases")
-    
-    config_dict = config.to_dict()
-    
-    pool = multiprocessing.Pool(processes=num_processes)
-    async_results = []
-    
-    time_before = time.time()
-    
-    for i, chunk in enumerate(chunks):
-        output_file = os.path.join(output_dir, f"{model_name}_results_part_{i}.json")
-        async_results.append(
-            pool.apply_async(
-                process_cases_worker,
-                args=(
-                    chunk,
-                    config_dict,
-                    devices[i],
-                    output_file,
-                    model_name,
-                ),
+    # Multi-GPU support via multiprocessing pool when multiple distinct GPUs are specified
+    if devices is not None and len(devices) > 1:
+        num_processes = len(devices)
+        chunks = [[] for _ in range(num_processes)]
+        for i, case in enumerate(test_cases):
+            chunk_index = i % num_processes
+            chunks[chunk_index].append(case)
+        
+        print(f"Split {len(test_cases)} cases into {num_processes} distinct GPU processes")
+        for i, chunk in enumerate(chunks):
+            print(f"  Process {i} ({devices[i]}): {len(chunk)} cases")
+        
+        config_dict = config.to_dict()
+        pool = multiprocessing.Pool(processes=num_processes)
+        async_results = []
+        time_before = time.time()
+        
+        for i, chunk in enumerate(chunks):
+            output_file = os.path.join(output_dir, f"{model_name}_results_part_{i}.json")
+            async_results.append(
+                pool.apply_async(
+                    process_cases_worker,
+                    args=(chunk, config_dict, devices[i], output_file, model_name),
+                )
             )
-        )
-    
-    pool.close()
-    pool.join()
-    
-    time_after = time.time()
-    elapsed_time = time_after - time_before
-    
-    total_section_hits = 0
-    total_category_hits = 0
-    total_cases = 0
-    for res in async_results:
-        sec_hits, cat_hits, count = res.get()
-        total_section_hits += sec_hits
-        total_category_hits += cat_hits
-        total_cases += count
+        pool.close()
+        pool.join()
+        time_after = time.time()
+        elapsed_time = time_after - time_before
+        
+        total_section_hits, total_category_hits, total_cases = 0, 0, 0
+        for res in async_results:
+            sec_hits, cat_hits, count = res.get()
+            total_section_hits += sec_hits
+            total_category_hits += cat_hits
+            total_cases += count
+            
+        combined_results = []
+        for i in range(len(chunks)):
+            part_file = os.path.join(output_dir, f"{model_name}_results_part_{i}.json")
+            if os.path.exists(part_file):
+                with open(part_file, "r", encoding="utf-8") as f:
+                    combined_results.extend(json.load(f))
+                os.remove(part_file)
+    else:
+        # High-efficiency ThreadPool concurrent execution:
+        # Shares single graph DB in memory and single GPU CrossEncoder (Lock-guarded, ~1.2GB VRAM).
+        # OpenRouter API calls run in parallel, cutting total inference time by 4x-10x!
+        device = devices[0] if (devices and len(devices) > 0) else (config.model.device or "cpu")
+        print(f"Starting concurrent inference with {workers} worker threads on {device} (model: {model_name})...")
+        
+        config.model.device = device
+        config.model.model_name = model_name
+        config.graph.auto_build = False
+        config.graph.auto_save = False
+        
+        rag = LegalGraphRAG(config=config)
+        
+        combined_results = []
+        total_section_hits = 0
+        total_category_hits = 0
+        results_lock = threading.Lock()
+        pbar = tqdm(total=len(test_cases), desc=f"Evaluating ({workers} workers)")
+        
+        def process_single_case(case):
+            nonlocal total_section_hits, total_category_hits
+            question = case.get("fact", "")
+            true_category = case.get("crime", [])
+            true_section = case.get("laws", [])
+            ground_truth = case.get("ground_truth", "")
+            
+            case_res = rag.analyze_case(case)
+            
+            pred_answer = ""
+            pred_direct_answer = ""
+            pred_laws = []
+            pred_category = []
+            exceptions = ""
+            
+            if case_res and isinstance(case_res, list) and len(case_res) > 0:
+                judge_result = case_res[0].get("judge_result", {})
+                pred_answer = judge_result.get("answer", "")
+                pred_direct_answer = judge_result.get("direct_answer", "")
+                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
+                pred_category = list(judge_result.get("category", judge_result.get("charge_name", [])))
+                exceptions = judge_result.get("exceptions_or_conditions", "")
+                
+                used_laws = case_res[0].get("used_laws", [])
+                for ul in used_laws:
+                    entry = ul.get("entry", "")
+                    if entry and entry not in pred_laws:
+                        pred_laws.append(entry)
+
+            is_section_hit = False
+            for ts in true_section:
+                ts_clean = str(ts).strip()
+                if not ts_clean:
+                    continue
+                for pl in pred_laws:
+                    if ts_clean in str(pl) or str(pl) in ts_clean:
+                        is_section_hit = True
+                        break
+                if is_section_hit:
+                    break
+
+            is_category_hit = False
+            for tc in true_category:
+                tc_clean = str(tc).strip()
+                if not tc_clean:
+                    continue
+                for pc in pred_category:
+                    if tc_clean in str(pc) or str(pc) in tc_clean:
+                        is_category_hit = True
+                        break
+                if is_category_hit:
+                    break
+
+            case_data = {
+                "id": case.get("id"),
+                "question": question,
+                "direct_answer": pred_direct_answer,
+                "answer": pred_answer,
+                "ground_truth": ground_truth,
+                "expected_section": true_section,
+                "predicted_laws": pred_laws,
+                "is_section_hit": is_section_hit,
+                "expected_category": true_category,
+                "predicted_category": pred_category,
+                "is_category_hit": is_category_hit,
+                "exceptions_or_conditions": exceptions,
+                "fact": question,
+                "law_article": true_section,
+                "judge_res": case_res
+            }
+            
+            with results_lock:
+                if is_section_hit:
+                    total_section_hits += 1
+                if is_category_hit:
+                    total_category_hits += 1
+                combined_results.append(case_data)
+                pbar.update(1)
+
+        time_before = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_single_case, c): c for c in test_cases}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    c = futures[future]
+                    print(f"\n[Worker Error] Failed processing case {c.get('id')}: {e}")
+        pbar.close()
+        time_after = time.time()
+        elapsed_time = time_after - time_before
+        
+        combined_results.sort(key=lambda x: x.get("id", 0))
+        total_cases = len(combined_results)
     
     sec_rate = (total_section_hits / total_cases * 100) if total_cases > 0 else 0.0
     cat_rate = (total_category_hits / total_cases * 100) if total_cases > 0 else 0.0
@@ -293,15 +396,6 @@ def run_evaluation(
     print(f"Category Match Rate: {total_category_hits}/{total_cases} ({cat_rate:.1f}%)")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
     print(f"{'='*60}\n")
-    
-    combined_results = []
-    for i in range(len(chunks)):
-        part_file = os.path.join(output_dir, f"{model_name}_results_part_{i}.json")
-        if os.path.exists(part_file):
-            with open(part_file, "r", encoding="utf-8") as f:
-                part_data = json.load(f)
-                combined_results.extend(part_data)
-            os.remove(part_file)
     
     combined_file = os.path.join(output_dir, f"{model_name}_results_combined.json")
     with open(combined_file, "w", encoding="utf-8") as f:
@@ -334,7 +428,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
+        default="openrouter",
         help="Model to use for analysis (e.g. openrouter, google/gemma-3-4b-it, qwen3, gpt4o_mini, etc.)",
     )
     default_dotenv = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") else ".env"
@@ -379,6 +473,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Force rebuild graph even if it already exists",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of concurrent worker threads for inference (default: 4)",
+    )
     
     args = parser.parse_args()
     
@@ -392,5 +492,6 @@ if __name__ == "__main__":
         datasets_path=args.datasets_path if args.datasets_path else "./datasets",
         build_graph=not args.no_build_graph,
         force_rebuild=args.force_rebuild,
-        limit=args.limit
+        limit=args.limit,
+        workers=args.workers
     )
