@@ -207,6 +207,10 @@ class InMemoryGraphDB:
     
     def save(self, filepath: str):
         """Save graph data to file"""
+        if len(self.nodes_data) == 0 and os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+            print(f"Warning: InMemoryGraphDB has 0 nodes. Refusing to overwrite existing file: {filepath}")
+            return
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         data = {
             'graph': self.graph,
             'nodes_data': self.nodes_data,

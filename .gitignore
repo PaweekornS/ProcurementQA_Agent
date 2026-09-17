@@ -57,11 +57,12 @@ env/
 
 # Project specific
 .env
+*.env
+configs/thai_procurement.env
 *.pkl
 *.pickle
 outputs/
 procurement_data/
-configs/
 
 # Jupyter Notebook
 .ipynb_checkpoints
