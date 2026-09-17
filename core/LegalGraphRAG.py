@@ -51,8 +51,8 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     """Data path configuration"""
-    case_db_path: str = "./datas/thai_corpus/cases_with_feature.json" if os.path.exists("./datas/thai_corpus/cases_with_feature.json") else "./datas/cases_with_feature.json"
-    law_to_crime_path: str = "./datas/thai_corpus/law_to_crime.json" if os.path.exists("./datas/thai_corpus/law_to_crime.json") else "./datas/law_to_crime.json"
+    case_db_path: str = "./datas/cases_with_feature.json"
+    law_to_crime_path: str = "./datas/law_to_crime.json"
     datasets_path: Optional[str] = None  # Dataset root directory
     output_dir: str = "./outputs"
     
@@ -149,13 +149,13 @@ class LegalGraphRAGConfig:
         )
         
         # Data configuration
-        default_case_db = "./datas/thai_corpus/cases_with_feature.json"
-        default_law_to_crime = "./datas/thai_corpus/law_to_crime.json"
+        default_case_db = "./datas/cases_with_feature.json"
+        default_law_to_crime = "./datas/law_to_crime.json"
         data_config = DataConfig(
             case_db_path=os.getenv("case_db_path", default_case_db),
             law_to_crime_path=os.getenv("law_to_crime_path", default_law_to_crime),
             datasets_path=os.getenv("datasets_path", "./datasets"),
-            output_dir=os.getenv("output_dir", "./outputs/thai_procurement")
+            output_dir=os.getenv("output_dir", "./outputs")
         )
         
         # Retrieval configuration

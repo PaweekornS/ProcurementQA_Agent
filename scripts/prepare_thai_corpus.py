@@ -439,7 +439,7 @@ def main():
     parser.add_argument("--chunks_file", type=str, default="", help="Optional path to precomputed chunks.json")
     parser.add_argument("--typhoon_dir", type=str, default="", help="Path to typhoon_ocr directory")
     parser.add_argument("--faq_file", type=str, default="", help="Path to FAQ_กรมบัญชีกลาง.xlsx")
-    parser.add_argument("--output_dir", type=str, default="./datas/thai_corpus", help="Output directory for corpus files")
+    parser.add_argument("--output_dir", type=str, default="./datas", help="Output directory for corpus files")
     parser.add_argument("--datasets_dir", type=str, default="./datasets", help="Output directory for test datasets")
     args = parser.parse_args()
 
