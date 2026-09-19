@@ -1,5 +1,6 @@
 import os
 import hashlib
+import threading
 import numpy as np
 import requests
 import re
@@ -567,6 +568,7 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
 
 
 _bm25_initialized = False
+_bm25_build_lock = threading.Lock()
 
 
 def _ensure_bm25_index(db):
@@ -575,32 +577,35 @@ def _ensure_bm25_index(db):
     if _bm25_initialized:
         return
 
-    try:
-        from .hybrid_reranker import get_bm25_index
-        bm25_idx = get_bm25_index()
-        docs = []
-        for node_id, node_info in db.nodes_data.items():
-            ntype = node_info.get('type')
-            data = node_info.get('data', {})
-            if ntype in ('Laws', 'Cases'):
-                # Gather descriptive text
-                text = data.get('description', '')
-                if ntype == 'Laws':
-                    entry = data.get('entry', '')
-                    if entry:
-                        text = f"{entry}\n{text}"
-                docs.append({
-                    'id': node_id,
-                    'type': ntype,
-                    'text': text,
-                    'data': data
-                })
-        if docs:
-            bm25_idx.build_index(docs)
-            print(f"[HybridRetrieval] Built Thai BM25 index with {len(docs)} legal and case nodes.")
-        _bm25_initialized = True
-    except Exception as e:
-        print(f"[HybridRetrieval] Could not initialize BM25 index: {e}")
+    with _bm25_build_lock:
+        if _bm25_initialized:
+            return
+        try:
+            from .hybrid_reranker import get_bm25_index
+            bm25_idx = get_bm25_index()
+            docs = []
+            for node_id, node_info in db.nodes_data.items():
+                ntype = node_info.get('type')
+                data = node_info.get('data', {})
+                if ntype in ('Laws', 'Cases'):
+                    # Gather descriptive text
+                    text = data.get('description', '')
+                    if ntype == 'Laws':
+                        entry = data.get('entry', '')
+                        if entry:
+                            text = f"{entry}\n{text}"
+                    docs.append({
+                        'id': node_id,
+                        'type': ntype,
+                        'text': text,
+                        'data': data
+                    })
+            if docs:
+                bm25_idx.build_index(docs)
+                print(f"[HybridRetrieval] Built Thai BM25 index with {len(docs)} legal and case nodes.")
+            _bm25_initialized = True
+        except Exception as e:
+            print(f"[HybridRetrieval] Could not initialize BM25 index: {e}")
 
 
 def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
