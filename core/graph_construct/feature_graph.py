@@ -683,11 +683,13 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
     )
 
     # 4. GPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
+    # Optimization: Filter candidate pool to top 16 before reranking to dramatically reduce CrossEncoder overhead
+    rerank_pool = fused_candidates[:16]
     reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
     if reranker and reranker.model is not None:
         top_candidates = reranker.rerank(
             query_text,
-            fused_candidates,
+            rerank_pool,
             top_k=top_k,
             threshold=reranker_thresh
         )
@@ -1004,21 +1006,21 @@ def construct_feature_graph(model, nodes_data):
             # 1. Batch encode Cases
             case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]
             if case_texts:
-                case_embs = embedder.encode(case_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                case_embs = embedder.encode(case_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
                 for i, emb in enumerate(case_embs):
                     case_nodes_data[i]['embedding'] = emb.tolist()
 
             # 2. Batch encode Laws
             law_texts = [str(n.get('description', ''))[:1500] for n in law_nodes_data]
             if law_texts:
-                law_embs = embedder.encode(law_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                law_embs = embedder.encode(law_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
                 for i, emb in enumerate(law_embs):
                     law_nodes_data[i]['embedding'] = emb.tolist()
 
             # 3. Batch encode Crimes
             crime_texts = [str(n.get('description', ''))[:1500] for n in crime_nodes_data]
             if crime_texts:
-                crime_embs = embedder.encode(crime_texts, batch_size=32, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                crime_embs = embedder.encode(crime_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
                 for i, emb in enumerate(crime_embs):
                     crime_nodes_data[i]['embedding'] = emb.tolist()
 
