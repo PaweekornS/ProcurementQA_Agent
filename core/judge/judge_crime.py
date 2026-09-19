@@ -1,4 +1,5 @@
 import json
+import re
 from core.prompt import get_prompt
 
 
@@ -69,16 +70,48 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
 
     response = chatbot.generate_response(full_prompt, max_length=4096)
     
-    try:
-        first = response.find('{')
-        last = response.rfind('}') + 1
-        if first != -1 and last != -1:
-            parsed = json.loads(response[first:last])
-        else:
-            parsed = {"answer": response.strip()}
-    except Exception as e:
-        print(f"Error parsing JSON response: {e}")
-        parsed = {"answer": response.strip()}
+    # Robust LLM JSON parsing
+    parsed = {}
+    cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+    
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    
+    if first != -1 and last != -1 and last > first:
+        json_str = cleaned[first:last + 1]
+        try:
+            parsed = json.loads(json_str)
+        except Exception:
+            # Try repairing common LLM trailing commas: e.g. [1, 2,] or {"a": 1,}
+            fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
+            try:
+                parsed = json.loads(fixed)
+            except Exception:
+                pass
+                
+    if not parsed or not isinstance(parsed, dict):
+        # Fallback: regex field extraction if json is broken or truncated
+        parsed = {}
+        m_dir = re.search(r'["\']direct_answer["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
+        if m_dir:
+            parsed["direct_answer"] = m_dir.group(1).strip()
+            
+        m_ans = re.search(r'["\']answer["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
+        if m_ans:
+            parsed["answer"] = m_ans.group(1).strip()
+            
+        m_laws = re.search(r'["\']applicable_laws["\']\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
+        if m_laws:
+            parsed["applicable_laws"] = [s.strip(" \"'\n\r") for s in m_laws.group(1).split(",") if s.strip(" \"'\n\r")]
+            
+        m_cat = re.search(r'["\']category["\']\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
+        if m_cat:
+            parsed["category"] = [s.strip(" \"'\n\r") for s in m_cat.group(1).split(",") if s.strip(" \"'\n\r")]
+            
+        if not parsed.get("answer"):
+            parsed["answer"] = cleaned
 
     # Guarantee QA fields
     if "direct_answer" not in parsed:
