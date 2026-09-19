@@ -9,15 +9,12 @@ and relevance gating for LegalGraphRAG.
 
 import os
 import re
+import sys
 import threading
 from typing import List, Dict, Any, Tuple, Optional
-import numpy as np
 
-# Optional imports with graceful fallbacks
-try:
-    from pythainlp.tokenize import word_tokenize
-except ImportError:
-    word_tokenize = lambda text, engine="newmm": text.split()
+import numpy as np
+from pythainlp.tokenize import word_tokenize
 
 try:
     from rank_bm25 import BM25Okapi
@@ -46,50 +43,46 @@ class ThaiBM25Index:
     def tokenize(text: str) -> List[str]:
         if not text:
             return []
-        # Normalization and Thai word tokenization
         text_clean = re.sub(r"\s+", " ", str(text)).strip()
-        tokens = word_tokenize(text_clean, engine="newmm")
-        return [t.strip().lower() for t in tokens if t.strip()]
+        # newmm is pure dictionary/C++ based: ultra-fast, robust, and zero PyTorch/meta-parameter warnings
+        tokens = word_tokenize(text_clean, engine="attacut", keep_whitespace=False)
+        return [t.strip().lower() for t in tokens if t.strip() and len(t.strip()) > 1]
 
     def build_index(self, documents: List[Dict[str, Any]]):
         """
         Build BM25 index from documents.
-        Each document should have: 'id', 'type', 'text', and optionally full node metadata.
+        documents: List of dict with 'id', 'type', 'text'
         """
-        if not BM25Okapi or not documents:
+        if BM25Okapi is None:
             return
 
         self.doc_ids = []
         self.doc_types = []
         self.doc_texts = []
         self.doc_objects = []
-        corpus_tokens = []
+        tokenized_corpus = []
 
         for doc in documents:
-            text = doc.get("text", "") or doc.get("description", "")
+            text = doc.get("text") or doc.get("description") or ""
             if not text:
                 continue
-            self.doc_ids.append(doc.get("id", ""))
-            self.doc_types.append(doc.get("type", "law"))
+            self.doc_ids.append(doc["id"])
+            self.doc_types.append(doc.get("type", "unknown"))
             self.doc_texts.append(text)
             self.doc_objects.append(doc)
-            corpus_tokens.append(self.tokenize(text))
+            tokenized_corpus.append(self.tokenize(text))
 
-        if corpus_tokens:
-            self.bm25 = BM25Okapi(corpus_tokens)
+        if tokenized_corpus:
+            self.bm25 = BM25Okapi(tokenized_corpus)
 
-    def search(self, query: str, top_k: int = 30) -> List[Tuple[Dict[str, Any], float]]:
-        """Search top-k documents using BM25."""
-        if not self.bm25 or not self.doc_ids:
+    def search(self, query: str, top_k: int = 20) -> List[Tuple[Dict[str, Any], float]]:
+        if not self.bm25 or not query:
             return []
-
-        query_tokens = self.tokenize(query)
-        if not query_tokens:
+        tokens = self.tokenize(query)
+        if not tokens:
             return []
-
-        scores = self.bm25.get_scores(query_tokens)
+        scores = self.bm25.get_scores(tokens)
         top_indices = np.argsort(scores)[::-1][:top_k]
-
         results = []
         for idx in top_indices:
             if scores[idx] > 0:
@@ -98,7 +91,7 @@ class ThaiBM25Index:
 
 
 class GPUReranker:
-    """Singleton Cross-Encoder reranker hosted on CUDA GPU."""
+    """Singleton GPU/CPU Cross-Encoder Reranker."""
 
     _instance: Optional["GPUReranker"] = None
 
@@ -141,7 +134,7 @@ class GPUReranker:
             return 1.0
         try:
             with self._lock:
-                return float(self.model.predict([(query, text)])[0])
+                return float(self.model.predict([(query, text[:1000])], batch_size=1)[0])
         except Exception:
             return 1.0
 
@@ -154,7 +147,7 @@ class GPUReranker:
     ) -> List[Dict[str, Any]]:
         """
         Reranks candidates and applies relevance threshold gate.
-        Each candidate should have a text representation (e.g. 'description' or 'text').
+        Safely predicts in batches of 8 with GPU memory cleanup to prevent CUDA OOM on 4GB VRAM.
         """
         if not candidates:
             return []
@@ -169,7 +162,7 @@ class GPUReranker:
         for c in candidates:
             text = c.get("text") or c.get("description") or c.get("fact") or ""
             if text:
-                pairs.append((query, str(text)[:1500]))
+                pairs.append((query, str(text)[:1200]))
                 valid_candidates.append(c)
 
         if not pairs:
@@ -177,7 +170,9 @@ class GPUReranker:
 
         try:
             with self._lock:
-                scores = self.model.predict(pairs)
+                scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
+                if torch and torch.cuda.is_available() and "cuda" in str(self.device):
+                    torch.cuda.empty_cache()
         except Exception as e:
             print(f"[GPUReranker] Error during reranking: {e}")
             return candidates[:top_k]

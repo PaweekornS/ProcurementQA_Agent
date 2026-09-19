@@ -14,7 +14,8 @@ def get_features(model, cases):
         formatted_input = f"\nคำถาม/ข้อหารือ: {fact}"
 
     prompt_formatted = get_prompt("GET_FEATURES_PROMPT") + formatted_input
-    response = model.generate_response(prompt_formatted)
+    # Fast extraction: 512 tokens is more than enough for 4-key JSON schema, prevents LLM stalling
+    response = model.generate_response(prompt_formatted, max_length=512)
     
     json_data = {}
     # Strip markdown code blocks if present

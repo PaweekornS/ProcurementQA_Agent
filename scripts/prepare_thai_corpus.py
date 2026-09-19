@@ -36,142 +36,362 @@ def find_file(relative_paths: List[str], base_dirs: List[str]) -> str:
     return ""
 
 
-def chunk_statute_markdown(
-    content: str,
+from pathlib import Path
+
+
+def clean_text(text: str) -> str:
+    """Normalize whitespace and remove excessive linebreaks."""
+    text = re.sub(r"\r\n|\r", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def extract_document_title(file_path: Path, content: str) -> str:
+    """Extract official title from markdown heading or filename stem."""
+    match = re.search(r"^#+\s+(.+)$", content, re.MULTILINE)
+    if match:
+        title = match.group(1).strip()
+        if len(title) < 5 or title in ["พระราชบัญญัติ", "ระเบียบ", "ประกาศ", "กฎกระทรวง", "หน้า"]:
+            return file_path.stem
+        return title
+    return file_path.stem
+
+
+def extract_major_structural_breaks(text: str) -> List[str]:
+    """Extract prominent structural headings (Schedules, Chapters, Tables, Forms) from text."""
+    breaks = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r"^#{1,3}\s+", s):
+            h = re.sub(r"^#{1,3}\s+", "", s).strip()
+            if not re.match(r"^หน้า\s*[0-9๐-๙]+$", h) and len(h) > 2:
+                breaks.append(h)
+        elif re.match(r"^(?:บัญชี(?:เอกสาร)?แนบท้าย|ตารางหลักเกณฑ์|ตารางแนบท้าย|หมวด\s*[๐-๙0-9]+|ส่วนที่\s*[๐-๙0-9]+|แบบสัญญา)", s):
+            breaks.append(s)
+    return breaks
+
+
+def build_group_chunk(
+    group: List[Dict[str, Any]],
+    file_path: Path,
     doc_title: str,
     category: str,
-    rel_source: str,
-    max_chunk_chars: int = 2500
+    rel_path: str,
+) -> Dict[str, Any]:
+    """Assemble a macro chunk from one or more contiguous pages belonging to the same legal section."""
+    pages_covered = [p["page_num"] for p in group]
+    start_page = pages_covered[0]
+    end_page = pages_covered[-1]
+    total_pages = group[0]["total_pages"]
+
+    all_sections = []
+    for p in group:
+        for s in p.get("sections", []):
+            if s not in all_sections:
+                all_sections.append(s)
+
+    first_header = ""
+    for p in group:
+        if p.get("headers"):
+            first_header = p["headers"][0]
+            break
+
+    if len(pages_covered) == 1:
+        page_str = f"หน้า {start_page}/{total_pages}" if total_pages > 0 else f"หน้า {start_page}"
+        chunk_id = f"{file_path.stem}_p{start_page}"
+    else:
+        page_str = f"หน้า {start_page}-{end_page}/{total_pages}" if total_pages > 0 else f"หน้า {start_page}-{end_page}"
+        chunk_id = f"{file_path.stem}_p{start_page}_p{end_page}"
+
+    heading_parts = [page_str]
+    if first_header:
+        heading_parts.append(f"[{first_header}]")
+    if all_sections:
+        heading_parts.append(f"[บทบัญญัติ: {', '.join(all_sections[:5])}]")
+
+    heading_str = " ".join(heading_parts)
+    merged_body = "\n\n".join(p["text"] for p in group)
+    chunk_text = f"[{doc_title} | {heading_str}]\n{merged_body}"
+
+    return {
+        "chunk_id": chunk_id,
+        "source_file": rel_path,
+        "category": category,
+        "heading": heading_str,
+        "doc_title": doc_title,
+        "page_num": start_page,
+        "pages_covered": pages_covered,
+        "total_pages": total_pages,
+        "sections_covered": all_sections,
+        "content": chunk_text,
+        "raw_text": merged_body,
+    }
+
+
+def chunk_legal_document(
+    file_path: Path,
+    max_macro_size: int = 8000,
+    max_pages_per_chunk: int = 4,
 ) -> List[Dict[str, Any]]:
     """
-    Splits Thai statute/procurement markdown by sections/articles (มาตรา / ข้อ / หมวด)
-    while keeping sub-paragraphs (วรรค / อนุมาตรา) together.
+    Split a Thai legal markdown document into structure-aware macro chunks.
+    Groups contiguous pages belonging to the same schedule, chapter, table, or section
+    up to max_macro_size (default 8,000 characters) while preserving page lineage and
+    statutory boundaries.
     """
-    # 1. Clean page markers and horizontal rules
-    cleaned = re.sub(r"<!--\s*Page\s+\d+\s+of\s+\d+\s*-->", "", content, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\n\s*---\s*\n", "\n", cleaned)
-    cleaned = re.sub(r"\r\n", "\n", cleaned)
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except Exception:
+        try:
+            content = file_path.read_text(encoding="utf-8-sig")
+        except Exception:
+            return []
 
-    # 2. Match section boundaries: มาตรา ..., ข้อ ..., หมวด ...
-    # Pattern detects lines starting with Section/Article/Chapter keywords
-    section_pattern = re.compile(r"(?m)^(?:#{1,4}\s*)?(มาตรา\s+[0-9๑-๙]+|ข้อ\s+[0-9๑-๙]+|หมวด\s+[0-9๑-๙]+|ส่วนที่\s+[0-9๑-๙]+)")
-    
-    splits = []
-    last_idx = 0
-    current_sec_label = ""
-    current_chapter = ""
-    
-    matches = list(section_pattern.finditer(cleaned))
-    
-    if not matches:
-        # Fallback: combine paragraphs into macro chunks of ~2000 chars
-        paragraphs = [p.strip() for p in cleaned.split("\n\n") if p.strip()]
-        cur_text = ""
-        chunk_num = 1
-        for p in paragraphs:
-            if len(cur_text) + len(p) > max_chunk_chars and cur_text:
-                splits.append({
-                    "text": cur_text.strip(),
-                    "section": f"ส่วนที่ {chunk_num}",
-                    "chapter": ""
-                })
-                cur_text = p + "\n\n"
-                chunk_num += 1
-            else:
-                cur_text += p + "\n\n"
-        if cur_text.strip():
-            splits.append({
-                "text": cur_text.strip(),
-                "section": f"ส่วนที่ {chunk_num}",
-                "chapter": ""
+    content = clean_text(content)
+    if not content:
+        return []
+
+    doc_title = extract_document_title(file_path, content)
+    category = file_path.parent.name
+    rel_path = str(file_path.name)
+
+    # 1. Primary Page Marker Pattern: <!-- Page X of Y -->
+    page_marker_pattern = re.compile(r"<!--\s*Page\s*(\d+)\s*of\s*(\d+)\s*-->", re.IGNORECASE)
+    page_matches = list(page_marker_pattern.finditer(content))
+
+    chunks: List[Dict[str, Any]] = []
+
+    if page_matches:
+        pages_data = []
+        for idx, match in enumerate(page_matches):
+            p_num = int(match.group(1))
+            total_pages = int(match.group(2))
+            start_pos = match.start()
+            end_pos = page_matches[idx + 1].start() if idx + 1 < len(page_matches) else len(content)
+
+            page_raw = content[start_pos:end_pos].strip()
+            clean_raw = re.sub(r"<!--\s*Page\s*\d+\s*of\s*\d+\s*-->", "", page_raw).strip()
+            if not clean_raw:
+                continue
+
+            sections = re.findall(r"(?:มาตรา|ข้อ)\s+[๐-๙0-9]+(?:\s*(?:ทวิ|ตรี|จัตวา|เบญจ))?", clean_raw)
+            unique_sections = []
+            for s in sections:
+                if s not in unique_sections:
+                    unique_sections.append(s)
+
+            headers = extract_major_structural_breaks(clean_raw)
+            pages_data.append({
+                "page_num": p_num,
+                "total_pages": total_pages,
+                "text": clean_raw,
+                "sections": unique_sections,
+                "headers": headers,
             })
+
+        curr_group = []
+        curr_len = 0
+
+        for p in pages_data:
+            has_major_new_section = False
+            if p["headers"]:
+                for h in p["headers"]:
+                    if any(k in h for k in ["บัญชีเอกสารแนบท้าย", "บัญชีแนบท้าย", "หมวด", "แบบสัญญา", "ตารางหลักเกณฑ์", "ตารางแนบท้าย"]):
+                        has_major_new_section = True
+                        break
+
+            can_merge = (
+                curr_group and
+                not has_major_new_section and
+                (curr_len + len(p["text"]) <= max_macro_size) and
+                (len(curr_group) < max_pages_per_chunk)
+            )
+
+            if can_merge:
+                curr_group.append(p)
+                curr_len += len(p["text"])
+            else:
+                if curr_group:
+                    chunks.append(build_group_chunk(curr_group, file_path, doc_title, category, rel_path))
+                curr_group = [p]
+                curr_len = len(p["text"])
+
+        if curr_group:
+            chunks.append(build_group_chunk(curr_group, file_path, doc_title, category, rel_path))
+
     else:
-        # Preamble before the first section match
-        if matches[0].start() > 0:
-            preamble = cleaned[:matches[0].start()].strip()
-            if len(preamble) > 100:
-                splits.append({
-                    "text": preamble,
-                    "section": "คำนำ/บททั่วไป",
-                    "chapter": ""
-                })
+        # Fallback for documents without <!-- Page X of Y --> markers
+        alt_page_pattern = re.compile(r"^(?:#+\s*)หน้า\s*([0-9๐-๙]+)", re.MULTILINE)
+        alt_matches = list(alt_page_pattern.finditer(content))
 
-        for i, m in enumerate(matches):
-            start = m.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(cleaned)
-            block = cleaned[start:end].strip()
-            header_text = m.group(1).strip()
+        if alt_matches:
+            pages_data = []
+            for idx, match in enumerate(alt_matches):
+                p_num_raw = match.group(1)
+                p_num = int(p_num_raw) if p_num_raw.isdigit() else idx + 1
+                start_pos = match.start()
+                end_pos = alt_matches[idx + 1].start() if idx + 1 < len(alt_matches) else len(content)
 
-            if "หมวด" in header_text:
-                current_chapter = header_text
-                # If block is short (just chapter title), keep chapter and continue
-                lines = block.split("\n")
-                if len(lines) <= 2:
+                page_raw = content[start_pos:end_pos].strip()
+                if not page_raw:
                     continue
 
-            sec_name = header_text if ("มาตรา" in header_text or "ข้อ" in header_text) else current_sec_label or header_text
-            
-            # If block is too large (> 3500 chars), split into sub-windows
-            if len(block) > 3500:
-                paras = [p.strip() for p in block.split("\n\n") if p.strip()]
-                sub_text = ""
-                sub_idx = 1
-                for p in paras:
-                    if len(sub_text) + len(p) > max_chunk_chars and sub_text:
-                        splits.append({
-                            "text": sub_text.strip(),
-                            "section": f"{sec_name} (ตอนที่ {sub_idx})",
-                            "chapter": current_chapter
-                        })
-                        sub_text = p + "\n\n"
-                        sub_idx += 1
-                    else:
-                        sub_text += p + "\n\n"
-                if sub_text.strip():
-                    splits.append({
-                        "text": sub_text.strip(),
-                        "section": f"{sec_name} (ตอนที่ {sub_idx})",
-                        "chapter": current_chapter
-                    })
+                headers = extract_major_structural_breaks(page_raw)
+                pages_data.append({
+                    "page_num": p_num,
+                    "total_pages": len(alt_matches),
+                    "text": page_raw,
+                    "sections": [],
+                    "headers": headers,
+                })
+
+            curr_group = []
+            curr_len = 0
+            for p in pages_data:
+                can_merge = (
+                    curr_group and
+                    (curr_len + len(p["text"]) <= max_macro_size) and
+                    (len(curr_group) < max_pages_per_chunk)
+                )
+                if can_merge:
+                    curr_group.append(p)
+                    curr_len += len(p["text"])
+                else:
+                    if curr_group:
+                        chunks.append(build_group_chunk(curr_group, file_path, doc_title, category, rel_path))
+                    curr_group = [p]
+                    curr_len = len(p["text"])
+
+            if curr_group:
+                chunks.append(build_group_chunk(curr_group, file_path, doc_title, category, rel_path))
+        else:
+            if len(content) <= max_macro_size:
+                chunks.append({
+                    "chunk_id": f"{file_path.stem}_p1",
+                    "source_file": rel_path,
+                    "category": category,
+                    "heading": doc_title,
+                    "doc_title": doc_title,
+                    "page_num": 1,
+                    "pages_covered": [1],
+                    "total_pages": 1,
+                    "sections_covered": [],
+                    "content": f"[{doc_title}]\n{content}",
+                    "raw_text": content,
+                })
             else:
-                if len(block) > 40:  # ignore tiny artifact lines
-                    splits.append({
-                        "text": block,
-                        "section": sec_name,
-                        "chapter": current_chapter
+                paragraphs = content.split("\n\n")
+                curr_parts = []
+                curr_len = 0
+                part_idx = 1
+                for p in paragraphs:
+                    p = p.strip()
+                    if not p:
+                        continue
+                    if curr_len + len(p) > max_macro_size and curr_parts:
+                        sub_text = "\n\n".join(curr_parts)
+                        heading_str = f"ส่วนที่ {part_idx}"
+                        chunks.append({
+                            "chunk_id": f"{file_path.stem}_p{part_idx}",
+                            "source_file": rel_path,
+                            "category": category,
+                            "heading": heading_str,
+                            "doc_title": doc_title,
+                            "page_num": part_idx,
+                            "pages_covered": [part_idx],
+                            "total_pages": 0,
+                            "sections_covered": [],
+                            "content": f"[{doc_title} | {heading_str}]\n{sub_text}",
+                            "raw_text": sub_text,
+                        })
+                        part_idx += 1
+                        curr_parts = [p]
+                        curr_len = len(p)
+                    else:
+                        curr_parts.append(p)
+                        curr_len += len(p)
+
+                if curr_parts:
+                    sub_text = "\n\n".join(curr_parts)
+                    heading_str = f"ส่วนที่ {part_idx}"
+                    chunks.append({
+                        "chunk_id": f"{file_path.stem}_p{part_idx}",
+                        "source_file": rel_path,
+                        "category": category,
+                        "heading": heading_str,
+                        "doc_title": doc_title,
+                        "page_num": part_idx,
+                        "pages_covered": [part_idx],
+                        "total_pages": part_idx,
+                        "sections_covered": [],
+                        "content": f"[{doc_title} | {heading_str}]\n{sub_text}",
+                        "raw_text": sub_text,
                     })
 
-    # 3. Create rich chunks with context header
-    result_chunks = []
-    for c_idx, s in enumerate(splits):
-        sec = s["section"]
-        chap = s["chapter"]
-        body = s["text"]
+    return chunks
 
-        context_parts = [f"[{doc_title}]"]
-        if chap:
-            context_parts.append(f"[{chap}]")
-        if sec:
-            context_parts.append(f"[{sec}]")
-        header_prefix = " ".join(context_parts)
 
-        rich_content = f"{header_prefix}\n{body}"
-        chunk_id = f"{doc_title}_{c_idx+1}"
+def chunk_faq_excel(file_path: Path) -> List[Dict[str, Any]]:
+    """
+    Parse FAQ Excel file into structured Q&A knowledge chunks.
+    Each Q&A record is treated as an authoritative knowledge chunk.
+    """
+    if not file_path.exists():
+        print(f"[Chunker] FAQ Excel file not found: {file_path}")
+        return []
 
-        sections_covered = [sec] if sec and sec not in ("คำนำ/บททั่วไป",) else []
+    try:
+        df = pd.read_excel(file_path)
+    except Exception as e:
+        print(f"[Chunker] Error reading FAQ Excel {file_path}: {e}")
+        return []
 
-        result_chunks.append({
-            "chunk_id": chunk_id,
-            "source_file": rel_source,
+    col_q = next((c for c in df.columns if "question" in str(c).lower() or "คำถาม" in str(c)), None)
+    col_a = next((c for c in df.columns if "answer" in str(c).lower() or "คำตอบ" in str(c)), None)
+
+    if not col_q or not col_a:
+        if len(df.columns) >= 2:
+            col_q, col_a = df.columns[0], df.columns[1]
+        else:
+            print(f"[Chunker] Unable to identify Q&A columns in {file_path}")
+            return []
+
+    faq_chunks = []
+    total_rows = len(df)
+    doc_title = "แนวทางคำถาม-คำตอบ (FAQ) กรมบัญชีกลาง"
+    category = "FAQ กรมบัญชีกลาง"
+
+    for idx, row in df.iterrows():
+        q = str(row[col_q]).strip() if pd.notna(row[col_q]) else ""
+        a = str(row[col_a]).strip() if pd.notna(row[col_a]) else ""
+        if not q or not a:
+            continue
+
+        item_idx = idx + 1
+        heading_str = f"FAQ ข้อที่ {item_idx}: {q}"
+        content = (
+            f"[{doc_title} | {heading_str}]\n\n"
+            f"คำถาม: {q}\n\n"
+            f"คำตอบ: {a}"
+        )
+        faq_chunks.append({
+            "chunk_id": f"faq_cgd_{item_idx}",
+            "source_file": file_path.name,
             "category": category,
-            "heading": f"{doc_title} - {sec}",
+            "heading": heading_str,
             "doc_title": doc_title,
-            "sections_covered": sections_covered,
-            "content": rich_content,
-            "raw_text": body
+            "page_num": item_idx,
+            "pages_covered": [item_idx],
+            "total_pages": total_rows,
+            "sections_covered": [f"ข้อที่ {item_idx}"],
+            "content": content,
+            "raw_text": f"คำถาม: {q}\nคำตอบ: {a}",
         })
 
-    return result_chunks
+    print(f"[Chunker] Loaded {len(faq_chunks)} chunks from FAQ Excel '{file_path.name}'")
+    return faq_chunks
 
 
 def load_raw_chunks(
@@ -181,7 +401,7 @@ def load_raw_chunks(
 ) -> List[Dict[str, Any]]:
     """
     Load chunks from chunks_file if present,
-    or build structure-aware section chunks directly from typhoon_dir markdown files and faq_file.
+    or build structure-aware macro chunks directly from typhoon_dir markdown files and faq_file.
     """
     if chunks_file and os.path.exists(chunks_file):
         print(f"Loading pre-processed chunks from: {chunks_file}")
@@ -190,57 +410,45 @@ def load_raw_chunks(
         print(f"Loaded {len(chunks)} chunks.")
         return chunks
 
-    chunks = []
+    all_chunks = []
 
-    # 1. Parse typhoon_ocr markdown files using structure-aware section chunking
+    # 1. Parse typhoon_ocr markdown files using page-aware macro chunking
     if typhoon_dir and os.path.exists(typhoon_dir):
         print(f"Extracting statutory chunks from: {typhoon_dir}")
-        for root, _, files in os.walk(typhoon_dir):
-            for file in files:
-                if file.endswith(".md"):
-                    file_path = os.path.join(root, file)
-                    rel_source = os.path.relpath(file_path, os.path.dirname(typhoon_dir)).replace("\\", "/")
-                    category = os.path.basename(root)
-                    doc_title = os.path.splitext(file)[0]
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            content = f.read()
+        data_ocr_path = Path(typhoon_dir)
+        raw_files = list(data_ocr_path.rglob("*.md"))
 
-                        statute_chunks = chunk_statute_markdown(
-                            content=content,
-                            doc_title=doc_title,
-                            category=category,
-                            rel_source=rel_source
-                        )
-                        chunks.extend(statute_chunks)
-                    except Exception as e:
-                        print(f"Error reading {file_path}: {e}")
+        priority_map = {
+            "พรบ": 0,
+            "ระเบียบกระทรวงการคลัง": 1,
+            "กฎกระทรวง": 2,
+            "ประกาศคกกนโยบาย": 3,
+            "ประกาศคกกราคากลาง": 4,
+            "ประกาศกรมบัญชีกลาง": 5,
+        }
 
-    # 2. Parse FAQ excel file (1 question-answer pair = 1 cohesive chunk)
+        def sort_key(p: Path):
+            parent = p.parent.name
+            return (priority_map.get(parent, 99), str(p.name))
+
+        md_files = sorted(raw_files, key=sort_key)
+
+        for file_path in md_files:
+            if ".ipynb_checkpoints" in str(file_path):
+                continue
+            chunks = chunk_legal_document(file_path)
+            all_chunks.extend(chunks)
+
+        print(f"[Chunker] Loaded {len(all_chunks)} statutory macro chunks from {len(md_files)} markdown files.")
+
+    # 2. Parse FAQ Excel file
     if faq_file and os.path.exists(faq_file):
-        print(f"Extracting FAQ chunks from: {faq_file}")
-        try:
-            df = pd.read_excel(faq_file)
-            for i, row in df.iterrows():
-                q = str(row.get("Question", "")).strip()
-                a = str(row.get("Answer", "")).strip()
-                chunk_id = f"faq_cgd_{i+1}"
-                content = f"[แนวทางคำถาม-คำตอบ (FAQ) กรมบัญชีกลาง | ข้อที่ {i+1}]\nคำถาม: {q}\nคำตอบ: {a}"
-                chunks.append({
-                    "chunk_id": chunk_id,
-                    "source_file": os.path.basename(faq_file),
-                    "category": "FAQ กรมบัญชีกลาง",
-                    "heading": f"FAQ ข้อที่ {i+1}: {q[:50]}",
-                    "doc_title": "แนวทางคำถาม-คำตอบ (FAQ) กรมบัญชีกลาง",
-                    "sections_covered": [f"FAQ ข้อที่ {i+1}"],
-                    "content": content,
-                    "raw_text": f"คำถาม: {q}\nคำตอบ: {a}"
-                })
-        except Exception as e:
-            print(f"Error reading FAQ file: {e}")
+        faq_chunks = chunk_faq_excel(Path(faq_file))
+        all_chunks.extend(faq_chunks)
 
-    print(f"Constructed {len(chunks)} structure-aware knowledge chunks directly from procurement sources.")
-    return chunks
+    print(f"Constructed total {len(all_chunks)} structure-aware knowledge chunks directly from procurement sources.")
+    return all_chunks
+
 
 
 def build_law_to_crime(chunks: List[Dict[str, Any]], output_path: str) -> List[Dict[str, Any]]:
