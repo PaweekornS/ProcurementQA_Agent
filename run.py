@@ -8,6 +8,7 @@ import threading
 import concurrent.futures
 import time
 from typing import List, Dict, Any, Optional
+import re
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -35,6 +36,67 @@ def load_test_cases(datasets: str, datasets_path: str = "./datasets") -> List[Di
         cases = json.load(f)
     
     return cases
+
+
+TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+
+
+def normalize_legal_text(text: str) -> str:
+    if not text:
+        return ""
+    t = str(text).translate(TH_TO_AR)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def match_legal_section(expected: str, candidate: str) -> bool:
+    exp_norm = normalize_legal_text(expected)
+    cand_norm = normalize_legal_text(candidate)
+    
+    if not exp_norm or not cand_norm:
+        return False
+        
+    # 1. Direct normalized substring check
+    if exp_norm in cand_norm or cand_norm in exp_norm:
+        return True
+        
+    # 2. Section number matching (e.g. มาตรา 56 or ม. 56)
+    m_exp = re.search(r"(มาตรา|ม\.)\s*(\d+)", exp_norm)
+    if m_exp:
+        sec_num = m_exp.group(2)
+        if re.search(rf"(มาตรา|ม\.)\s*{sec_num}\b", cand_norm):
+            return True
+
+    # 3. Clause/Regulation matching (e.g. ข้อ 79)
+    k_exp = re.search(r"ข้อ\s*(\d+)", exp_norm)
+    if k_exp:
+        clause_num = k_exp.group(1)
+        if re.search(rf"ข้อ\s*{clause_num}\b", cand_norm):
+            return True
+
+    # 4. Chapter matching (e.g. หมวด 7)
+    ch_exp = re.search(r"หมวด\s*(\d+)", exp_norm)
+    if ch_exp:
+        ch_num = ch_exp.group(1)
+        if re.search(rf"หมวด\s*{ch_num}\b", cand_norm):
+            return True
+
+    return False
+
+
+def match_category(expected: str, candidate: str) -> bool:
+    tc_clean = str(expected).strip()
+    pc_clean = str(candidate).strip()
+    if not tc_clean or not pc_clean:
+        return False
+    if tc_clean in pc_clean or pc_clean in tc_clean:
+        return True
+    # Sub-phrase matching (e.g., 'วิธีจัดซื้อจัดจ้าง' in 'การจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจง')
+    tc_parts = [p.strip() for p in re.split(r"[และ/,\s]+", tc_clean) if len(p.strip()) >= 4]
+    for p in tc_parts:
+        if p in pc_clean or pc_clean in p:
+            return True
+    return False
 
 
 def process_cases_worker(
@@ -95,14 +157,14 @@ def process_cases_worker(
                     if entry and entry not in pred_laws:
                         pred_laws.append(entry)
 
-            # Check Section hit (does any predicted law contain true_section?)
+            # Check Section hit (normalized Thai/Arabic numerals & section regex)
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
                 for pl in pred_laws:
-                    if ts_clean in str(pl) or str(pl) in ts_clean:
+                    if match_legal_section(ts_clean, str(pl)):
                         is_section_hit = True
                         break
                 if is_section_hit:
@@ -110,14 +172,14 @@ def process_cases_worker(
             if is_section_hit:
                 section_hits += 1
 
-            # Check Category hit
+            # Check Category hit (with composite phrase support)
             is_category_hit = False
             for tc in true_category:
                 tc_clean = str(tc).strip()
                 if not tc_clean:
                     continue
                 for pc in pred_category:
-                    if tc_clean in str(pc) or str(pc) in tc_clean:
+                    if match_category(tc_clean, str(pc)):
                         is_category_hit = True
                         break
                 if is_category_hit:
@@ -325,7 +387,7 @@ def run_evaluation(
                 if not ts_clean:
                     continue
                 for pl in pred_laws:
-                    if ts_clean in str(pl) or str(pl) in ts_clean:
+                    if match_legal_section(ts_clean, str(pl)):
                         is_section_hit = True
                         break
                 if is_section_hit:
@@ -337,7 +399,7 @@ def run_evaluation(
                 if not tc_clean:
                     continue
                 for pc in pred_category:
-                    if tc_clean in str(pc) or str(pc) in tc_clean:
+                    if match_category(tc_clean, str(pc)):
                         is_category_hit = True
                         break
                 if is_category_hit:

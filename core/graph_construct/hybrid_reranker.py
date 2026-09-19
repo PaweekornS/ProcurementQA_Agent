@@ -45,7 +45,7 @@ class ThaiBM25Index:
             return []
         text_clean = re.sub(r"\s+", " ", str(text)).strip()
         # newmm is pure dictionary/C++ based: ultra-fast, robust, and zero PyTorch/meta-parameter warnings
-        tokens = word_tokenize(text_clean, engine="attacut", keep_whitespace=False)
+        tokens = word_tokenize(text_clean, engine="newmm", keep_whitespace=False)
         return [t.strip().lower() for t in tokens if t.strip() and len(t.strip()) > 1]
 
     def build_index(self, documents: List[Dict[str, Any]]):
@@ -115,26 +115,55 @@ class GPUReranker:
         return "cpu"
 
     def _init_model(self):
-        if CrossEncoder is not None:
-            try:
-                print(f"[GPUReranker] Loading CrossEncoder '{self.model_name}' on device '{self.device}'...")
-                self.model = CrossEncoder(self.model_name, device=self.device)
-                print(f"[GPUReranker] Successfully loaded reranker on '{self.device}'.")
-            except Exception as e:
-                print(f"[GPUReranker] Failed to load reranker on '{self.device}': {e}. Falling back to CPU.")
-                try:
-                    self.device = "cpu"
-                    self.model = CrossEncoder(self.model_name, device="cpu")
-                except Exception as ex:
-                    print(f"[GPUReranker] Completely failed to initialize reranker: {ex}")
-                    self.model = None
+        # Using HuggingFace Transformers AutoModel directly to completely bypass sentence_transformers meta-tensor bug
+        try:
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            print(f"[GPUReranker] Initializing CrossEncoder '{self.model_name}' on '{self.device}'...")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            load_kwargs = {"low_cpu_mem_usage": False}
+            if torch and torch.cuda.is_available() and "cuda" in str(self.device):
+                load_kwargs["torch_dtype"] = torch.float16
+                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, **load_kwargs).to(self.device)
+            else:
+                self.device = "cpu"
+                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, **load_kwargs).to("cpu")
+            self.model.eval()
+            print(f"[GPUReranker] Successfully loaded reranker on '{self.device}'.")
+        except Exception as e:
+            print(f"[GPUReranker] Failed to load native reranker: {e}")
+            self.model = None
+            self.tokenizer = None
+
+    def _predict_pairs(self, pairs: List[Tuple[str, str]], batch_size: int = 8) -> List[float]:
+        if not self.model or not self.tokenizer:
+            return [1.0] * len(pairs)
+        all_scores = []
+        for i in range(0, len(pairs), batch_size):
+            batch = pairs[i:i + batch_size]
+            with torch.no_grad():
+                inputs = self.tokenizer(
+                    batch,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt"
+                ).to(self.device)
+                logits = self.model(**inputs).logits
+                if logits.shape[-1] == 1:
+                    batch_scores = logits.view(-1).cpu().tolist()
+                else:
+                    batch_scores = logits[:, 1].cpu().tolist()
+                all_scores.extend(batch_scores)
+        return all_scores
 
     def compute_score(self, query: str, text: str) -> float:
         if not self.model:
             return 1.0
         try:
             with self._lock:
-                return float(self.model.predict([(query, text[:1000])], batch_size=1)[0])
+                scores = self._predict_pairs([(query, text[:1000])], batch_size=1)
+                return float(scores[0]) if scores else 1.0
         except Exception:
             return 1.0
 
@@ -170,7 +199,7 @@ class GPUReranker:
 
         try:
             with self._lock:
-                scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
+                scores = self._predict_pairs(pairs, batch_size=8)
                 if torch and torch.cuda.is_available() and "cuda" in str(self.device):
                     torch.cuda.empty_cache()
         except Exception as e:
@@ -200,6 +229,8 @@ class GPUReranker:
 # Global Manager
 _global_bm25_index: Optional[ThaiBM25Index] = None
 _global_reranker: Optional[GPUReranker] = None
+_reranker_init_lock = threading.Lock()
+_bm25_init_lock = threading.Lock()
 
 
 def get_reranker(
@@ -209,18 +240,22 @@ def get_reranker(
 ) -> Optional[GPUReranker]:
     global _global_reranker
     if _global_reranker is None:
-        _global_reranker = GPUReranker(
-            model_name=model_name,
-            device=device,
-            threshold=threshold
-        )
+        with _reranker_init_lock:
+            if _global_reranker is None:
+                _global_reranker = GPUReranker(
+                    model_name=model_name,
+                    device=device,
+                    threshold=threshold
+                )
     return _global_reranker
 
 
 def get_bm25_index() -> ThaiBM25Index:
     global _global_bm25_index
     if _global_bm25_index is None:
-        _global_bm25_index = ThaiBM25Index()
+        with _bm25_init_lock:
+            if _global_bm25_index is None:
+                _global_bm25_index = ThaiBM25Index()
     return _global_bm25_index
 
 
