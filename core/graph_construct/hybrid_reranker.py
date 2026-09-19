@@ -123,7 +123,7 @@ class GPUReranker:
             
             load_kwargs = {"low_cpu_mem_usage": False}
             if torch and torch.cuda.is_available() and "cuda" in str(self.device):
-                load_kwargs["torch_dtype"] = torch.float16
+                load_kwargs["type"] = torch.float16
                 self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, **load_kwargs).to(self.device)
             else:
                 self.device = "cpu"
