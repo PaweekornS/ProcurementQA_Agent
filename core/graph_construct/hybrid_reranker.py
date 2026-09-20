@@ -263,36 +263,65 @@ def get_bm25_index() -> ThaiBM25Index:
     return _global_bm25_index
 
 
-def expand_numeric_query(query: str) -> str:
+def expand_numeric_query(query: str, chatbot: Optional[Any] = None) -> str:
     """
-    Expands numerical/quantitative and constraint queries with domain-specific legal terminology.
-    Helps BM25 and embedding search locate exact provision articles (rates, limits, timeframes).
+    Generalized legal query expansion (Lexical & Concept Normalization).
+    Strictly NO hardcoded section numbers or answer values.
+    Transforms colloquial phrases, abbreviations, and procedural queries into formal legal terminology:
+    - Acronym/Colloquial normalization: MiT / Made in Thailand -> พัสดุที่ผลิตภายในประเทศ, ส่งเสริมหรือสนับสนุน
+    - Procedural concept normalization: ลงนามสัญญา -> การทำสัญญา, อุทธรณ์; บอกเลิกสัญญา -> การบอกเลิกสัญญา, ค่าปรับ
+    - Quantitative inquiry indicators: กี่, เท่าใด -> เกณฑ์, อัตรา, สัดส่วน, กำหนด
     """
     if not query:
         return query
     
+    boost_terms = []
+    q_lower = query.lower()
+
+    # 1. Acronym & Trade terms normalization (e.g. Made in Thailand / MiT / สินค้าไทย)
+    if any(k in q_lower for k in ["made in thailand", "mit", "ผลิตในประเทศ", "ผลิตภายในประเทศ", "สินค้าไทย"]):
+        boost_terms.extend(["พัสดุที่ผลิตภายในประเทศ", "ส่งเสริมหรือสนับสนุน", "แต้มต่อ"])
+
+    # 2. Contract execution & Post-award concepts (ลงนาม / ทำสัญญา)
+    if any(k in q_lower for k in ["ลงนาม", "ทำสัญญา", "ชนะการเสนอราคา", "ผู้ชนะ"]):
+        boost_terms.extend(["การทำสัญญา", "การลงนามในสัญญา", "การอุทธรณ์"])
+
+    # 3. Electronic Market / Procurement methods (e-market / ตลาดอิเล็กทรอนิกส์)
+    if any(k in q_lower for k in ["e-market", "ตลาดอิเล็กทรอนิกส์"]):
+        boost_terms.extend(["การจัดซื้อจัดจ้าง", "วิธีตลาดอิเล็กทรอนิกส์", "e-catalog"])
+
+    # 4. Liquidated damages & Contract default (ค่าปรับ / ล่าช้า / ผิดสัญญา)
+    if any(k in q_lower for k in ["ปรับ", "ล่าช้า", "ไม่ปฏิบัติตามสัญญา", "ทิ้งงาน"]):
+        boost_terms.extend(["อัตราค่าปรับ", "การคิดค่าปรับ", "ค่าปรับรายวัน"])
+
+    # 5. Contract termination (บอกเลิกสัญญา)
+    if any(k in q_lower for k in ["บอกเลิก", "เลิกสัญญา"]):
+        boost_terms.extend(["การบอกเลิกสัญญา", "การแก้ไขสัญญา", "สัญญาสิ้นสุด"])
+
+    # 6. Selection method concepts (วิธีคัดเลือก)
+    if any(k in q_lower for k in ["คัดเลือก", "เชิญชวน"]):
+        boost_terms.extend(["วิธีคัดเลือก", "หนังสือเชิญชวน"])
+
+    # 7. Committee formation concepts (คณะกรรมการ / องค์ประกอบ)
+    if any(k in q_lower for k in ["คณะกรรมการ", "แต่งตั้ง", "ประธาน", "องค์ประกอบ"]):
+        boost_terms.extend(["คณะกรรมการซื้อหรือจ้าง", "การแต่งตั้งคณะกรรมการ", "ประธานกรรมการ"])
+
+    # 8. Standard cost & Financial factors (ราคากลาง / Factor F / ดอกเบี้ย)
+    if any(k in q_lower for k in ["ราคากลาง", "factor f", "ดอกเบี้ย"]):
+        boost_terms.extend(["หลักเกณฑ์ราคากลาง", "อัตราดอกเบี้ย", "การคำนวณราคากลาง"])
+
+    # 9. Quantitative & constraint indicators (General terms only, no hardcoded values)
     num_triggers = [
         "กี่", "เท่าใด", "เท่าไหร่", "ร้อยละ", "เปอร์เซ็นต์", "%", "บาท", "วงเงิน",
         "อัตรา", "สัดส่วน", "วันทำการ", "กำหนดเวลา", "ปัดเศษ", "ไม่เกิน", "ไม่น้อยกว่า",
         "ขั้นต่ำ", "สูงสุด"
     ]
     if any(trig in query for trig in num_triggers):
-        boost_terms = []
-        if any(w in query for w in ["ปรับ", "ล่าช้า", "ไม่ปฏิบัติตามสัญญา", "ทิ้งงาน"]):
-            boost_terms.extend(["อัตราค่าปรับ", "ร้อยละ", "ไม่เกินร้อยละ", "วันละ", "คิดค่าปรับ"])
-        if any(w in query for w in ["บอกเลิก", "เลิกสัญญา"]):
-            boost_terms.extend(["บอกเลิกสัญญา", "ค่าปรับเกิน", "ร้อยละสิบ", "ร้อยละ 10", "สัญญาสิ้นสุด"])
-        if any(w in query for w in ["วงเงิน", "e-market", "ตลาดอิเล็กทรอนิกส์", "เฉพาะเจาะจง", "คัดเลือก", "ประกวดราคา", "e-bidding"]):
-            boost_terms.extend(["เกณฑ์วงเงิน", "วงเงินเกิน", "ไม่เกินวงเงิน", "การจัดซื้อจัดจ้างพัสดุ"])
-        if any(w in query for w in ["ผลิตภายในประเทศ", "mit", "Made in Thailand", "ส่งเสริม", "สนับสนุน"]):
-            boost_terms.extend(["สัดส่วน", "ไม่น้อยกว่าร้อยละ", "แต้มต่อ", "พัสดุที่ผลิตภายในประเทศ"])
-        if any(w in query for w in ["ราคากลาง", "factor f", "ดอกเบี้ย"]):
-            boost_terms.extend(["อัตราดอกเบี้ย", "ปัดเศษ", "คำนวณราคากลาง", "เงินกู้"])
-        if any(w in query for w in ["คณะกรรมการ", "แต่งตั้ง", "ประธาน", "องค์ประกอบ"]):
-            boost_terms.extend(["องค์ประกอบ", "แต่งตั้งจาก", "ไม่น้อยกว่า", "ประธานกรรมการ"])
-            
-        if boost_terms:
-            return f"{query} {' '.join(boost_terms)}"
+        boost_terms.extend(["เกณฑ์", "อัตรา", "หลักเกณฑ์", "กำหนดไว้"])
+
+    if boost_terms:
+        unique_terms = list(dict.fromkeys(boost_terms))
+        return f"{query} {' '.join(unique_terms)}"
     return query
 
 

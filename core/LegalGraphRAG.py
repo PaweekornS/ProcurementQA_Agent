@@ -92,12 +92,26 @@ class GraphConfig:
 
 
 @dataclass
+class CRAGConfig:
+    """CRAG multi-agent loop configuration"""
+    enabled: bool = True
+    max_retry: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "max_retry": self.max_retry
+        }
+
+
+@dataclass
 class LegalGraphRAGConfig:
     """LegalGraphRAG complete configuration"""
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
+    crag: CRAGConfig = field(default_factory=CRAGConfig)
     
     @classmethod
     def from_env_file(cls, dotenv_path: str = None) -> "LegalGraphRAGConfig":
@@ -176,11 +190,18 @@ class LegalGraphRAGConfig:
             auto_build=os.getenv("auto_build", "True") == "True"
         )
         
+        # CRAG configuration
+        crag_config = CRAGConfig(
+            enabled=os.getenv("crag_enabled", "True").lower() in ("true", "1", "yes"),
+            max_retry=int(os.getenv("crag_max_retry", 1))
+        )
+        
         return cls(
             model=model_config,
             data=data_config,
             retrieve=retrieve_config,
-            graph=graph_config
+            graph=graph_config,
+            crag=crag_config
         )
     
     @classmethod
@@ -198,12 +219,14 @@ class LegalGraphRAGConfig:
         data_config = DataConfig(**config_dict.get("data", {}))
         retrieve_config = RetrieveConfig(**config_dict.get("retrieve", {}))
         graph_config = GraphConfig(**config_dict.get("graph", {}))
+        crag_config = CRAGConfig(**config_dict.get("crag", {}))
         
         return cls(
             model=model_config,
             data=data_config,
             retrieve=retrieve_config,
-            graph=graph_config
+            graph=graph_config,
+            crag=crag_config
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -231,7 +254,8 @@ class LegalGraphRAGConfig:
                 "embedding_model": self.graph.embedding_model,
                 "auto_save": self.graph.auto_save,
                 "auto_build": self.graph.auto_build
-            }
+            },
+            "crag": self.crag.to_dict()
         }
     
     def save(self, filepath: str):
@@ -380,12 +404,14 @@ class LegalGraphRAG:
             List of analysis results, each element corresponds to a defendant's analysis result
         """
         retrieve_config = self.config.retrieve.to_dict()
+        crag_config = self.config.crag.to_dict() if hasattr(self.config, "crag") else {"enabled": True, "max_retry": 1}
         return analyze_case(
             self.model,
             case,
             self.law_to_crime,
             self.cases_db,
-            retrieve_config
+            retrieve_config,
+            crag_config=crag_config
         )
     
     def analyze_cases(self, cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
