@@ -98,24 +98,27 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         if m_dir:
             parsed["direct_answer"] = m_dir.group(1).strip()
             
-        m_ans = re.search(r'["\']answer["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
+        m_ans = re.search(r'["\'](?:legal_reasoning|answer)["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
         if m_ans:
-            parsed["answer"] = m_ans.group(1).strip()
+            parsed["legal_reasoning"] = m_ans.group(1).strip()
             
         m_laws = re.search(r'["\']applicable_laws["\']\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
         if m_laws:
             parsed["applicable_laws"] = [s.strip(" \"'\n\r") for s in m_laws.group(1).split(",") if s.strip(" \"'\n\r")]
             
-        if not parsed.get("answer"):
-            parsed["answer"] = cleaned
+        if not parsed.get("legal_reasoning") and not parsed.get("answer"):
+            parsed["legal_reasoning"] = cleaned
 
     # Guarantee QA fields
     if "direct_answer" not in parsed:
         parsed["direct_answer"] = ""
-    if "answer" not in parsed or not parsed["answer"]:
-        parsed["answer"] = parsed.get("legal_opinion") or parsed.get("direct_answer") or response.strip()
-    if not parsed.get("direct_answer") and parsed.get("answer"):
-        first_line = parsed["answer"].strip().split("\n")[0]
+    
+    # Standardize legal_reasoning (with fallback to answer/legal_opinion)
+    reasoning = parsed.get("legal_reasoning") or parsed.get("answer") or parsed.get("legal_opinion") or parsed.get("direct_answer") or response.strip()
+    parsed["legal_reasoning"] = reasoning
+
+    if not parsed.get("direct_answer") and reasoning:
+        first_line = reasoning.strip().split("\n")[0]
         parsed["direct_answer"] = first_line[:200]
 
     if "applicable_laws" not in parsed:

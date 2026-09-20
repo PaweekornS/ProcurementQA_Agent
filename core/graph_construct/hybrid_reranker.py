@@ -115,23 +115,23 @@ class GPUReranker:
         return "cpu"
 
     def _init_model(self):
-        # Using HuggingFace Transformers AutoModel directly to completely bypass sentence_transformers meta-tensor bug
         try:
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
             print(f"[GPUReranker] Initializing CrossEncoder '{self.model_name}' on '{self.device}'...")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
-            if torch and torch.cuda.is_available() and "cuda" in str(self.device):
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    self.model_name,
-                    low_cpu_mem_usage=False
-                ).half().to(self.device)
-            else:
-                self.device = "cpu"
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    self.model_name,
-                    low_cpu_mem_usage=False
-                ).to("cpu")
+            is_cuda = bool(torch and torch.cuda.is_available() and "cuda" in str(self.device))
+            target_device = self.device if is_cuda else "cpu"
+            target_dtype = torch.float16 if is_cuda else torch.float32
+
+            # Use device_map directly to prevent PyTorch meta tensor copy exception
+            self.model = AutoModelForSequenceClassification.from_pretrained(
+                self.model_name,
+                device_map=target_device,
+                dtype=target_dtype,
+                low_cpu_mem_usage=True
+            )
+            self.device = target_device
             self.model.eval()
             print(f"[GPUReranker] Successfully loaded reranker on '{self.device}'.")
         except Exception as e:
@@ -263,6 +263,113 @@ def get_bm25_index() -> ThaiBM25Index:
     return _global_bm25_index
 
 
+def expand_numeric_query(query: str) -> str:
+    """
+    Expands numerical/quantitative and constraint queries with domain-specific legal terminology.
+    Helps BM25 and embedding search locate exact provision articles (rates, limits, timeframes).
+    """
+    if not query:
+        return query
+    
+    num_triggers = [
+        "กี่", "เท่าใด", "เท่าไหร่", "ร้อยละ", "เปอร์เซ็นต์", "%", "บาท", "วงเงิน",
+        "อัตรา", "สัดส่วน", "วันทำการ", "กำหนดเวลา", "ปัดเศษ", "ไม่เกิน", "ไม่น้อยกว่า",
+        "ขั้นต่ำ", "สูงสุด"
+    ]
+    if any(trig in query for trig in num_triggers):
+        boost_terms = []
+        if any(w in query for w in ["ปรับ", "ล่าช้า", "ไม่ปฏิบัติตามสัญญา", "ทิ้งงาน"]):
+            boost_terms.extend(["อัตราค่าปรับ", "ร้อยละ", "ไม่เกินร้อยละ", "วันละ", "คิดค่าปรับ"])
+        if any(w in query for w in ["บอกเลิก", "เลิกสัญญา"]):
+            boost_terms.extend(["บอกเลิกสัญญา", "ค่าปรับเกิน", "ร้อยละสิบ", "ร้อยละ 10", "สัญญาสิ้นสุด"])
+        if any(w in query for w in ["วงเงิน", "e-market", "ตลาดอิเล็กทรอนิกส์", "เฉพาะเจาะจง", "คัดเลือก", "ประกวดราคา", "e-bidding"]):
+            boost_terms.extend(["เกณฑ์วงเงิน", "วงเงินเกิน", "ไม่เกินวงเงิน", "การจัดซื้อจัดจ้างพัสดุ"])
+        if any(w in query for w in ["ผลิตภายในประเทศ", "mit", "Made in Thailand", "ส่งเสริม", "สนับสนุน"]):
+            boost_terms.extend(["สัดส่วน", "ไม่น้อยกว่าร้อยละ", "แต้มต่อ", "พัสดุที่ผลิตภายในประเทศ"])
+        if any(w in query for w in ["ราคากลาง", "factor f", "ดอกเบี้ย"]):
+            boost_terms.extend(["อัตราดอกเบี้ย", "ปัดเศษ", "คำนวณราคากลาง", "เงินกู้"])
+        if any(w in query for w in ["คณะกรรมการ", "แต่งตั้ง", "ประธาน", "องค์ประกอบ"]):
+            boost_terms.extend(["องค์ประกอบ", "แต่งตั้งจาก", "ไม่น้อยกว่า", "ประธานกรรมการ"])
+            
+        if boost_terms:
+            return f"{query} {' '.join(boost_terms)}"
+    return query
+
+
+def extract_document_year(text: str) -> Optional[int]:
+    """
+    Extracts Buddhist Era year (พ.ศ. 25XX) from document title, entry or text dynamically.
+    Works for any past, present, or future year (e.g. 2535, 2560, 2563, 2569, 2570+).
+    """
+    if not text:
+        return None
+    # Matches patterns like พ.ศ. 2560, พ.ศ.2563, ปี 2569, or standalone 25XX
+    m = re.search(r"(?:พ\.ศ\.|ปี|\b)(25\d{2})\b", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def get_legal_hierarchy_multiplier(doc_id: str, entry: str, text: str) -> float:
+    """
+    Evaluates the legal authority hierarchy dynamically:
+    - Primary Statutes / Regulations (พ.ร.บ., ระเบียบ, กฎกระทรวง, ประกาศคณะกรรมการ): Highest authority (1.20)
+    - Administrative Guidelines / FAQ / Circulars: Standard authority (1.00)
+    - Contract Templates / Blank Sample Forms: Lower priority for substantive statutory queries (0.75)
+    """
+    combined = f"{doc_id} {entry} {text[:300]}".lower()
+
+    # If it is purely a contract template or form, it's illustrative rather than governing law
+    if any(k in combined for k in ["แบบสัญญา", "แบบฟอร์ม", "สัญญาสำเร็จรูป", "ตัวอย่างสัญญา"]):
+        return 0.75
+
+    # Primary enacted statutes and ministerial regulations
+    if any(k in combined for k in ["พระราชบัญญัติ", "ระเบียบกระทรวงการคลัง", "กฎกระทรวง", "ประกาศคณะกรรมการ"]):
+        return 1.25
+
+    return 1.0
+
+
+def compute_dynamic_boost(
+    doc: Dict[str, Any],
+    max_corpus_year: int = 2569,
+    base_statute_year: int = 2560
+) -> float:
+    """
+    Computes a fully dynamic weight multiplier based on:
+    1. Recency relative to the latest legal corpus year (e.g. 2569, 2570+)
+    2. Primary legal authority hierarchy (Statute vs Guideline vs Template)
+    """
+    did = str(doc.get("id", ""))
+    entry = str(doc.get("entry", ""))
+    text = str(doc.get("text", "") or doc.get("description", ""))
+
+    doc_year = extract_document_year(f"{did} {entry}")
+    if doc_year is None:
+        doc_year = extract_document_year(text[:400])
+
+    hierarchy_mult = get_legal_hierarchy_multiplier(did, entry, text)
+
+    # Dynamic Recency Multiplier
+    if doc_year is not None:
+        if doc_year >= base_statute_year:
+            # Active legal framework (e.g. 2560 up to max_corpus_year like 2569+)
+            # The closer to max_corpus_year, the higher the weight
+            year_diff = max(0, max_corpus_year - doc_year)
+            recency_mult = max(1.05, 1.30 - (year_diff * 0.02))
+        else:
+            # Older deprecated regulations (e.g. 2535 prior to 2560 reform)
+            # Penalize slightly so modern provisions take precedence
+            recency_mult = 0.70
+    else:
+        recency_mult = 1.0
+
+    return hierarchy_mult * recency_mult
+
+
 def weighted_rrf(
     dense_results: List[Tuple[Dict[str, Any], float]],
     sparse_results: List[Tuple[Dict[str, Any], float]],
@@ -271,18 +378,29 @@ def weighted_rrf(
     rrf_k: int = 60
 ) -> List[Dict[str, Any]]:
     """
-    Weighted Reciprocal Rank Fusion (RRF).
-    Combines dense cosine ranking and sparse BM25 ranking.
+    Weighted Reciprocal Rank Fusion (RRF) with Dynamic Recency & Legal Hierarchy Boosting.
+    Combines dense cosine ranking and sparse BM25 ranking, dynamically prioritizing
+    modern governing statutes over legacy regulations and blank contract templates.
     """
     scores: Dict[str, float] = {}
     doc_map: Dict[str, Dict[str, Any]] = {}
+
+    # Detect maximum year dynamically across the candidate set
+    detected_years = []
+    for cand_list in [dense_results, sparse_results]:
+        for doc, _ in cand_list:
+            y = extract_document_year(f"{doc.get('id', '')} {doc.get('entry', '')}")
+            if y and 2500 <= y <= 2650:
+                detected_years.append(y)
+    max_year = max(detected_years) if detected_years else 2569
 
     # Process Dense results
     for rank, (doc, _) in enumerate(dense_results):
         doc_id = str(doc.get("id", ""))
         if not doc_id:
             continue
-        scores[doc_id] = scores.get(doc_id, 0.0) + (dense_weight / (rrf_k + rank + 1))
+        boost = compute_dynamic_boost(doc, max_corpus_year=max_year)
+        scores[doc_id] = scores.get(doc_id, 0.0) + (dense_weight * boost / (rrf_k + rank + 1))
         if doc_id not in doc_map:
             doc_map[doc_id] = doc
 
@@ -291,7 +409,8 @@ def weighted_rrf(
         doc_id = str(doc.get("id", ""))
         if not doc_id:
             continue
-        scores[doc_id] = scores.get(doc_id, 0.0) + (sparse_weight / (rrf_k + rank + 1))
+        boost = compute_dynamic_boost(doc, max_corpus_year=max_year)
+        scores[doc_id] = scores.get(doc_id, 0.0) + (sparse_weight * boost / (rrf_k + rank + 1))
         if doc_id not in doc_map:
             doc_map[doc_id] = doc
 
@@ -304,3 +423,4 @@ def weighted_rrf(
         fused_docs.append(doc)
 
     return fused_docs
+
