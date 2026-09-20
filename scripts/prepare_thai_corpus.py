@@ -566,13 +566,30 @@ def parse_qa_csv(csv_path: str, start_id: int = 0) -> List[Dict[str, Any]]:
         src = str(row.get("Source_File", "")).strip()
         q_type = str(row.get("Question_Type", "")).strip()
 
+        # Parse paired documents and sections (aligned 1-to-1 by semicolon ;)
+        src_parts = [s.strip() for s in src.split(";") if s.strip()]
+        sec_parts = [s.strip() for s in sec.split(";") if s.strip()]
+        
+        expected_pairs = []
+        if len(src_parts) == len(sec_parts) and len(src_parts) > 0:
+            for d, sp in zip(src_parts, sec_parts):
+                sub_secs = [x.strip() for x in sp.split(",") if x.strip()]
+                for ss in sub_secs:
+                    expected_pairs.append({"doc": d, "section": ss})
+        elif src_parts:
+            # Fallback if lengths don't match
+            sub_secs = [x.strip() for x in sec.replace(";", ",").split(",") if x.strip()]
+            for d in src_parts:
+                for ss in sub_secs:
+                    expected_pairs.append({"doc": d, "section": ss})
+
         # Split multiple sections by comma or semicolon for accurate retrieval matching
         sec_clean = sec.replace(";", ",")
         laws_list = [s.strip() for s in sec_clean.split(",") if s.strip()]
         if not laws_list and sec:
             laws_list = [sec]
 
-        src_list = [s.strip() for s in src.replace(";", "\n").split("\n") if s.strip()]
+        src_list = src_parts if src_parts else ([src] if src else [])
 
         dataset.append({
             "id": start_id + int(i),
@@ -580,6 +597,7 @@ def parse_qa_csv(csv_path: str, start_id: int = 0) -> List[Dict[str, Any]]:
             "fact": q,
             "crime": [cat],
             "laws": laws_list,
+            "expected_pairs": expected_pairs,
             "ground_truth": gt,
             "source_file": src,
             "source_files": src_list,

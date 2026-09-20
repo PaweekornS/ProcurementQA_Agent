@@ -645,10 +645,11 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
     # --- HYBRID RETRIEVAL BRANCH ---
     _ensure_bm25_index(db)
 
-    # 1. Sparse Search (BM25 with PyThaiNLP)
-    from .hybrid_reranker import get_bm25_index, get_reranker, weighted_rrf
+    # 1. Sparse Search (BM25 with PyThaiNLP + Numeric Query Expansion)
+    from .hybrid_reranker import get_bm25_index, get_reranker, weighted_rrf, expand_numeric_query
     bm25_idx = get_bm25_index()
-    sparse_raw = bm25_idx.search(query_text, top_k=bm25_top_k)
+    bm25_query = expand_numeric_query(query_text)
+    sparse_raw = bm25_idx.search(bm25_query, top_k=bm25_top_k)
     sparse_results = []
     for doc, score in sparse_raw:
         sparse_results.append(({

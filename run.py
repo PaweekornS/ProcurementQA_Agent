@@ -67,18 +67,19 @@ def match_legal_section(expected: str, candidate: str) -> bool:
         if re.search(rf"(มาตรา|ม\.)\s*{sec_num}\b", cand_norm):
             return True
 
-    # 3. Clause/Regulation matching (e.g. ข้อ 79)
+    # 3. Clause/Regulation matching (e.g. ข้อ 79, ข้อ 13)
     k_exp = re.search(r"ข้อ\s*(\d+)", exp_norm)
     if k_exp:
         clause_num = k_exp.group(1)
-        if re.search(rf"ข้อ\s*{clause_num}\b", cand_norm):
+        # Direct "ข้อ 13" or part of a list "ข้อ 9, 13, 14"
+        if re.search(rf"ข้อ\s*[^\n|]*?\b{clause_num}\b", cand_norm) or re.search(rf"\bข้อ\s*{clause_num}\b", cand_norm):
             return True
 
     # 4. Chapter matching (e.g. หมวด 7)
     ch_exp = re.search(r"หมวด\s*(\d+)", exp_norm)
     if ch_exp:
         ch_num = ch_exp.group(1)
-        if re.search(rf"หมวด\s*{ch_num}\b", cand_norm):
+        if re.search(rf"หมวด\s*[^\n|]*?\b{ch_num}\b", cand_norm) or re.search(rf"\bหมวด\s*{ch_num}\b", cand_norm):
             return True
 
     return False
@@ -158,7 +159,7 @@ def process_cases_worker(
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
-                pred_answer = judge_result.get("answer", "")
+                pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
@@ -173,6 +174,13 @@ def process_cases_worker(
             expected_docs = case.get("source_files", [])
             if not expected_docs and case.get("source_file"):
                 expected_docs = [s.strip() for s in case["source_file"].split(";") if s.strip()]
+
+            expected_pairs = case.get("expected_pairs", [])
+            if not expected_pairs:
+                if len(expected_docs) == len(true_section) and len(expected_docs) > 0:
+                    expected_pairs = [{"doc": d, "section": s} for d, s in zip(expected_docs, true_section)]
+                else:
+                    expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
 
             # 1. Section Hit
             is_section_hit = False
@@ -197,18 +205,17 @@ def process_cases_worker(
                 if is_document_hit:
                     break
 
-            # 3. AND Condition: Must hit BOTH the correct Document AND Section in the same cited provision
+            # 3. AND Condition: Must hit the EXACT PAIRED Document AND Section together
             is_both_hit = False
-            for ed in expected_docs:
-                for ts in true_section:
-                    ts_clean = str(ts).strip()
-                    if not ts_clean:
-                        continue
-                    for pl in pred_laws:
-                        if match_doc_and_section(ed, ts_clean, str(pl)):
-                            is_both_hit = True
-                            break
-                    if is_both_hit:
+            for pair in expected_pairs:
+                ed = pair.get("doc", "")
+                ts = pair.get("section", "")
+                ts_clean = str(ts).strip()
+                if not ts_clean:
+                    continue
+                for pl in pred_laws:
+                    if match_doc_and_section(ed, ts_clean, str(pl)):
+                        is_both_hit = True
                         break
                 if is_both_hit:
                     break
@@ -224,10 +231,11 @@ def process_cases_worker(
                 "id": case.get("id"),
                 "question": question,
                 "direct_answer": pred_direct_answer,
-                "answer": pred_answer,
+                "legal_reasoning": pred_answer,
                 "ground_truth": ground_truth,
                 "expected_section": true_section,
                 "expected_documents": expected_docs,
+                "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
@@ -401,7 +409,7 @@ def run_evaluation(
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
-                pred_answer = judge_result.get("answer", "")
+                pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
@@ -426,6 +434,23 @@ def run_evaluation(
                     if match_legal_section(ts_clean, str(pl)):
                         is_section_hit = True
                         break
+            expected_pairs = case.get("expected_pairs", [])
+            if not expected_pairs:
+                if len(expected_docs) == len(true_section) and len(expected_docs) > 0:
+                    expected_pairs = [{"doc": d, "section": s} for d, s in zip(expected_docs, true_section)]
+                else:
+                    expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
+
+            # 1. Section Hit
+            is_section_hit = False
+            for ts in true_section:
+                ts_clean = str(ts).strip()
+                if not ts_clean:
+                    continue
+                for pl in pred_laws:
+                    if match_legal_section(ts_clean, str(pl)):
+                        is_section_hit = True
+                        break
                 if is_section_hit:
                     break
 
@@ -439,18 +464,17 @@ def run_evaluation(
                 if is_document_hit:
                     break
 
-            # 3. Strict AND Condition: Must hit BOTH the correct Document AND Section in the same cited provision
+            # 3. AND Condition: Must hit the EXACT PAIRED Document AND Section together
             is_both_hit = False
-            for ed in expected_docs:
-                for ts in true_section:
-                    ts_clean = str(ts).strip()
-                    if not ts_clean:
-                        continue
-                    for pl in pred_laws:
-                        if match_doc_and_section(ed, ts_clean, str(pl)):
-                            is_both_hit = True
-                            break
-                    if is_both_hit:
+            for pair in expected_pairs:
+                ed = pair.get("doc", "")
+                ts = pair.get("section", "")
+                ts_clean = str(ts).strip()
+                if not ts_clean:
+                    continue
+                for pl in pred_laws:
+                    if match_doc_and_section(ed, ts_clean, str(pl)):
+                        is_both_hit = True
                         break
                 if is_both_hit:
                     break
@@ -459,10 +483,11 @@ def run_evaluation(
                 "id": case.get("id"),
                 "question": question,
                 "direct_answer": pred_direct_answer,
-                "answer": pred_answer,
+                "legal_reasoning": pred_answer,
                 "ground_truth": ground_truth,
                 "expected_section": true_section,
                 "expected_documents": expected_docs,
+                "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,

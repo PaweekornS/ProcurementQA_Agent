@@ -31,13 +31,13 @@ def match_legal_section(expected: str, candidate: str) -> bool:
     k_exp = re.search(r"ข้อ\s*(\d+)", exp_norm)
     if k_exp:
         clause_num = k_exp.group(1)
-        if re.search(rf"ข้อ\s*{clause_num}\b", cand_norm):
+        if re.search(rf"ข้อ\s*[^\n|]*?\b{clause_num}\b", cand_norm) or re.search(rf"\bข้อ\s*{clause_num}\b", cand_norm):
             return True
 
     ch_exp = re.search(r"หมวด\s*(\d+)", exp_norm)
     if ch_exp:
         ch_num = ch_exp.group(1)
-        if re.search(rf"หมวด\s*{ch_num}\b", cand_norm):
+        if re.search(rf"หมวด\s*[^\n|]*?\b{ch_num}\b", cand_norm) or re.search(rf"\bหมวด\s*{ch_num}\b", cand_norm):
             return True
 
     return False
@@ -73,8 +73,9 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
         print(f"File not found: {json_path}")
         return
 
-    # Load ground truth dataset to get source_files if needed
+    # Load ground truth dataset to get source_files and expected_pairs
     source_files_by_id = {}
+    expected_pairs_by_id = {}
     if os.path.exists(dataset_path):
         with open(dataset_path, "r", encoding="utf-8") as f:
             gt_data = json.load(f)
@@ -84,6 +85,7 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
                 if not s_files and item.get("source_file"):
                     s_files = [s.strip() for s in item["source_file"].split(";") if s.strip()]
                 source_files_by_id[cid] = s_files
+                expected_pairs_by_id[cid] = item.get("expected_pairs", [])
 
     with open(json_path, "r", encoding="utf-8") as f:
         cases = json.load(f)
@@ -105,6 +107,16 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
         exp_docs = case.get("expected_documents") or source_files_by_id.get(cid, [])
         case["expected_documents"] = exp_docs
 
+        # Expected pairs (exact paired document and section)
+        exp_pairs = case.get("expected_pairs") or expected_pairs_by_id.get(cid, [])
+        if not exp_pairs:
+            # Fallback if no precomputed pairs: zip if same length, else cross
+            if len(exp_docs) == len(exp_sec) and len(exp_docs) > 0:
+                exp_pairs = [{"doc": d, "section": s} for d, s in zip(exp_docs, exp_sec)]
+            else:
+                exp_pairs = [{"doc": d, "section": s} for d in exp_docs for s in exp_sec]
+        case["expected_pairs"] = exp_pairs
+
         # Remove redundant legacy key
         case.pop("law_article", None)
 
@@ -112,6 +124,9 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
         case.pop("expected_category", None)
         case.pop("predicted_category", None)
         case.pop("is_category_hit", None)
+
+        if "legal_reasoning" not in case and "answer" in case:
+            case["legal_reasoning"] = case["answer"]
 
         pred_laws = case.get("predicted_laws", [])
         
@@ -138,18 +153,17 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
             if is_doc_hit:
                 break
 
-        # 3. Strict AND Condition: Must hit BOTH Document AND Section
+        # 3. Strict AND Condition: Must hit the EXACT PAIRED Document AND Section together
         is_both = False
-        for ed in exp_docs:
-            for ts in exp_sec:
-                ts_clean = str(ts).strip()
-                if not ts_clean:
-                    continue
-                for pl in pred_laws:
-                    if match_doc_and_section(ed, ts_clean, str(pl)):
-                        is_both = True
-                        break
-                if is_both:
+        for pair in exp_pairs:
+            ed = pair.get("doc", "")
+            ts = pair.get("section", "")
+            ts_clean = str(ts).strip()
+            if not ts_clean:
+                continue
+            for pl in pred_laws:
+                if match_doc_and_section(ed, ts_clean, str(pl)):
+                    is_both = True
                     break
             if is_both:
                 break
