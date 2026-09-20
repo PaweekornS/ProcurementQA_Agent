@@ -84,19 +84,34 @@ def match_legal_section(expected: str, candidate: str) -> bool:
     return False
 
 
-def match_category(expected: str, candidate: str) -> bool:
-    tc_clean = str(expected).strip()
-    pc_clean = str(candidate).strip()
-    if not tc_clean or not pc_clean:
+def match_document(expected_file: str, candidate_text: str) -> bool:
+    """Check if candidate text matches the expected source document title."""
+    if not expected_file or not candidate_text:
         return False
-    if tc_clean in pc_clean or pc_clean in tc_clean:
+    # Clean file name from path like 'พรบ/พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md'
+    base_name = os.path.basename(expected_file)
+    base_title = re.sub(r"\.md$", "", base_name, flags=re.IGNORECASE).strip()
+    
+    cand_norm = normalize_legal_text(candidate_text)
+    base_norm = normalize_legal_text(base_title)
+    
+    if base_norm in cand_norm or cand_norm in base_norm:
         return True
-    # Sub-phrase matching (e.g., 'วิธีจัดซื้อจัดจ้าง' in 'การจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจง')
-    tc_parts = [p.strip() for p in re.split(r"[และ/,\s]+", tc_clean) if len(p.strip()) >= 4]
-    for p in tc_parts:
-        if p in pc_clean or pc_clean in p:
-            return True
+        
+    # Core keyword match (e.g. พระราชบัญญัติการจัดซื้อจัดจ้าง, ระเบียบกระทรวงการคลัง, กฎกระทรวง)
+    m = re.search(r"(พระราชบัญญัติ[^\n|]+?๒๕๖๐|พระราชบัญญัติ[^\n|]+?2560|ระเบียบกระทรวงการคลัง[^\n|]+?๒๕๖๐|ระเบียบกระทรวงการคลัง[^\n|]+?2560|กฎกระทรวง[^\n|]+?๒๕๖๑|กฎกระทรวง[^\n|]+?2561)", base_norm)
+    if m and m.group(1) in cand_norm:
+        return True
     return False
+
+
+def match_doc_and_section(expected_file: str, expected_section: str, candidate: str) -> bool:
+    """Strict AND condition: candidate must match BOTH the document and the section/clause."""
+    if not match_legal_section(expected_section, candidate):
+        return False
+    if not expected_file:
+        return True
+    return match_document(expected_file, candidate)
 
 
 def process_cases_worker(
@@ -125,12 +140,12 @@ def process_cases_worker(
     
     results = []
     section_hits = 0
-    category_hits = 0
+    document_hits = 0
+    both_hits = 0
     
     try:
         for case in tqdm(cases, desc=f"Processing on {device} with {model_name}"):
             question = case.get("fact", "")
-            true_category = case.get("crime", [])
             true_section = case.get("laws", [])
             ground_truth = case.get("ground_truth", "")
             
@@ -139,7 +154,6 @@ def process_cases_worker(
             pred_answer = ""
             pred_direct_answer = ""
             pred_laws = []
-            pred_category = []
             exceptions = ""
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
@@ -147,7 +161,6 @@ def process_cases_worker(
                 pred_answer = judge_result.get("answer", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                pred_category = list(judge_result.get("category", judge_result.get("charge_name", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
                 # Also include used laws from graph traversal
@@ -157,7 +170,11 @@ def process_cases_worker(
                     if entry and entry not in pred_laws:
                         pred_laws.append(entry)
 
-            # Check Section hit (normalized Thai/Arabic numerals & section regex)
+            expected_docs = case.get("source_files", [])
+            if not expected_docs and case.get("source_file"):
+                expected_docs = [s.strip() for s in case["source_file"].split(";") if s.strip()]
+
+            # 1. Section Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
@@ -169,23 +186,39 @@ def process_cases_worker(
                         break
                 if is_section_hit:
                     break
+
+            # 2. Document Hit
+            is_document_hit = False
+            for ed in expected_docs:
+                for pl in pred_laws:
+                    if match_document(ed, str(pl)):
+                        is_document_hit = True
+                        break
+                if is_document_hit:
+                    break
+
+            # 3. AND Condition: Must hit BOTH the correct Document AND Section in the same cited provision
+            is_both_hit = False
+            for ed in expected_docs:
+                for ts in true_section:
+                    ts_clean = str(ts).strip()
+                    if not ts_clean:
+                        continue
+                    for pl in pred_laws:
+                        if match_doc_and_section(ed, ts_clean, str(pl)):
+                            is_both_hit = True
+                            break
+                    if is_both_hit:
+                        break
+                if is_both_hit:
+                    break
+
             if is_section_hit:
                 section_hits += 1
-
-            # Check Category hit (with composite phrase support)
-            is_category_hit = False
-            for tc in true_category:
-                tc_clean = str(tc).strip()
-                if not tc_clean:
-                    continue
-                for pc in pred_category:
-                    if match_category(tc_clean, str(pc)):
-                        is_category_hit = True
-                        break
-                if is_category_hit:
-                    break
-            if is_category_hit:
-                category_hits += 1
+            if is_document_hit:
+                document_hits += 1
+            if is_both_hit:
+                both_hits += 1
 
             results.append({
                 "id": case.get("id"),
@@ -194,22 +227,20 @@ def process_cases_worker(
                 "answer": pred_answer,
                 "ground_truth": ground_truth,
                 "expected_section": true_section,
+                "expected_documents": expected_docs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
-                "expected_category": true_category,
-                "predicted_category": pred_category,
-                "is_category_hit": is_category_hit,
+                "is_document_hit": is_document_hit,
+                "is_both_hit": is_both_hit,
                 "exceptions_or_conditions": exceptions,
-                # Backward compatibility keys
                 "fact": question,
-                "law_article": true_section,
                 "judge_res": case_res,
             })
         
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
         
-        return section_hits, category_hits, len(cases)
+        return section_hits, document_hits, both_hits, len(cases)
     
     finally:
         if hasattr(rag, 'model') and hasattr(rag.model, 'release_model'):
@@ -318,11 +349,12 @@ def run_evaluation(
         time_after = time.time()
         elapsed_time = time_after - time_before
         
-        total_section_hits, total_category_hits, total_cases = 0, 0, 0
+        total_document_hits, total_section_hits, total_both_hits, total_cases = 0, 0, 0, 0
         for res in async_results:
-            sec_hits, cat_hits, count = res.get()
+            sec_hits, doc_hits, both_hits, count = res.get()
             total_section_hits += sec_hits
-            total_category_hits += cat_hits
+            total_document_hits += doc_hits
+            total_both_hits += both_hits
             total_cases += count
             
         combined_results = []
@@ -347,13 +379,14 @@ def run_evaluation(
         rag = LegalGraphRAG(config=config)
         
         combined_results = []
+        total_document_hits = 0
         total_section_hits = 0
-        total_category_hits = 0
+        total_both_hits = 0
         results_lock = threading.Lock()
         pbar = tqdm(total=len(test_cases), desc=f"Evaluating ({workers} workers)")
         
         def process_single_case(case):
-            nonlocal total_section_hits, total_category_hits
+            nonlocal total_document_hits, total_section_hits, total_both_hits
             question = case.get("fact", "")
             true_category = case.get("crime", [])
             true_section = case.get("laws", [])
@@ -364,7 +397,6 @@ def run_evaluation(
             pred_answer = ""
             pred_direct_answer = ""
             pred_laws = []
-            pred_category = []
             exceptions = ""
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
@@ -372,7 +404,6 @@ def run_evaluation(
                 pred_answer = judge_result.get("answer", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                pred_category = list(judge_result.get("category", judge_result.get("charge_name", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
                 used_laws = case_res[0].get("used_laws", [])
@@ -381,6 +412,11 @@ def run_evaluation(
                     if entry and entry not in pred_laws:
                         pred_laws.append(entry)
 
+            expected_docs = case.get("source_files", [])
+            if not expected_docs and case.get("source_file"):
+                expected_docs = [s.strip() for s in case["source_file"].split(";") if s.strip()]
+
+            # 1. Section Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
@@ -393,16 +429,30 @@ def run_evaluation(
                 if is_section_hit:
                     break
 
-            is_category_hit = False
-            for tc in true_category:
-                tc_clean = str(tc).strip()
-                if not tc_clean:
-                    continue
-                for pc in pred_category:
-                    if match_category(tc_clean, str(pc)):
-                        is_category_hit = True
+            # 2. Document Hit
+            is_document_hit = False
+            for ed in expected_docs:
+                for pl in pred_laws:
+                    if match_document(ed, str(pl)):
+                        is_document_hit = True
                         break
-                if is_category_hit:
+                if is_document_hit:
+                    break
+
+            # 3. Strict AND Condition: Must hit BOTH the correct Document AND Section in the same cited provision
+            is_both_hit = False
+            for ed in expected_docs:
+                for ts in true_section:
+                    ts_clean = str(ts).strip()
+                    if not ts_clean:
+                        continue
+                    for pl in pred_laws:
+                        if match_doc_and_section(ed, ts_clean, str(pl)):
+                            is_both_hit = True
+                            break
+                    if is_both_hit:
+                        break
+                if is_both_hit:
                     break
 
             case_data = {
@@ -412,22 +462,23 @@ def run_evaluation(
                 "answer": pred_answer,
                 "ground_truth": ground_truth,
                 "expected_section": true_section,
+                "expected_documents": expected_docs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
-                "expected_category": true_category,
-                "predicted_category": pred_category,
-                "is_category_hit": is_category_hit,
+                "is_document_hit": is_document_hit,
+                "is_both_hit": is_both_hit,
                 "exceptions_or_conditions": exceptions,
                 "fact": question,
-                "law_article": true_section,
                 "judge_res": case_res
             }
             
             with results_lock:
                 if is_section_hit:
                     total_section_hits += 1
-                if is_category_hit:
-                    total_category_hits += 1
+                if is_document_hit:
+                    total_document_hits += 1
+                if is_both_hit:
+                    total_both_hits += 1
                 combined_results.append(case_data)
                 pbar.update(1)
 
@@ -447,17 +498,18 @@ def run_evaluation(
         combined_results.sort(key=lambda x: x.get("id", 0))
         total_cases = len(combined_results)
     
+    doc_rate = (total_document_hits / total_cases * 100) if total_cases > 0 else 0.0
     sec_rate = (total_section_hits / total_cases * 100) if total_cases > 0 else 0.0
-    cat_rate = (total_category_hits / total_cases * 100) if total_cases > 0 else 0.0
+    strict_hit_rate = (total_both_hits / total_cases * 100) if total_cases > 0 else 0.0
     
-    print(f"\n{'='*60}")
-    print(f"Model: {model_name}")
-    print(f"Dataset: {datasets}")
-    print(f"Total questions evaluated: {total_cases}")
-    print(f"Section Retrieval Hit Rate: {total_section_hits}/{total_cases} ({sec_rate:.1f}%)")
-    print(f"Category Match Rate: {total_category_hits}/{total_cases} ({cat_rate:.1f}%)")
+    print(f"\n{'='*65}")
+    print(f"Model: {model_name} | Dataset: {datasets}")
+    print(f"Total Questions Evaluated: {total_cases}")
+    print(f"🎯 STRICT HIT RATE [Doc AND Section] (Recall@k): {total_both_hits}/{total_cases} ({strict_hit_rate:.1f}%)")
+    print(f"   ├─ Document Hit Rate: {total_document_hits}/{total_cases} ({doc_rate:.1f}%)")
+    print(f"   └─ Section Hit Rate:  {total_section_hits}/{total_cases} ({sec_rate:.1f}%)")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"{'='*60}\n")
+    print(f"{'='*65}\n")
     
     combined_file = os.path.join(output_dir, f"{model_name}_results_combined.json")
     with open(combined_file, "w", encoding="utf-8") as f:
@@ -470,11 +522,12 @@ def run_evaluation(
         "model_name": model_name,
         "dataset": datasets,
         "total_cases": total_cases,
+        "strict_hits": total_both_hits,
+        "strict_hit_rate": strict_hit_rate,
+        "document_hits": total_document_hits,
+        "document_hit_rate": doc_rate,
         "section_hits": total_section_hits,
         "section_hit_rate": sec_rate,
-        "category_hits": total_category_hits,
-        "category_hit_rate": cat_rate,
-        "correct_count": total_section_hits,
         "elapsed_time": elapsed_time,
         "output_file": combined_file
     }

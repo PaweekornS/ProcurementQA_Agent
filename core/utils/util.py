@@ -62,9 +62,11 @@ def concat_feature_descriptions(description, raw_text=""):
     if defendant:
         parts.append("หน่วยงาน/ผู้เกี่ยวข้อง: " + ", ".join(str(x) for x in defendant))
 
-    feature_summary = " | ".join(parts)
+    feature_summary = " ".join(parts).strip()
+    # If original inquiry text is available, prioritize it directly as query
+    # to avoid BM25 term frequency dilution from repetitive metadata labels
     if raw_text and raw_text.strip():
-        return f"{raw_text.strip()}\n{feature_summary}" if feature_summary else raw_text.strip()
+        return raw_text.strip()
     return feature_summary if feature_summary else str(raw_text)
 
 
@@ -209,8 +211,9 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config):
             item["used_facts"] = []
             continue
             
-        # Use top reranked laws (up to 5) directly for procurement legal reasoning
-        law_used = retrieved_laws[:5]
+        # Use top reranked laws (up to 8) plus graph-traversed neighbor laws
+        max_laws = retrieve_config.get("direct_retrieve_top_k", 8)
+        law_used = retrieved_laws[:max_laws]
             
         fact_used = filter_facts(law_used, retrieved_facts) if retrieved_facts else []
         judge_result = judge_crime_all(

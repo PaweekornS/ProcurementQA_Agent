@@ -106,10 +106,6 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         if m_laws:
             parsed["applicable_laws"] = [s.strip(" \"'\n\r") for s in m_laws.group(1).split(",") if s.strip(" \"'\n\r")]
             
-        m_cat = re.search(r'["\']category["\']\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
-        if m_cat:
-            parsed["category"] = [s.strip(" \"'\n\r") for s in m_cat.group(1).split(",") if s.strip(" \"'\n\r")]
-            
         if not parsed.get("answer"):
             parsed["answer"] = cleaned
 
@@ -131,20 +127,10 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         raw_laws = parsed["applicable_laws"] if isinstance(parsed["applicable_laws"], list) else [str(parsed["applicable_laws"])]
     parsed["applicable_laws"] = list(dict.fromkeys([str(x).strip() for x in raw_laws if str(x).strip()]))
 
-    if "category" not in parsed:
-        if "charge_name" in parsed:
-            raw_cats = parsed["charge_name"] if isinstance(parsed["charge_name"], list) else [str(parsed["charge_name"])]
-        else:
-            raw_cats = []
-    else:
-        raw_cats = parsed["category"] if isinstance(parsed["category"], list) else [str(parsed["category"])]
-    parsed["category"] = list(dict.fromkeys([str(x).strip() for x in raw_cats if str(x).strip()]))
-
     if "exceptions_or_conditions" not in parsed:
         parsed["exceptions_or_conditions"] = ""
 
     # Map backwards for legacy consumers
     parsed["law_article"] = parsed["applicable_laws"]
-    parsed["charge_name"] = parsed["category"]
 
     return parsed

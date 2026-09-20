@@ -121,13 +121,17 @@ class GPUReranker:
             print(f"[GPUReranker] Initializing CrossEncoder '{self.model_name}' on '{self.device}'...")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
-            load_kwargs = {"low_cpu_mem_usage": False}
             if torch and torch.cuda.is_available() and "cuda" in str(self.device):
-                load_kwargs["type"] = torch.float16
-                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, **load_kwargs).to(self.device)
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    low_cpu_mem_usage=False
+                ).half().to(self.device)
             else:
                 self.device = "cpu"
-                self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name, **load_kwargs).to("cpu")
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_name,
+                    low_cpu_mem_usage=False
+                ).to("cpu")
             self.model.eval()
             print(f"[GPUReranker] Successfully loaded reranker on '{self.device}'.")
         except Exception as e:

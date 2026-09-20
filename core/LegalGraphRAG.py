@@ -164,7 +164,7 @@ class LegalGraphRAGConfig:
             direct_retrieve=os.getenv("direct_retrieve", "True") == "True",
             augment_retrieve=os.getenv("augment_retrieve", "True") == "True",
             top_retrieve_top_k=int(os.getenv("top_retrieve_top_k", 3)),
-            direct_retrieve_top_k=int(os.getenv("direct_retrieve_top_k", 3))
+            direct_retrieve_top_k=int(os.getenv("direct_retrieve_top_k", 5))
         )
         
         # Graph configuration
