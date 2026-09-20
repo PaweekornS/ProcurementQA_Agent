@@ -688,8 +688,8 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
     )
 
     # 4. GPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
-    # Optimization: Filter candidate pool to top 16 before reranking to dramatically reduce CrossEncoder overhead
-    rerank_pool = fused_candidates[:16]
+    # Expand candidate pool to top 50 before reranking to maximize recall@k
+    rerank_pool = fused_candidates[:50]
     reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
     if reranker and reranker.model is not None:
         top_candidates = reranker.rerank(
