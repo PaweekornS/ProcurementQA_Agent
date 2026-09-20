@@ -57,7 +57,7 @@ class OpenRouterChatbot(OpenAIBaseModel):
         self,
         user_input: str,
         max_length: int = 4096,
-        temperature: float = 0.1,
+        temperature: Optional[float] = None,
         retries: int = 3,
         backoff_seconds: float = 2.0,
     ) -> str:
@@ -65,6 +65,12 @@ class OpenRouterChatbot(OpenAIBaseModel):
         Generate response with retry logic for OpenRouter API.
         """
         last_exception = None
+        if temperature is None:
+            try:
+                temperature = float(os.getenv("temperature", "0.0"))
+            except ValueError:
+                temperature = 0.0
+
         effort = os.getenv("OPENROUTER_REASONING_EFFORT", "none")
         extra_body = {"reasoning": {"effort": effort}} if effort else None
 

@@ -1,278 +1,160 @@
-# **LegalGraphRAG: Multi-Agent Graph Retrieval-Augmented Generation for Reliable Legal Reasoning**
+# LegalGraphRAG: Multi-Agent Corrective RAG (CRAG) for Thai Government Procurement Law
 
-> An evaluation framework for legal judgment prediction that integrates multi-agent graph retrieval and provides a reproducible main-experiment pipeline for LegalGraphRAG.
-
-<!-- <p align="center">
-  <a href="https://www.researchgate.net/publication/403734810_LegalGraphRAG_Multi-Agent_Graph_Retrieval-Augmented_Generation_for_Reliable_Legal_Reasoning" target="_blank">
-    <img src="https://img.shields.io/badge/Paper-ResearchGate-blue?style=flat-square" alt="Paper">
-  </a>
-  <a href="https://github.com/DEEP-PolyU/LegalGraphRAG" target="_blank">
-    <img src="https://img.shields.io/badge/GitHub-Project-181717?logo=github&style=flat-square" alt="GitHub">
-  </a>
-</p> -->
+> **An advanced legal question-answering and statutory retrieval system for Thai Government Procurement laws and regulations.**
+> Powered by an active **Multi-Agent Corrective RAG (CRAG)** architecture combining **Multi-Aspect Hybrid Retrieval (Dense Vector + Thai BM25 + GPU Cross-Encoder Reranking)** and **Knowledge Graph Traversal**.
 
 ---
 
-## 🚀 **Highlights**
+## 🚀 **Key Highlights**
 
-- ✅ **Automated Evaluation**: Computes charge, law-article, and imprisonment metrics for the main LegalGraphRAG experiment.
-- ✅ **Multi-Model Support**: Supports Qwen, DeepSeek, GPT, InternLM, GLM, Gemma, and more.
-- ✅ **Dataset Coverage**: Includes legal datasets such as CAIL and CMDL.
-- ✅ **Main Experiment Assets**: Includes the 14,049-case graph corpus and the 568-case CAIL evaluation set used by the main experiment.
-
-<p align="center">
-  <img src="images/method.png" width="95%" alt="Framework Overview">
-</p>
+- ✅ **Multi-Agent CRAG Architecture**:
+  1. **Issue Decomposer & Intent Classifier (Agent 1)**: Decomposes complex procurement inquiries into atomic sub-questions (`sub-issues`), preventing dominant topics from masking secondary issues during search.
+  2. **Multi-Aspect Hybrid Retrieval**: Concurrently queries dense vector embeddings, tokenized Thai BM25, GPU Cross-Encoder reranker (`BAAI/bge-reranker-v2-m3`), and graph clusters with reciprocal score fusion.
+  3. **Legal Synthesizer & Adjudicator (Agent 2)**: Formulates grounded legal judgments, strictly separating a concise `direct_answer` from detailed `legal_reasoning`.
+  4. **Completeness & Grounding Auditor (Agent 3)**: Audits whether all sub-issues are comprehensively addressed and explicitly substantiated by retrieved statutory clauses.
+  5. **Targeted Query Refiner (Agent 4) with Active Feedback Loop (`max_retry=1`)**: Automatically constructs focused search queries and traverses 1-hop graph neighbors (`RELATED_TO`, `RELATES_TO_LAW`) for missing statutory aspects, triggering a secondary retrieval pass.
+- ✅ **Clean Direct Answer**: `direct_answer` provides an unambiguous, straightforward summary free of statutory section numbers (e.g. no "มาตรา" or "ข้อ" clutter), keeping all legal citations structured in `applicable_laws`.
+- ✅ **3-Tier NO_LAW_FOUND Guardrails**: Detects out-of-scope inquiries across three defensive layers: pre-LLM retrieval emptiness, LLM prompt guidelines, and post-processing override.
+- ✅ **Comprehensive Benchmark Evaluator**: Evaluates legal answer quality using an LLM Judge (0–5 rubric) measuring:
+  - Strict Hit Rate (Doc & Section Recall@k)
+  - Citation Precision, Recall, and F1
+  - Rule & Penalty Correctness
+  - Completeness vs Ground Truth
+  - Hallucination-Free Rate
+  - Verbosity / Word Length Ratio
 
 ---
 
 ## 🧩 **Project Structure**
 
 ```text
-LegalGraphRAG/
-├── core/                      # Core modules
-│   ├── LegalGraphRAG.py       # Main LegalGraphRAG class
-│   ├── models/                # Model implementations
-│   │   ├── transformers/      # Transformers-based models (Qwen, InternLM, GLM, Gemma)
-│   │   └── openai/            # OpenAI-compatible models (DeepSeek, GPT)
-│   ├── graph_construct/       # Graph construction and management
-│   ├── judge/                 # Legal judgment modules
-│   ├── preprocess/            # Data preprocessing
-│   ├── prompt/                # Prompt templates
-│   └── utils/                 # Utility functions
-├── scripts/                   # Data preparation scripts
-├── raw_data/                  # User-provided source files for preprocessing
-├── datas/                     # Generated preprocessing outputs
-│   └── main_experiment/       # Main experiment graph corpus and evaluation assets
-├── configs/                   # Reproduction configuration files
-├── evaluation/                # Metric scripts for generated outputs
-├── run.py                     # Main evaluation script
-├── env.example                # Configuration file template
-└── README.md                  # Project documentation
+LegalGraphRAG_procurement/
+├── core/
+│   ├── LegalGraphRAG.py       # Main LegalGraphRAG engine and LegalGraphRAGConfig
+│   ├── crag/                  # Multi-Agent Corrective RAG Package
+│   │   ├── classifier.py      # Agent 1: Issue Decomposer & Intent Classifier
+│   │   ├── synthesizer.py     # Agent 2: Legal Synthesizer & Adjudicator
+│   │   ├── auditor.py         # Agent 3: Completeness & Grounding Auditor
+│   │   ├── refiner.py         # Agent 4: Query Refiner & Graph Neighbor Search
+│   │   └── pipeline.py        # CRAG Orchestrator (Multi-Aspect Search & Retry Loop)
+│   ├── graph_construct/       # Knowledge graph construction and retrieval
+│   │   ├── feature_graph.py   # Hybrid Search (Dense + BM25 + Cross-Encoder Reranker)
+│   │   └── graph_db.py        # NetworkX In-Memory Graph Database
+│   ├── judge/                 # Legal judgment & guardrails (judge_crime.py)
+│   ├── preprocess/            # Procurement entity & feature extraction
+│   ├── prompt/                # Unified prompt registry
+│   │   ├── crag/              # Prompts for Decomposer, Auditor, and Refiner
+│   │   ├── judge/             # Prompts for Legal Synthesizer
+│   │   └── preprocess/        # Prompts for Procurement Features
+│   └── utils/                 # Utilities and pipeline helper functions
+├── configs/
+│   └── thai_procurement.env   # Model, API keys, retrieval top-k, and reranker settings
+├── datas/
+│   ├── law_to_crime.json      # Knowledge base of Thai procurement statutory clauses (2,486 nodes)
+│   └── cases_with_feature.json# Repository of past procurement consultations and advisory cases
+├── datasets/
+│   └── crime_data_THAI_small.json # Benchmark dataset of 40 Thai procurement inquiry test cases
+├── evaluation/
+│   └── evaluate_results.py    # Benchmark evaluation script (LLM Judge + statistical metrics)
+├── outputs/
+│   └── openrouter_graph_db.pkl# Cached in-memory graph and vector index for instant loading
+├── run.py                     # Main CLI execution pipeline
+└── README.md
 ```
 
 ---
 
-## 🛠️ **Usage**
+## 🛠️ **Installation & Usage**
 
-### 0️⃣ Reproduce the Main Experiment
+### 1️⃣ Dependencies
 
-The main experiment uses:
-
-- Graph/case corpus: `datas/main_experiment/cases_with_feature_big.json` with 14,049 cases.
-- CAIL evaluation set: `datas/main_experiment/crime_data_CAIL_small.json` with 568 cases.
-- CMDL evaluation set: `datas/main_experiment/crime_data_CMDL_small.json` with 1,374 per-defendant records.
-- Criminal law resource: `datas/main_experiment/criminal_law_processed.json`.
-- Crime-category metadata: `datas/main_experiment/crimes_by_part.json`.
-- Reproduction config: `configs/main.env`.
-
-`datas/cases_with_feature.json` is only a small demonstration corpus. The
-14,049-case Table 2 corpus, its source-ID manifest, construction commands, and
-the CAIL/CMDL evaluation protocol are documented in
-[Table 2 Data and Evaluation](docs/TABLE2_REPRODUCTION.md).
-Manual corpus review also used
-[LeCaRDv2](https://github.com/THUIR/LeCaRDv2) as a reference and incorporated
-a small amount of supplementary data from it.
-
-Install the declared dependencies and verify the bundled experiment assets:
+Install required packages (Python 3.10+):
 
 ```bash
 pip install -r requirements.txt
-cd datas/main_experiment && sha256sum -c SHA256SUMS && cd ../..
 ```
 
-Use Python 3.10 or newer. The Qwen3 main run requires a CUDA-capable environment with PyTorch 2.6+, Transformers 4.51+, and enough memory to load one `Qwen/Qwen3-8B` copy per worker.
-
-Before running, make sure the embedding service is available:
-
-```bash
-curl http://localhost:11434/api/embed \
-  -d '{"model":"bge-m3","input":"test"}'
-```
-
-The default embedding endpoint is `http://localhost:11434/api/embed` and the default embedding model is `bge-m3`. Both values are configurable in `configs/main.env` and are used by graph construction and retrieval.
-
-Run LegalGraphRAG on the main CAIL experiment:
-
-```bash
-python run.py \
-  --model qwen3 \
-  --datasets CAIL \
-  --dotenv_path configs/main.env \
-  --devices cuda:0 cuda:1 \
-  --force-rebuild
-```
-
-The graph is saved to `./outputs/main_experiment/qwen3_graph_db.pkl`. Subsequent runs can skip graph construction:
-
-```bash
-python run.py \
-  --model qwen3 \
-  --datasets CAIL \
-  --dotenv_path configs/main.env \
-  --devices cuda:0 cuda:1 \
-  --no-build-graph
-```
-
-If you change the model used for graph construction, use `--force-rebuild` or set a different `graph_db_path` in the config.
-
-Evaluate the generated result file:
-
-```bash
-python evaluation/evaluate_results.py \
-  --results outputs/main_experiment/CAIL/qwen3_results_combined.json \
-  --crimes-by-part datas/main_experiment/crimes_by_part.json
-```
-
-This writes:
-
-- `outputs/main_experiment/CAIL/qwen3_results_combined_metrics.json`
-- `outputs/main_experiment/CAIL/qwen3_results_combined_metrics.csv`
-
-To read the Table 2 results, open the `_metrics.csv` file and use the row with
-`scope=overall`. The Accuracy and Micro-F1 columns reported in Table 2 are
-`charge_accuracy` and `charge_micro_f1`, respectively. The CMDL metrics are
-written to the corresponding `outputs/main_experiment/CMDL/` directory.
-
-The evaluation script reports:
-
-- Charge prediction: exact-match accuracy and Micro-F1.
-- Law article prediction: exact-match accuracy and Micro-F1.
-- Term prediction: exact match and mean absolute error in months.
-
-These metrics follow the paper scripts' aggregation: charge and law predictions are evaluated per entry in `judge_res`, while imprisonment uses the first judgment for each of the 568 cases.
-
-Baseline systems such as HippoRAG2, RAPTOR, LightRAG, LegalDelta, and ADAPT are not included in this repository. Their outputs can still be compared externally if converted to the same result schema.
-
-### 1️⃣ Environment Setup
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy and configure environment file
-cp env.example .env
-# Edit .env with model paths, API keys, and runtime settings
-```
-
-### 2️⃣ Data Preparation (Small CAIL Example)
-
-Put these source files under `./raw_data/`:
-
-- `final_test.json`: raw CAIL case records used for this small example.
-- `law_to_crime.json`: base mapping from law article ids to candidate crimes.
-- `criminal_law_processed.json`: structured criminal law articles (article id + item texts).
-- `judicial_explanations.json`: judicial interpretation snippets linked to law article ids.
-- `law_corpus.jsonl`: full law text corpus used as fallback when law text is missing.
-
-Use one command to prepare all required data:
-
-```bash
-python scripts/prepare_data.py --dotenv-path .env --raw-data-dir ./raw_data
-```
-
-This pipeline does four things in order:
-
-- Builds sampled CAIL cases from raw records.
-- Generates evaluation input file under `datasets/`.
-- Uses an LLM to extract structured case features.
-- Uses an LLM to generate law judgment dependency hints.
-- Merges law resources into final project-ready law mapping data.
-
-After these steps, make sure these files exist:
-
-- `datas/cases_with_feature.json`
-- `datasets/crime_data_CAIL_small.json`
-- `datas/law_to_crime.json`
-
-This example pipeline does not construct the historical 14,049-case Table 2
-corpus. See [Table 2 Data and Evaluation](docs/TABLE2_REPRODUCTION.md) for that
-corpus and its construction scripts.
-
-### 3️⃣ Run Evaluation
-
-```bash
-python run.py --model qwen3 --datasets CAIL --devices cuda:2 cuda:3
-```
-
-**Main arguments**
-
-- `--model`: `qwen3`, `qwen2_5`, `gemma3`, `internlm3`, `glm4`, `deepseek_v3`, `gpt4o_mini`
-- `--datasets`: dataset name, e.g. `CAIL`, `CMDL`
-- `--dotenv_path`: path to `.env` (default: `.env`)
-- `--datasets_path`: path to datasets (default: `./datasets`)
-- `--devices`: GPU devices, e.g. `cuda:0 cuda:1`
-- `--no-build-graph`: skip graph construction when graph already exists
-- `--force-rebuild`: force graph rebuild even if artifacts already exist
-
-Set `prompt_language=zh` or `prompt_language=en` in `.env` to choose Chinese or English prompts.
-For multiprocessing runs, `graph_db_path` must point to a writable file so worker processes can load the graph database. If it is omitted, `run.py` automatically writes one under the configured output directory.
-
-### 4️⃣ Output Files
-
-- Prediction outputs:
-  - `{output_dir}/{dataset}/{model}_results_combined.json`
-- Statistics:
-  - `{output_dir}/{dataset}/{model}_stats.json`
-
-Example output summary:
-
-```json
-{
-  "model_name": "qwen3",
-  "dataset": "CAIL",
-  "total_cases": 1000,
-  "correct_count": 0,
-  "elapsed_time": 3600.0,
-  "output_file": "./outputs/CAIL/qwen3_results_combined.json"
-}
-```
-
-`correct_count` is retained for compatibility and is not the paper metric. Use `evaluation/evaluate_results.py` for charge, law article, and imprisonment metrics.
+> **Note for GPU Reranker**:
+> Ensure CUDA-compatible `torch` and `sentence-transformers` are installed for accelerating `BAAI/bge-reranker-v2-m3`.
 
 ---
 
-## ⚙️ **Configuration**
+### 2️⃣ Environment Configuration (`configs/thai_procurement.env`)
 
-Configuration is managed via `.env`. Key groups include:
+Configure your environment settings in `.env` or `configs/thai_procurement.env`:
 
-- **Model Configuration**: model names, devices, API keys, generation parameters
-- **Data Configuration**: dataset paths and output directory
-- **Graph Configuration**: graph construction and retrieval settings
+```ini
+# OpenRouter / OpenAI API Configuration
+model_name=openrouter:google/gemini-2.5-flash
+OPENROUTER_API_KEY=your_openrouter_api_key
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
-See `env.example` for the full configuration list.
+# Embedding Service (Ollama / Local)
+embedding_api_url=http://localhost:11434/api/embed
+embedding_model=unsloth/embeddinggemma-300m
+
+# Graph & Retrieval Settings
+graph_db_path=./outputs/openrouter_graph_db.pkl
+top_retrieve_top_k=3
+direct_retrieve_top_k=5
+reranker_model=BAAI/bge-reranker-v2-m3
+reranker_device=cuda:0
+reranker_threshold=-4.0
+
+# CRAG Multi-Agent Loop
+crag_enabled=true
+crag_max_retry=1
+```
 
 ---
 
-## 🎯 **Supported Models**
+### 3️⃣ Running LegalGraphRAG (`run.py`)
 
-- Qwen3-8B
-- Qwen2.5-7B-Instruct
-- DeepSeek-V3
-- GPT-4o-mini
-- InternLM3
-- GLM-4
-
----
-
-## ⚡ **Multi-GPU Execution**
-
-Run on multiple GPUs by passing several devices:
+Execute the pipeline on the evaluation dataset. Use `--no-build-graph` to load the pre-built knowledge graph:
 
 ```bash
-python run.py --model qwen3 --datasets CAIL --devices cuda:0 cuda:1 cuda:2 cuda:3
+python run.py --no-build-graph
 ```
 
-Cases are automatically distributed across the selected devices.
+Execution steps performed automatically:
 
-## 🍀 Citation
+1. Loads the NetworkX In-Memory Knowledge Graph from `outputs/openrouter_graph_db.pkl`.
+2. Builds and caches the Thai BM25 index alongside dense embeddings.
+3. Dispatches inquiries through the **CRAG Multi-Agent Loop**.
+4. Outputs structured legal predictions and `crag_meta` diagnostics to `outputs/THAI/openrouter_results_combined.json`.
 
-```bibtex
-@inproceedings{chen2026legalgraphrag,
-  title={LegalGraphRAG: Multi-Agent Graph Retrieval-Augmented Generation for Reliable Legal Reasoning},
-  author={Chen, Zerui and Zhang, Qinggang and Xiang, Zhishang and Wei, Zhimin and Gao, Linfeng and Huang, Xiao and Zhang, Zhihong and Su, Jinsong},
-  booktitle={Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
-  pages={37455--37484},
-  year={2026}
-}
+---
+
+### 4️⃣ Benchmark Evaluation (`evaluate_results.py`)
+
+Evaluate the generated answers against ground-truth legal principles using the LLM Judge:
+
+```bash
+python evaluation/evaluate_results.py
 ```
+
+Outputs generated:
+
+- `outputs/THAI/openrouter_results_combined_metrics.json`: Detailed per-question metric logs.
+- `outputs/THAI/openrouter_results_combined_summary.md`: Comprehensive evaluation report with summary tables, 0–5 quality scores, completeness breakdown, and qualitative critiques.
+
+---
+
+## 📊 **Evaluation Metrics**
+
+| Category                    | Metric                                     | Description                                                                                     |
+| :-------------------------- | :----------------------------------------- | :---------------------------------------------------------------------------------------------- |
+| **Retrieval Quality** | **Strict Hit Rate**                  | Exact recall matching BOTH the statutory document and section number (Doc AND Section Recall@k) |
+| **Retrieval Quality** | **Section Hit Rate**                 | Proportion of inquiries where the required section is retrieved in Top-K candidates             |
+| **Legal QA Score**    | **Average Score (0–5)**             | Overall response quality based on the Thai Legal QA rubric (Good / Perfect:$\ge$ 4/5)         |
+| **Citation Quality**  | **Citation Precision / Recall / F1** | Accuracy and completeness of cited statutory clauses                                            |
+| **Substance & Fact**  | **Rule / Penalty Correctness**       | Accuracy of statutory numbers, budget thresholds, deadlines, and penalties                      |
+| **Substance & Fact**  | **Completeness vs GT**               | Full coverage of sub-questions, statutory conditions, and exceptions                            |
+| **Trustworthiness**   | **No Hallucination Rate**            | Freedom from fabricated clauses or unsupported legal assertions                                 |
+| **Conciseness**       | **Word Length Ratio**                | Ratio of agent word count relative to ground truth (measuring conciseness)                      |
+
+---
+
+## 📄 **License & Acknowledgments**
+
+This project extends the original LegalGraphRAG framework, re-architecting it for the **Public Procurement and Supplies Administration Act, B.E. 2560 (2017)** (พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560) and related Ministry of Finance regulations of Thailand.

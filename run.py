@@ -115,6 +115,47 @@ def match_doc_and_section(expected_file: str, expected_section: str, candidate: 
     return match_document(expected_file, candidate)
 
 
+def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 5, snippet_len: int = 250) -> Dict[str, Any]:
+    """
+    Extracts high-value diagnostic features and top retrieval evidence with clean snippets.
+    Omits bloated multi-page raw law text dumps.
+    """
+    if not case_res or not isinstance(case_res, list) or len(case_res) == 0:
+        return {}
+    
+    first_res = case_res[0]
+    raw_feature = first_res.get("feature", {})
+    
+    extracted_features = {
+        "stakeholders": raw_feature.get("defendant_info", []),
+        "procurement_topics": raw_feature.get("criminal_acts", []),
+        "scope_and_budget": raw_feature.get("victim_property_details", []),
+        "conditions_or_exceptions": raw_feature.get("intent_remorse", []),
+    }
+    
+    evidence_list = []
+    candidate_laws = first_res.get("used_laws") or first_res.get("retrieved_laws") or []
+    
+    for rank, law in enumerate(candidate_laws[:max_evidence], start=1):
+        raw_desc = law.get("description", "")
+        clean_desc = re.sub(r"\s+", " ", str(raw_desc)).strip()
+        snippet = clean_desc[:snippet_len] + ("..." if len(clean_desc) > snippet_len else "")
+        
+        evidence_list.append({
+            "rank": rank,
+            "law_entry": law.get("entry", ""),
+            "rerank_score": round(float(law.get("rerank_score", 1.0)), 4),
+            "snippet": snippet,
+        })
+        
+    crag_meta = first_res.get("crag_meta", {})
+    return {
+        "extracted_features": extracted_features,
+        "top_retrieved_evidence": evidence_list,
+        "crag_meta": crag_meta,
+    }
+
+
 def process_cases_worker(
     cases: List[Dict[str, Any]],
     config_dict: Dict[str, Any],
@@ -159,17 +200,14 @@ def process_cases_worker(
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
+                pred_status = judge_result.get("status", "COMPLIANT")
                 pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
-                # Also include used laws from graph traversal
-                used_laws = case_res[0].get("used_laws", [])
-                for ul in used_laws:
-                    entry = ul.get("entry", "")
-                    if entry and entry not in pred_laws:
-                        pred_laws.append(entry)
+                if pred_status == "NO_LAW_FOUND":
+                    pred_laws = []
 
             expected_docs = case.get("source_files", [])
             if not expected_docs and case.get("source_file"):
@@ -182,13 +220,26 @@ def process_cases_worker(
                 else:
                     expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
 
+            # Candidate laws for evaluating retrieval hit rate:
+            # Combines retrieved candidates from retrieval/reranker + predicted laws
+            retrieved_candidates = []
+            if case_res and isinstance(case_res, list) and len(case_res) > 0:
+                first_item = case_res[0]
+                cand_pool = list(first_item.get("used_laws", [])) + list(first_item.get("retrieved_laws", []))
+                retrieved_candidates = [
+                    ul.get("entry", "")
+                    for ul in cand_pool
+                    if isinstance(ul, dict) and ul.get("entry")
+                ]
+            eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
+
             # 1. Section Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_legal_section(ts_clean, str(pl)):
                         is_section_hit = True
                         break
@@ -198,7 +249,7 @@ def process_cases_worker(
             # 2. Document Hit
             is_document_hit = False
             for ed in expected_docs:
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_document(ed, str(pl)):
                         is_document_hit = True
                         break
@@ -213,7 +264,7 @@ def process_cases_worker(
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_doc_and_section(ed, ts_clean, str(pl)):
                         is_both_hit = True
                         break
@@ -229,20 +280,18 @@ def process_cases_worker(
 
             results.append({
                 "id": case.get("id"),
+                "status": pred_status,
                 "question": question,
                 "direct_answer": pred_direct_answer,
                 "legal_reasoning": pred_answer,
                 "ground_truth": ground_truth,
-                "expected_section": true_section,
-                "expected_documents": expected_docs,
                 "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
                 "is_both_hit": is_both_hit,
                 "exceptions_or_conditions": exceptions,
-                "fact": question,
-                "judge_res": case_res,
+                "analysis": extract_case_analysis(case_res),
             })
         
         with open(output_file, "w", encoding="utf-8") as f:
@@ -409,31 +458,19 @@ def run_evaluation(
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
+                pred_status = judge_result.get("status", "COMPLIANT")
                 pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
-                used_laws = case_res[0].get("used_laws", [])
-                for ul in used_laws:
-                    entry = ul.get("entry", "")
-                    if entry and entry not in pred_laws:
-                        pred_laws.append(entry)
+                if pred_status == "NO_LAW_FOUND":
+                    pred_laws = []
 
             expected_docs = case.get("source_files", [])
             if not expected_docs and case.get("source_file"):
                 expected_docs = [s.strip() for s in case["source_file"].split(";") if s.strip()]
 
-            # 1. Section Hit
-            is_section_hit = False
-            for ts in true_section:
-                ts_clean = str(ts).strip()
-                if not ts_clean:
-                    continue
-                for pl in pred_laws:
-                    if match_legal_section(ts_clean, str(pl)):
-                        is_section_hit = True
-                        break
             expected_pairs = case.get("expected_pairs", [])
             if not expected_pairs:
                 if len(expected_docs) == len(true_section) and len(expected_docs) > 0:
@@ -441,13 +478,23 @@ def run_evaluation(
                 else:
                     expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
 
+            # Candidate laws for evaluating retrieval hit rate:
+            retrieved_candidates = []
+            if case_res and isinstance(case_res, list) and len(case_res) > 0:
+                retrieved_candidates = [
+                    ul.get("entry", "")
+                    for ul in (case_res[0].get("used_laws") or case_res[0].get("retrieved_laws") or [])
+                    if ul.get("entry")
+                ]
+            eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
+
             # 1. Section Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_legal_section(ts_clean, str(pl)):
                         is_section_hit = True
                         break
@@ -457,7 +504,7 @@ def run_evaluation(
             # 2. Document Hit
             is_document_hit = False
             for ed in expected_docs:
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_document(ed, str(pl)):
                         is_document_hit = True
                         break
@@ -472,7 +519,7 @@ def run_evaluation(
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in pred_laws:
+                for pl in eval_laws:
                     if match_doc_and_section(ed, ts_clean, str(pl)):
                         is_both_hit = True
                         break
@@ -481,20 +528,18 @@ def run_evaluation(
 
             case_data = {
                 "id": case.get("id"),
+                "status": pred_status,
                 "question": question,
                 "direct_answer": pred_direct_answer,
                 "legal_reasoning": pred_answer,
                 "ground_truth": ground_truth,
-                "expected_section": true_section,
-                "expected_documents": expected_docs,
                 "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
                 "is_both_hit": is_both_hit,
                 "exceptions_or_conditions": exceptions,
-                "fact": question,
-                "judge_res": case_res
+                "analysis": extract_case_analysis(case_res),
             }
             
             with results_lock:

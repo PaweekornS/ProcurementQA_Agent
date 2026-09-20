@@ -181,7 +181,7 @@ def locate_law(law, laws):
     return law["text"]
 
 
-def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config):
+def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_config=None):
     names = case.get("name")
     if not names:
         names = ["ผู้สอบถาม"]
@@ -198,12 +198,33 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config):
         if not case_by_defendant:
             case_by_defendant = [{"name": names[0], "description": raw_fact[:1024]}]
 
+    use_crag = True
+    max_retry = 1
+    if crag_config is not None:
+        use_crag = bool(crag_config.get("enabled", True))
+        max_retry = int(crag_config.get("max_retry", 1))
+
+    if use_crag:
+        from core.crag.pipeline import CRAGPipeline
+        crag_pipe = CRAGPipeline(chatbot, retrieve_config=retrieve_config, max_retry=max_retry)
+        for item in case_by_defendant:
+            crag_pipe.process_case_item(item, law_to_crime, cases_db)
+        return case_by_defendant
+
     for item in case_by_defendant:
         item["feature"] = get_features(chatbot, item)
         original_retrieved_res, retrieved_laws, retrieved_facts = retrieve(
             chatbot, item, law_to_crime, cases_db, retrieve_config)
         if not (retrieved_laws or retrieved_facts):
-            item["judge_result"] = {"charge_name": [], "law_article": [], "term_of_imprisonment": {}}
+            fallback_msg = "ไม่พบข้อกฎหมาย ระเบียบ หรือประกาศที่เกี่ยวข้องกับประเด็นข้อหารือนี้ในฐานข้อมูลการจัดซื้อจัดจ้างภาครัฐ (เนื่องจากไม่อยู่ในขอบเขตของ พ.ร.บ. การจัดซื้อจัดจ้างฯ ระเบียบกระทรวงการคลัง หรือประกาศที่จัดเก็บไว้ในคลังข้อมูล)"
+            item["judge_result"] = {
+                "status": "NO_LAW_FOUND",
+                "direct_answer": fallback_msg,
+                "legal_reasoning": fallback_msg,
+                "applicable_laws": [],
+                "exceptions_or_conditions": "",
+                "law_article": [],
+            }
             item["retrieved_laws"] = []
             item["retrieved_facts"] = []
             item["original_retrieved_res"] = original_retrieved_res

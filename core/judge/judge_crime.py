@@ -44,7 +44,20 @@ def judge_crime(chatbot, law_used, retrieved_facts, case_description):
     return response
 
 
+FALLBACK_NO_LAW_ANSWER = "ไม่พบข้อกฎหมาย ระเบียบ หรือประกาศที่เกี่ยวข้องกับประเด็นข้อหารือนี้ในฐานข้อมูลการจัดซื้อจัดจ้างภาครัฐ (เนื่องจากไม่อยู่ในขอบเขตของ พ.ร.บ. การจัดซื้อจัดจ้างฯ ระเบียบกระทรวงการคลัง หรือประกาศที่จัดเก็บไว้ในคลังข้อมูล)"
+
+
 def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
+    if not law_used and not retrieved_facts:
+        return {
+            "status": "NO_LAW_FOUND",
+            "direct_answer": FALLBACK_NO_LAW_ANSWER,
+            "legal_reasoning": FALLBACK_NO_LAW_ANSWER,
+            "applicable_laws": [],
+            "exceptions_or_conditions": "",
+            "law_article": []
+        }
+
     prompt_str = get_prompt("JUDGE_CRIME_ALL_PROMPT")
     formatted_law = format_law(law_used)
     formatted_facts = format_fact(retrieved_facts) if retrieved_facts else ""
@@ -94,6 +107,10 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
     if not parsed or not isinstance(parsed, dict):
         # Fallback: regex field extraction if json is broken or truncated
         parsed = {}
+        m_st = re.search(r'["\']status["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.IGNORECASE)
+        if m_st:
+            parsed["status"] = m_st.group(1).strip().upper()
+
         m_dir = re.search(r'["\']direct_answer["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
         if m_dir:
             parsed["direct_answer"] = m_dir.group(1).strip()
@@ -108,6 +125,31 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
             
         if not parsed.get("legal_reasoning") and not parsed.get("answer"):
             parsed["legal_reasoning"] = cleaned
+
+    # Check status and detect NO_LAW_FOUND state
+    raw_status = str(parsed.get("status", "")).strip().upper()
+    direct_ans = str(parsed.get("direct_answer", "")).strip()
+    is_no_law = (
+        raw_status == "NO_LAW_FOUND"
+        or (len(direct_ans) < 250 and ("ไม่พบข้อกฎหมาย" in direct_ans or "ไม่อยู่ในขอบเขต" in direct_ans))
+    )
+
+    if is_no_law:
+        parsed["status"] = "NO_LAW_FOUND"
+        parsed["direct_answer"] = FALLBACK_NO_LAW_ANSWER
+        parsed["legal_reasoning"] = FALLBACK_NO_LAW_ANSWER
+        parsed["applicable_laws"] = []
+        parsed["law_article"] = []
+        parsed["exceptions_or_conditions"] = ""
+        return parsed
+
+    # Normalize state for compliant/violation cases
+    if raw_status in ["COMPLIANT", "VIOLATION"]:
+        parsed["status"] = raw_status
+    elif "VIOLATION" in raw_status or "ฝ่าฝืน" in raw_status or "ผิด" in raw_status:
+        parsed["status"] = "VIOLATION"
+    else:
+        parsed["status"] = "COMPLIANT"
 
     # Guarantee QA fields
     if "direct_answer" not in parsed:

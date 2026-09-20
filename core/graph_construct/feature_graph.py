@@ -604,8 +604,15 @@ def _ensure_bm25_index(db):
                 bm25_idx.build_index(docs)
                 print(f"[HybridRetrieval] Built Thai BM25 index with {len(docs)} legal and case nodes.")
             _bm25_initialized = True
+
+            # Warm up GPUReranker safely in the same lock so workers don't race on GPU allocation
+            from .hybrid_reranker import get_reranker
+            reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+            reranker_device = os.getenv("reranker_device", "cuda:0")
+            reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+            get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
         except Exception as e:
-            print(f"[HybridRetrieval] Could not initialize BM25 index: {e}")
+            print(f"[HybridRetrieval] Could not initialize BM25/Reranker index: {e}")
 
 
 def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
