@@ -481,10 +481,12 @@ def run_evaluation(
             # Candidate laws for evaluating retrieval hit rate:
             retrieved_candidates = []
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
+                first_item = case_res[0]
+                cand_pool = list(first_item.get("used_laws", [])) + list(first_item.get("retrieved_laws", []))
                 retrieved_candidates = [
                     ul.get("entry", "")
-                    for ul in (case_res[0].get("used_laws") or case_res[0].get("retrieved_laws") or [])
-                    if ul.get("entry")
+                    for ul in cand_pool
+                    if isinstance(ul, dict) and ul.get("entry")
                 ]
             eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
 

@@ -29,12 +29,13 @@ class CompletenessAuditor:
         # If draft status is already NO_LAW_FOUND or laws are completely empty
         if draft_answer.get("status") == "NO_LAW_FOUND" or not law_used:
             return {
-                "is_complete": True,
+                "is_complete": False,
                 "all_issues_lack_law": True,
+                "has_ungrounded_content": False,
+                "recommend_fallback_no_law": True,
                 "missing_issues": []
             }
 
-        # If there is only 1 issue and laws were retrieved, fast heuristic can check if reasoning is substantive
         reasoning = draft_answer.get("legal_reasoning", "")
         direct = draft_answer.get("direct_answer", "")
 
@@ -44,11 +45,11 @@ class CompletenessAuditor:
             for iss in issues
         ])
 
-        # Format concise law context (entry + snippet of description)
+        # Format law context (up to 10 laws, 600 chars each for comprehensive grounding check)
         law_lines = []
-        for law in law_used[:6]:
+        for law in law_used[:10]:
             entry = law.get("entry", "")
-            desc = str(law.get("description", "")).replace("\n", " ").strip()[:200]
+            desc = str(law.get("description", "")).replace("\n", " ").strip()[:600]
             law_lines.append(f"* {entry}: {desc}")
         law_context = "\n".join(law_lines)
 
@@ -83,16 +84,35 @@ class CompletenessAuditor:
 
         is_complete = bool(parsed.get("is_complete", True))
         all_lack = bool(parsed.get("all_issues_lack_law", False))
-        missing_issues = parsed.get("missing_issues", [])
-        if not isinstance(missing_issues, list):
-            missing_issues = []
+        has_ungrounded = bool(parsed.get("has_ungrounded_content", False))
+        recommend_fallback = bool(parsed.get("recommend_fallback_no_law", False))
+        raw_missing = parsed.get("missing_issues", [])
+        if not isinstance(raw_missing, list):
+            raw_missing = []
 
-        # If there are missing issues, is_complete MUST be False
-        if missing_issues and len(missing_issues) > 0:
+        norm_missing = []
+        for m in raw_missing:
+            if isinstance(m, dict):
+                norm_missing.append({
+                    "issue_id": m.get("issue_id", "Q"),
+                    "missing_aspect": m.get("missing_aspect", str(m)),
+                    "search_query": m.get("search_query", "")
+                })
+            elif isinstance(m, str) and m.strip():
+                norm_missing.append({
+                    "issue_id": "Q",
+                    "missing_aspect": m.strip(),
+                    "search_query": f"{m.strip()} ระเบียบกระทรวงการคลัง พ.ร.บ. จัดซื้อจัดจ้าง"
+                })
+
+        # If there are missing issues or ungrounded content or fallback recommendation, is_complete MUST be False
+        if norm_missing or has_ungrounded or recommend_fallback or all_lack:
             is_complete = False
 
         return {
             "is_complete": is_complete,
             "all_issues_lack_law": all_lack,
-            "missing_issues": missing_issues
+            "has_ungrounded_content": has_ungrounded,
+            "recommend_fallback_no_law": recommend_fallback or all_lack,
+            "missing_issues": norm_missing
         }

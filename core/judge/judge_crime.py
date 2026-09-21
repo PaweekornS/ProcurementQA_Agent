@@ -3,6 +3,9 @@ import re
 from core.prompt import get_prompt
 
 
+TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+
+
 def format_law(law_used):
     res = ""
     for law in law_used:
@@ -10,6 +13,8 @@ def format_law(law_used):
         topics = [c.replace("\n", " ") for c in law["crimes"] if c]
         entry = law.get("entry", "")
         desc = law.get("description", "")
+        if desc:
+            desc = str(desc).translate(TH_TO_AR)
         res += f"ข้อกฎหมาย/ระเบียบ: {entry}\nหมวดหมู่/ประเด็น: {', '.join(topics)}\nเนื้อหาข้อกฎหมาย:\n{desc}\n---\n"
 
     return res
