@@ -646,12 +646,7 @@ def run_evaluation(
         legal_reas = (item.get("legal_reasoning") or item.get("answer") or "").strip()
         
         # Combined concise answer: direct answer followed by legal reasoning
-        if direct_ans and legal_reas and direct_ans != legal_reas:
-            answer = f"{direct_ans}\n\n{legal_reas}"
-        elif direct_ans:
-            answer = direct_ans
-        else:
-            answer = legal_reas
+        answer = direct_ans
 
         ground_truth = item.get("ground_truth") or ""
 
@@ -850,7 +845,7 @@ def run_evaluation(
                     ground_truth_section=gt_sec,
                     candidate_citations=cit,
                 )
-                print(f"    [{idx}/{len(eval_items)}] Judged Row {item.get('row_index')} -> Score: {j_res.score}/5 ({j_res.score_label}) [Cite R:{j_res.citation_recall:.2f}/P:{j_res.citation_precision:.2f}/F1:{j_res.citation_f1:.2f}, Rule:{j_res.rule_or_threshold_correctness}, Comp:{j_res.completeness_vs_ground_truth}, HallucFree:{j_res.no_hallucination}]")
+                print(f"    [{idx}/{len(eval_items)}] Judged Row {item.get('row_index')} -> Score: {j_res.score}/5 ({j_res.score_label}) [Cite R:{j_res.citation_recall:.2f}, Rule:{j_res.rule_or_threshold_correctness}, Comp:{j_res.completeness_vs_ground_truth}, HallucFree:{j_res.no_hallucination}]")
                 return item, j_res
             except Exception as e:
                 print(f"    [-] Error judging Row {item.get('row_index')}: {e}")
@@ -981,7 +976,7 @@ def run_evaluation(
     if comet_sys_score is not None:
         header += " | {'COMET':<7}"
     if enable_judge:
-        header += f" | {'Score':<5} | {'Label':<7} | {'Cite(R/P)':<9} | {'Rule':<5} | {'Comp':<5} | {'NoHal':<5}"
+        header += f" | {'Score':<5} | {'Label':<7} | {'Cite(R)':<7} | {'Rule':<5} | {'Comp':<5} | {'NoHal':<5}"
     else:
         header += f" | {'DetCite(R/P)':<12}"
     print(header)
@@ -1002,11 +997,11 @@ def run_evaluation(
             j = item["legal_benchmark_judge"]
             sc = f"{j['score']}/5"
             lbl = j["score_label"][:7]
-            cite_v = f"{j['citation_recall']:.2f}/{j['citation_precision']:.2f}"
-            rule_v = "YES" if j["rule_or_threshold_correctness"] else "NO"
-            comp_v = "YES" if j["completeness_vs_ground_truth"] else "NO"
-            hal_v = "YES" if j["no_hallucination"] else "NO"
-            row_str += f" | {sc:<5} | {lbl:<7} | {cite_v:<9} | {rule_v:<5} | {comp_v:<5} | {hal_v:<5}"
+            cite_v = f"{j.get('citation_recall', 0.0):.2f}"
+            rule_v = "YES" if j.get("rule_or_threshold_correctness") else "NO"
+            comp_v = "YES" if j.get("completeness_vs_ground_truth") else "NO"
+            hal_v = "YES" if j.get("no_hallucination") else "NO"
+            row_str += f" | {sc:<5} | {lbl:<7} | {cite_v:<7} | {rule_v:<5} | {comp_v:<5} | {hal_v:<5}"
         else:
             d_rp = f"{m['det_citation_recall']:.2f}/{m['det_citation_precision']:.2f}"
             row_str += f" | {d_rp:<12}"
@@ -1018,8 +1013,8 @@ def run_evaluation(
         avg_str += f" | {comet_sys_score:.4f}"
     if enable_judge and "legal_benchmark_judge_summary" in summary:
         js = summary["legal_benchmark_judge_summary"]
-        avg_cite_str = f"{js['average_citation_recall']:.2f}/{js['average_citation_precision']:.2f}"
-        avg_str += f" | {js['average_score_out_of_5']:.2f} | {js['good_or_perfect_pct (>=4/5)']:.1f}%  | {avg_cite_str:<9} | {js['rule_threshold_correctness_pct']:.0f}%  | {js['completeness_rate_pct']:.0f}%  | {js['hallucination_free_rate_pct']:.0f}%"
+        avg_cite_str = f"{js['average_citation_recall']:.2f}"
+        avg_str += f" | {js['average_score_out_of_5']:.2f} | {js['good_or_perfect_pct (>=4/5)']:.1f}%  | {avg_cite_str:<7} | {js['rule_threshold_correctness_pct']:.0f}%  | {js['completeness_rate_pct']:.0f}%  | {js['hallucination_free_rate_pct']:.0f}%"
     else:
         avg_cite_str = f"{avg_det_cite_recall:.2f}/{avg_det_cite_precision:.2f}"
         avg_str += f" | {avg_cite_str:<12}"
@@ -1094,8 +1089,6 @@ def run_evaluation(
         js = summary["legal_benchmark_judge_summary"]
         md_lines.extend([
             f"| **Citation Recall (Judge)** | **{js['average_citation_recall'] * 100:.1f}%** | Ground truth statutory clause coverage |",
-            f"| **Citation Precision (Judge)** | **{js['average_citation_precision'] * 100:.1f}%** | Accuracy and relevance of cited statutes |",
-            f"| **Citation F1 Score (Judge)** | **{js['average_citation_f1'] * 100:.1f}%** | Harmonic mean of citation precision & recall |",
             f"| **Exact All-or-Nothing Citation** | **{js['exact_citation_rate_pct']:.1f}%** | Percentage with complete (100%) citation match |",
             f"| **Deterministic Citation Recall** | **{avg_det_cite_recall * 100:.1f}%** | Rule-based exact section identifier recall |",
             f"| **Deterministic Citation Precision** | **{avg_det_cite_precision * 100:.1f}%** | Rule-based exact section identifier precision |",
@@ -1122,7 +1115,7 @@ def run_evaluation(
     if comet_sys_score is not None:
         table_header += " COMET |"
     if enable_judge:
-        table_header += " Score | Label | Cite(R/P/F1) | Rule | Comp | NoHal | Critique / Notes |"
+        table_header += " Score | Label | Cite(Recall) | Rule | Comp | NoHal | Critique / Notes |"
     else:
         table_header += " DetCite(R/P) | ROUGE-L Recall |"
 
@@ -1143,7 +1136,7 @@ def run_evaluation(
             j = item.get("legal_benchmark_judge", {})
             sc = f"{j.get('score', '-')}/5"
             lbl = j.get("score_label", "-")
-            cite_val = f"{j.get('citation_recall', 0.0):.2f}/{j.get('citation_precision', 0.0):.2f}/{j.get('citation_f1', 0.0):.2f}"
+            cite_val = f"{j.get('citation_recall', 0.0):.2f}"
             rule_v = "YES" if j.get("rule_or_threshold_correctness") else "NO"
             comp_v = "YES" if j.get("completeness_vs_ground_truth") else "NO"
             hal_v = "YES" if j.get("no_hallucination") else "NO"
