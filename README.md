@@ -121,7 +121,7 @@ Execution steps performed automatically:
 1. Loads the NetworkX In-Memory Knowledge Graph from `outputs/openrouter_graph_db.pkl`.
 2. Builds and caches the Thai BM25 index alongside dense embeddings.
 3. Dispatches inquiries through the **CRAG Multi-Agent Loop**.
-4. Outputs structured legal predictions and `crag_meta` diagnostics to `outputs/THAI/openrouter_results_combined.json`.
+4. Outputs structured legal predictions and `crag_meta` diagnostics to `outputs/THAI/openrouter_results.json`.
 
 ---
 
@@ -135,8 +135,8 @@ python evaluation/evaluate_results.py
 
 Outputs generated:
 
-- `outputs/THAI/openrouter_results_combined_metrics.json`: Detailed per-question metric logs.
-- `outputs/THAI/openrouter_results_combined_summary.md`: Comprehensive evaluation report with summary tables, 0–5 quality scores, completeness breakdown, and qualitative critiques.
+- `outputs/THAI/eval_results.json`: Detailed per-question metric logs.
+- `outputs/THAI/eval_summary.md`: Comprehensive evaluation report with summary tables, 0–5 quality scores, completeness breakdown, and qualitative critiques.
 
 ---
 
