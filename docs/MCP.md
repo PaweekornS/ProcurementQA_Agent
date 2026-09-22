@@ -26,7 +26,9 @@ For what the pipeline itself does, see [REPORT.md](REPORT.md). For the general p
 {
   "status": "OK",
   "direct_answer": "...",
-  "legal_reasoning": "...",
+  "decisive_quotes": [
+    {"law": "มาตรา ๕๖ (๒) (ข)", "quote": "..."}
+  ],
   "applicable_laws": ["มาตรา ๕๖ (๒) (ข)", "ข้อ ๗๙"],
   "exceptions_or_conditions": "...",
   "citations": [{"entry": "...", "topics": ["..."]}],

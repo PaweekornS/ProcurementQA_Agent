@@ -492,6 +492,18 @@ def build_law_to_crime(chunks: List[Dict[str, Any]], output_path: str) -> List[D
             ]
         })
 
+    # Preserve fine-grained section nodes from existing file if present
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, "r", encoding="utf-8") as f_ex:
+                existing_data = json.load(f_ex)
+            new_ids = set(x["id"] for x in law_to_crime_list)
+            for ex in existing_data:
+                if ex.get("id") not in new_ids:
+                    law_to_crime_list.append(ex)
+        except Exception:
+            pass
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(law_to_crime_list, f, ensure_ascii=False, indent=2)

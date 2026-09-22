@@ -642,10 +642,7 @@ def run_evaluation(
             continue
 
         # Extract answer text across various schema aliases
-        direct_ans = (item.get("direct_answer") or "").strip()
-        legal_reas = (item.get("legal_reasoning") or item.get("answer") or "").strip()
-        
-        # Combined concise answer: direct answer followed by legal reasoning
+        direct_ans = (item.get("direct_answer") or item.get("answer") or "").strip()
         answer = direct_ans
 
         ground_truth = item.get("ground_truth") or ""
@@ -656,10 +653,8 @@ def run_evaluation(
         is_fallback_answer = (
             status == "NO_LAW_FOUND"
             or "ไม่พบข้อกฎหมาย" in direct_ans
-            or "ไม่พบข้อกฎหมาย" in legal_reas
             or "ไม่พบข้อกฎหมาย" in answer
             or "ไม่อยู่ในขอบเขต" in direct_ans
-            or "ไม่อยู่ในขอบเขต" in legal_reas
             or "ไม่อยู่ในขอบเขต" in answer
         )
 
@@ -1163,7 +1158,7 @@ def run_evaluation(
             if len(q_text) > 50:
                 q_text = q_text[:47] + "..."
             st = s.get("status") or s.get("overall_status") or "NO_LAW_FOUND"
-            ans_text = (s.get("answer") or s.get("legal_reasoning") or "ไม่พบข้อกฎหมายที่เกี่ยวข้อง").replace("\n", " ").replace("|", "\\|")
+            ans_text = (s.get("direct_answer") or s.get("answer") or "ไม่พบข้อกฎหมายที่เกี่ยวข้อง").replace("\n", " ").replace("|", "\\|")
             if len(ans_text) > 65:
                 ans_text = ans_text[:62] + "..."
             md_lines.append(f"| {r_idx} | {q_text} | {st} | {ans_text} |")
@@ -1246,8 +1241,8 @@ def main():
         "--workers",
         "-w",
         type=int,
-        default=4,
-        help="Number of concurrent worker threads for LLM-as-a-Judge evaluation (default: 4)",
+        default=8,
+        help="Number of concurrent worker threads for LLM-as-a-Judge evaluation (default: 8)",
     )
 
     args = parser.parse_args()

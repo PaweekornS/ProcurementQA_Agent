@@ -220,7 +220,7 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_co
             item["judge_result"] = {
                 "status": "NO_LAW_FOUND",
                 "direct_answer": fallback_msg,
-                "legal_reasoning": fallback_msg,
+                "decisive_quotes": [],
                 "applicable_laws": [],
                 "exceptions_or_conditions": "",
                 "law_article": [],

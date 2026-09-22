@@ -57,7 +57,7 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         return {
             "status": "NO_LAW_FOUND",
             "direct_answer": FALLBACK_NO_LAW_ANSWER,
-            "legal_reasoning": FALLBACK_NO_LAW_ANSWER,
+            "decisive_quotes": [],
             "applicable_laws": [],
             "exceptions_or_conditions": "",
             "law_article": []
@@ -120,28 +120,25 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         if m_dir:
             parsed["direct_answer"] = m_dir.group(1).strip()
             
-        m_ans = re.search(r'["\'](?:legal_reasoning|answer)["\']\s*:\s*["\'](.*?)["\']\s*[,}]', cleaned, re.DOTALL)
-        if m_ans:
-            parsed["legal_reasoning"] = m_ans.group(1).strip()
-            
         m_laws = re.search(r'["\']applicable_laws["\']\s*:\s*\[(.*?)\]', cleaned, re.DOTALL)
         if m_laws:
             parsed["applicable_laws"] = [s.strip(" \"'\n\r") for s in m_laws.group(1).split(",") if s.strip(" \"'\n\r")]
             
-        if not parsed.get("legal_reasoning") and not parsed.get("answer"):
-            parsed["legal_reasoning"] = cleaned
+        m_quote = re.search(r'["\'](?:decisive_quotes|decisive_quote)["\']\s*:\s*(?:\[(.*?)\]|["\'](.*?)["\'])', cleaned, re.DOTALL)
+        if m_quote:
+            raw_q = m_quote.group(1) or m_quote.group(2) or ""
+            parsed["decisive_quotes"] = [{"law": "General", "quote": raw_q.strip()}] if raw_q.strip() else []
 
     # Check status and detect NO_LAW_FOUND state or degenerate backtick output
     raw_status = str(parsed.get("status", "")).strip().upper()
     direct_ans = str(parsed.get("direct_answer", "")).strip()
-    reasoning_ans = str(parsed.get("legal_reasoning", "")).strip()
 
     # Detect degenerate backtick loops, empty responses, or corrupt LLM formatting
     is_degenerate = (
         not cleaned
         or direct_ans.startswith("```")
         or set(direct_ans.replace(" ", "").replace("\n", "")) <= {'`'}
-        or (len(direct_ans) == 0 and len(reasoning_ans) == 0)
+        or (len(direct_ans) == 0 and not parsed.get("applicable_laws"))
         or (response.count("```") > 10 and not parsed.get("direct_answer"))
     )
 
@@ -152,15 +149,14 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         or direct_ans.startswith("ไม่อยู่ในขอบเขต")
     )
 
-
-
     if is_no_law:
         parsed["status"] = "NO_LAW_FOUND"
         parsed["direct_answer"] = FALLBACK_NO_LAW_ANSWER
-        parsed["legal_reasoning"] = FALLBACK_NO_LAW_ANSWER
+        parsed["decisive_quotes"] = []
         parsed["applicable_laws"] = []
         parsed["law_article"] = []
         parsed["exceptions_or_conditions"] = ""
+        parsed.pop("legal_reasoning", None)
         return parsed
 
     # Normalize state for compliant/violation cases
@@ -175,13 +171,24 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
     if "direct_answer" not in parsed:
         parsed["direct_answer"] = ""
     
-    # Standardize legal_reasoning (with fallback to answer/legal_opinion)
-    reasoning = parsed.get("legal_reasoning") or parsed.get("answer") or parsed.get("legal_opinion") or parsed.get("direct_answer") or response.strip()
-    parsed["legal_reasoning"] = reasoning
+    # Remove legal_reasoning from output
+    parsed.pop("legal_reasoning", None)
 
-    if not parsed.get("direct_answer") and reasoning:
-        first_line = reasoning.strip().split("\n")[0]
-        parsed["direct_answer"] = first_line[:200]
+    # Normalize decisive_quotes (supporting list of dicts, dict, or string)
+    quotes = parsed.get("decisive_quotes") or parsed.get("decisive_quote") or []
+    if isinstance(quotes, str):
+        quotes = [{"law": "General", "quote": quotes.strip()}] if quotes.strip() else []
+    elif isinstance(quotes, dict):
+        quotes = [{"law": k, "quote": str(v).strip()} for k, v in quotes.items()]
+    elif isinstance(quotes, list):
+        norm_quotes = []
+        for q in quotes:
+            if isinstance(q, dict):
+                norm_quotes.append(q)
+            elif isinstance(q, str) and q.strip():
+                norm_quotes.append({"law": "General", "quote": q.strip()})
+        quotes = norm_quotes
+    parsed["decisive_quotes"] = quotes
 
     if "applicable_laws" not in parsed:
         if "law_article" in parsed:
