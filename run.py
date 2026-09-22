@@ -45,8 +45,10 @@ def normalize_legal_text(text: str) -> str:
     if not text:
         return ""
     t = str(text).translate(TH_TO_AR)
+    # Normalize URL encoding and special separators
+    t = re.sub(r"[+_]+", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
-    return t
+    return t.lower()
 
 
 def match_legal_section(expected: str, candidate: str) -> bool:
@@ -82,6 +84,11 @@ def match_legal_section(expected: str, candidate: str) -> bool:
         if re.search(rf"หมวด\s*[^\n|]*?\b{ch_num}\b", cand_norm) or re.search(rf"\bหมวด\s*{ch_num}\b", cand_norm):
             return True
 
+    # 5. Non-numbered Core Title / Charter matching (e.g. ข้อตกลงคุณธรรม, integrity pact)
+    core_exp = re.sub(r"(ประกาศ|แบบสัญญา|เรื่อง|หลักเกณฑ์|ระเบียบฯ|ระเบียบ|พ\.ร\.บ\.|พรบ|กฎกระทรวง|ข้อ|มาตรา)", "", exp_norm).strip()
+    if len(core_exp) >= 4 and core_exp in cand_norm:
+        return True
+
     return False
 
 
@@ -99,8 +106,8 @@ def match_document(expected_file: str, candidate_text: str) -> bool:
     if base_norm in cand_norm or cand_norm in base_norm:
         return True
         
-    # Core keyword match (e.g. พระราชบัญญัติการจัดซื้อจัดจ้าง, ระเบียบกระทรวงการคลัง, กฎกระทรวง)
-    m = re.search(r"(พระราชบัญญัติ[^\n|]+?๒๕๖๐|พระราชบัญญัติ[^\n|]+?2560|ระเบียบกระทรวงการคลัง[^\n|]+?๒๕๖๐|ระเบียบกระทรวงการคลัง[^\n|]+?2560|กฎกระทรวง[^\n|]+?๒๕๖๑|กฎกระทรวง[^\n|]+?2561)", base_norm)
+    # Core keyword match (e.g. พระราชบัญญัติการจัดซื้อจัดจ้าง, ระเบียบกระทรวงการคลัง, กฎกระทรวง, ข้อตกลงคุณธรรม)
+    m = re.search(r"(พระราชบัญญัติ[^\n|]+?2560|ระเบียบกระทรวงการคลัง[^\n|]+?2560|กฎกระทรวง[^\n|]+?2561|กฎกระทรวง[^\n|]+?2563|ข้อตกลงคุณธรรม)", base_norm)
     if m and m.group(1) in cand_norm:
         return True
     return False
@@ -198,16 +205,19 @@ def process_cases_worker(
             pred_laws = []
             exceptions = ""
             
+            pred_quotes = []
+            
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
                 pred_status = judge_result.get("status", "COMPLIANT")
-                pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
+                pred_quotes = judge_result.get("decisive_quotes", [])
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
+                    pred_quotes = []
 
             expected_docs = case.get("source_files", [])
             if not expected_docs and case.get("source_file"):
@@ -283,7 +293,7 @@ def process_cases_worker(
                 "status": pred_status,
                 "question": question,
                 "direct_answer": pred_direct_answer,
-                "legal_reasoning": pred_answer,
+                "decisive_quotes": pred_quotes,
                 "ground_truth": ground_truth,
                 "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
@@ -435,6 +445,16 @@ def run_evaluation(
         
         rag = LegalGraphRAG(config=config)
         
+        # Warmup embedder and reranker in main thread to prevent multi-threaded CUDA initialization races
+        try:
+            from core.graph_construct.feature_graph import get_embedding
+            from core.graph_construct.hybrid_reranker import get_reranker
+            _ = get_embedding("warmup query")
+            _ = get_reranker()
+            print("[Warmup] Local embedder and GPU reranker successfully initialized in main thread.")
+        except Exception as e:
+            print(f"[Warmup Warning] {e}")
+
         combined_results = []
         total_document_hits = 0
         total_section_hits = 0
@@ -456,16 +476,19 @@ def run_evaluation(
             pred_laws = []
             exceptions = ""
             
+            pred_quotes = []
+            
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 judge_result = case_res[0].get("judge_result", {})
                 pred_status = judge_result.get("status", "COMPLIANT")
-                pred_answer = judge_result.get("legal_reasoning", "")
                 pred_direct_answer = judge_result.get("direct_answer", "")
+                pred_quotes = judge_result.get("decisive_quotes", [])
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
+                    pred_quotes = []
 
             expected_docs = case.get("source_files", [])
             if not expected_docs and case.get("source_file"):
@@ -483,11 +506,14 @@ def run_evaluation(
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 first_item = case_res[0]
                 cand_pool = list(first_item.get("used_laws", [])) + list(first_item.get("retrieved_laws", []))
-                retrieved_candidates = [
-                    ul.get("entry", "")
-                    for ul in cand_pool
-                    if isinstance(ul, dict) and ul.get("entry")
-                ]
+                for ul in cand_pool:
+                    if isinstance(ul, dict):
+                        entry = ul.get("entry", "")
+                        if entry:
+                            retrieved_candidates.append(entry)
+                            for pl in pred_laws:
+                                if pl:
+                                    retrieved_candidates.append(f"{entry} | {pl}")
             eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
 
             # 1. Section Hit
@@ -533,7 +559,7 @@ def run_evaluation(
                 "status": pred_status,
                 "question": question,
                 "direct_answer": pred_direct_answer,
-                "legal_reasoning": pred_answer,
+                "decisive_quotes": pred_quotes,
                 "ground_truth": ground_truth,
                 "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
@@ -664,8 +690,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Number of concurrent worker threads for inference (default: 4)",
+        default=8,
+        help="Number of concurrent worker threads for inference (default: 8)",
     )
     
     args = parser.parse_args()

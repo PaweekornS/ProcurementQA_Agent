@@ -77,7 +77,7 @@ def ask_procurement_law(question: str) -> Dict[str, Any]:
         A dict with:
             status: "OK" or "NO_LAW_FOUND"
             direct_answer: concise plain-language answer
-            legal_reasoning: detailed reasoning grounded in retrieved statutes
+            decisive_quotes: list of verbatim statutory quotes mapped per applicable law
             applicable_laws: list of cited statute/section references
             exceptions_or_conditions: caveats or conditions on the answer
             citations: retrieved statute nodes actually used for synthesis
@@ -87,7 +87,7 @@ def ask_procurement_law(question: str) -> Dict[str, Any]:
         return {
             "status": "ERROR",
             "direct_answer": "",
-            "legal_reasoning": "",
+            "decisive_quotes": [],
             "applicable_laws": [],
             "exceptions_or_conditions": "",
             "citations": [],
@@ -104,7 +104,7 @@ def ask_procurement_law(question: str) -> Dict[str, Any]:
         return {
             "status": "ERROR",
             "direct_answer": "",
-            "legal_reasoning": "",
+            "decisive_quotes": [],
             "applicable_laws": [],
             "exceptions_or_conditions": "",
             "citations": [],
@@ -116,7 +116,7 @@ def ask_procurement_law(question: str) -> Dict[str, Any]:
         return {
             "status": "ERROR",
             "direct_answer": "",
-            "legal_reasoning": "",
+            "decisive_quotes": [],
             "applicable_laws": [],
             "exceptions_or_conditions": "",
             "citations": [],
@@ -131,7 +131,7 @@ def ask_procurement_law(question: str) -> Dict[str, Any]:
     return {
         "status": judge_result.get("status", "OK"),
         "direct_answer": judge_result.get("direct_answer", ""),
-        "legal_reasoning": judge_result.get("legal_reasoning", ""),
+        "decisive_quotes": judge_result.get("decisive_quotes", []),
         "applicable_laws": judge_result.get("applicable_laws", []),
         "exceptions_or_conditions": judge_result.get("exceptions_or_conditions", ""),
         "citations": [_summarize_citation(law) for law in used_laws],

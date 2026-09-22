@@ -1,0 +1,13 @@
+{
+  "model_name": "openrouter",
+  "dataset": "THAI",
+  "total_cases": 40,
+  "strict_hits": 36,
+  "strict_hit_rate": 90.0,
+  "document_hits": 40,
+  "document_hit_rate": 100.0,
+  "section_hits": 37,
+  "section_hit_rate": 92.5,
+  "elapsed_time": 294.05459785461426,
+  "output_file": "./outputs\\THAI\\openrouter_results.json"
+}

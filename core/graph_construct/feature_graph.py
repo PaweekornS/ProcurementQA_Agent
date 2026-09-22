@@ -12,8 +12,9 @@ from tqdm import tqdm
 
 _embedding_api_url = "http://localhost:11434/api/embed"
 _embedding_model = "unsloth/embeddinggemma-300m"
-_embedding_dim = 1024
+_embedding_dim = 768
 _local_embedder = None
+_local_embedder_lock = threading.Lock()
 _vector_cache = {}
 _http_embedder_available = None
 
@@ -58,7 +59,7 @@ def get_embedding(text):
                 "model": _embedding_model,
                 "input": text
             }
-            response = requests.post(_embedding_api_url, json=data, timeout=10.0)
+            response = requests.post(_embedding_api_url, json=data, timeout=1.0)
             response.raise_for_status()
             result = response.json()
             embeddings = result.get('embeddings') or result.get('data')
@@ -76,12 +77,17 @@ def get_embedding(text):
 
     # 3. Try local SentenceTransformer as fallback
     if _local_embedder is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            embed_name = os.getenv("embedding_model") or os.getenv("EMBEDDING_MODEL") or _embedding_model
-            _local_embedder = SentenceTransformer(embed_name, device="cpu")
-        except Exception:
-            _local_embedder = False
+        with _local_embedder_lock:
+            if _local_embedder is None:
+                try:
+                    import torch
+                    from sentence_transformers import SentenceTransformer
+                    embed_name = os.getenv("embedding_model") or os.getenv("EMBEDDING_MODEL") or _embedding_model
+                    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                    _local_embedder = SentenceTransformer(embed_name, device=device)
+                except Exception as e:
+                    print(f"[feature_graph] Failed loading local embedder: {e}")
+                    _local_embedder = False
 
     if _local_embedder:
         try:
