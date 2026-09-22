@@ -34,9 +34,6 @@ _PROMPTS = {
             "ข้อกฎหมายและระเบียบ:\n-----\n{law}\n-----\n"
             "คำถาม/ข้อหารือ:\n-----\n{case}\n-----\nคำตอบ (JSON):"
         ),
-        "SUMMARIZE_TEXTS_PROMPT": "จงสรุปสาระสำคัญของเอกสารและประเด็นกฎหมายต่อไปนี้:\n",
-        "RERANK_CLUSTERS_PROMPT_TEMPLATE": "จงจัดลำดับความเกี่ยวข้องของกลุ่มกฎหมายต่อไปนี้:\n{cluster_summaries}\nคำถาม: {query_text}\nลำดับ:",
-        "RERANK_PROMPT_TEMPLATE": "จงจัดลำดับความเกี่ยวข้องของข้อกฎหมายต่อไปนี้:\n{neighbor_summaries}\nคำถาม: {query_text}\nลำดับ:",
     },
 }
 
