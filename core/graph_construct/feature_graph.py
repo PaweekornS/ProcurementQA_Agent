@@ -1,6 +1,8 @@
 import os
+import ast
 import hashlib
 import threading
+from collections import defaultdict
 import numpy as np
 import requests
 import re
@@ -103,30 +105,55 @@ def get_embedding(text):
 
 
 def summarize_texts(model, text):
-    from core.prompt import get_prompt
-    return model.generate_response(
-        get_prompt("SUMMARIZE_TEXTS_PROMPT")
-        + get_prompt("SUMMARIZE_TEXTS_INPUT_PREFIX")
-        + text,
-        max_length=512
-    ).strip()
+    try:
+        from core.prompt import get_prompt
+        prefix = ""
+        try:
+            prefix = get_prompt("SUMMARIZE_TEXTS_INPUT_PREFIX")
+        except Exception:
+            pass
+        return model.generate_response(
+            get_prompt("SUMMARIZE_TEXTS_PROMPT") + prefix + text,
+            max_length=512
+        ).strip()
+    except Exception as e:
+        print(f"[summarize_texts fallback] {e}")
+        return text[:300]
 
 
 def rerank_clusters(model, clusters, query_text):
-    from core.prompt import get_prompt
-    cluster_summaries = "\n".join(
-        [f"code{c['code']}：{c['summary']}\n" for c in clusters])
-    prompt = get_prompt("RERANK_CLUSTERS_PROMPT_TEMPLATE").format(
-        cluster_summaries=cluster_summaries,
-        query_text=query_text
-    )
-    response = model.generate_response(prompt, max_length=512)
-    match = re.search(r"rank: \[([\d,]+)\]", response)
-    # print(f"模型回复: {response}")
-    if match:
-        ranked_codes = [int(code) for code in match.group(1).split(',')]
-        return ranked_codes
-    return [0]
+    if not clusters:
+        return []
+    # Try GPU Cross-Encoder Reranker first
+    try:
+        from .hybrid_reranker import get_reranker
+        reranker = get_reranker()
+        if reranker and reranker.model is not None:
+            candidates = [{'code': c['code'], 'description': c.get('summary', '')} for c in clusters]
+            reranked = reranker.rerank(query_text, candidates, top_k=len(candidates))
+            return [c['code'] for c in reranked]
+    except Exception:
+        pass
+
+    # Fallback to LLM if requested
+    try:
+        from core.prompt import get_prompt
+        cluster_summaries = "\n".join(
+            [f"code{c['code']}：{c['summary']}\n" for c in clusters])
+        prompt = get_prompt("RERANK_CLUSTERS_PROMPT_TEMPLATE").format(
+            cluster_summaries=cluster_summaries,
+            query_text=query_text
+        )
+        response = model.generate_response(prompt, max_length=512)
+        match = re.search(r"\[([\d,\s]+)\]", response)
+        if match:
+            ranked_codes = [int(code.strip()) for code in match.group(1).split(',') if code.strip().isdigit()]
+            if ranked_codes:
+                return ranked_codes
+    except Exception:
+        pass
+
+    return [c['code'] for c in clusters]
 
 
 def rerank(model, query_text, neighbors):
@@ -376,195 +403,172 @@ def run_knn(top_k=3):
             db.add_edge(case_ids[i], case_ids[j], 'SIMILAR_TO', {'score': score})
 
 
-def create_clusters(model):
+def extract_doc_name(data):
+    """Extract clean legal document/file name from a Law node's properties."""
+    rel = data.get('related_laws', [])
+    if isinstance(rel, str):
+        try:
+            rel = ast.literal_eval(rel)
+        except Exception:
+            rel = [rel]
+    if isinstance(rel, list):
+        for r in rel:
+            if isinstance(r, str) and (r.endswith('.md') or '/' in r or '\\' in r):
+                base = os.path.basename(r)
+                return base[:-3] if base.endswith('.md') else base
+    entry = data.get('entry', '')
+    if '|' in entry:
+        return entry.split('|')[0].strip()
+    crimes = data.get('crimes', [])
+    if crimes:
+        return crimes[-1] if isinstance(crimes, list) else str(crimes)
+    return "Unknown_Document"
+
+
+def create_clusters(model=None):
+    """
+    Construct hierarchical legal document clusters grouped by source file/document.
+    Replaces slow Louvain/KNN + LLM summary with deterministic, instant document grouping.
+    Hierarchy: Document Cluster -> Law sections (Laws nodes).
+    """
     db = GraphDBManager.get_db()
     
-    # 运行社区检测和中心性分析
-    communities = db.detect_communities()
-    
-    # 更新节点的communityId
-    for node_id, comm_id in communities.items():
-        db.update_node(node_id, {'communityId': comm_id})
-    
-    # 计算PageRank和度中心性
-    pagerank = db.compute_pagerank()
-    degrees = db.compute_degree_centrality()
-    
-    # 更新节点的pagerank和degree
-    for node_id, score in pagerank.items():
-        db.update_node(node_id, {'pagerank': score})
-    for node_id, degree in degrees.items():
-        db.update_node(node_id, {'degree': degree})
-    
-    # 获取所有唯一的社区ID（只考虑Cases节点）
-    community_ids = set()
+    # 1. Group all Laws nodes by source document/file name
+    doc_laws = defaultdict(list)
     for node_id, node_info in db.nodes_data.items():
-        if node_info['type'] == 'Cases' and node_info['data'].get('communityId') is not None:
-            community_ids.add(node_info['data']['communityId'])
+        if node_info['type'] == 'Laws':
+            doc_name = extract_doc_name(node_info['data'])
+            doc_laws[doc_name].append(node_id)
+            
+    print(f"Grouped into {len(doc_laws)} legal document clusters.")
     
-    community_ids = sorted(list(community_ids))
-    print(f"Detected {len(community_ids)} communities.")
-
-    for community_id in tqdm(community_ids, desc="Creating clusters"):
-        # 选择关键节点：综合考虑PageRank和度中心性
-        important_nodes = []
-        for node_id, node_info in db.nodes_data.items():
-            if node_info['type'] == 'Cases' and node_info['data'].get('communityId') == community_id:
-                pagerank_score = node_info['data'].get('pagerank', 0)
-                degree_score = node_info['data'].get('degree', 0)
-                composite_score = pagerank_score * 0.7 + degree_score * 0.3
-                important_nodes.append({
-                    'description': node_info['data'].get('description', ''),
-                    'composite_score': composite_score
-                })
+    # 2. For each document, create a Cluster node
+    for doc_name, law_ids in tqdm(doc_laws.items(), desc="Creating document clusters"):
+        cluster_id = f"doc_{hashlib.md5(doc_name.encode('utf-8')).hexdigest()[:12]}"
         
-        important_nodes.sort(key=lambda x: x['composite_score'], reverse=True)
-        descriptions = [node['description'] for node in important_nodes[:10]]
-
-        if not descriptions:
-            continue
-        descriptions = '\n'.join(descriptions)
-        print(descriptions)
-
-        # 获取该社区中连接案件最多的5个罪名
-        # 统计该社区中每个crime的案件数
-        crime_counts = {}
-        for node_id, node_info in db.nodes_data.items():
-            if node_info['type'] == 'Cases' and node_info['data'].get('communityId') == community_id:
-                # 找到该case关联的laws，然后找到laws关联的crimes
-                law_neighbors = db.get_neighbors(node_id, 'RELATES_TO_LAW')
-                for law_id in law_neighbors:
-                    crime_neighbors = db.get_neighbors(law_id, 'RELATED_CRIME')
-                    for crime_id in crime_neighbors:
-                        crime_data = db.get_node(crime_id)
-                        if crime_data:
-                            crime_name = crime_data.get('description', '')
-                            crime_counts[crime_name] = crime_counts.get(crime_name, 0) + 1
+        # Calculate cluster embedding using document title
+        doc_embedding = get_embedding(doc_name)
         
-        top_crimes = sorted(crime_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_crimes = [{'crime_name': name, 'case_count': count} for name, count in top_crimes]
-
-        # 构建更聚焦的提示
-        crime_context = ""
-        if top_crimes:
-            crime_descriptions = [
-                f"{crime['crime_name']}({crime['case_count']}个案件)" for crime in top_crimes]
-            crime_context = "主要涉及罪名: " + "、".join(crime_descriptions)
-
-        enhanced_prompt = f"""
-社区基本信息:
-- {crime_context}
-
-关键案例描述:
-{descriptions}
-"""
-
-        summary_data = summarize_texts(model, enhanced_prompt)
-        community_embedding = get_embedding(summary_data)
-
-        # 存储top罪名信息到Cluster节点
-        top_crime_names = [crime['crime_name'] for crime in top_crimes]
-        top_crime_counts = [crime['case_count'] for crime in top_crimes]
-
-        # 创建Cluster节点并存储更多元数据
-        cluster_id = str(community_id)
+        # Store Cluster node with document metadata
         db.add_node(
             cluster_id,
             'Cluster',
             {
-                'summary': summary_data,
-                'embedding': community_embedding,
-                'top_crimes': top_crime_names,
-                'top_crime_counts': top_crime_counts
+                'name': doc_name,
+                'summary': doc_name,
+                'doc_name': doc_name,
+                'embedding': doc_embedding,
+                'law_count': len(law_ids),
             }
         )
-
-        # 连接Cluster和Node
-        for node_id, node_info in db.nodes_data.items():
-            if node_info['type'] == 'Cases' and node_info['data'].get('communityId') == community_id:
-                db.add_edge(node_id, cluster_id, 'BELONGS_TO')
+        
+        # Connect Laws nodes to this Document Cluster
+        for law_id in law_ids:
+            db.add_edge(law_id, cluster_id, 'BELONGS_TO')
+            db.add_edge(cluster_id, law_id, 'CONTAINS_LAW')
+            db.update_node(law_id, {'communityId': cluster_id})
+            
+    # 3. Connect Cases to clusters if case cites or relates to laws in that document
+    for node_id, node_info in db.nodes_data.items():
+        if node_info['type'] == 'Cases':
+            law_neighbors = db.get_neighbors(node_id, 'RELATES_TO_LAW')
+            connected_clusters = set()
+            for law_id in law_neighbors:
+                for c_id in db.get_neighbors(law_id, 'BELONGS_TO'):
+                    if c_id not in connected_clusters:
+                        db.add_edge(node_id, c_id, 'BELONGS_TO')
+                        connected_clusters.add(c_id)
 
 
 def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
+    """
+    Search similar nodes using Hierarchical Document Clusters:
+    1. Find top matching legal documents (Cluster nodes) via vector similarity.
+    2. Traverse from top documents to their constituent law sections (Laws nodes).
+    3. Rerank candidate laws using Cross-Encoder / vector similarity.
+    """
     db = GraphDBManager.get_db()
     
-    # 先找最相似的Cluster
-    cluster_results = db.find_similar_nodes(query_embedding, 'Cluster', top_k=5)
-    
+    # 1. Find most similar Document Clusters
+    cluster_results = db.find_similar_nodes(query_embedding, 'Cluster', top_k=min(6, top_k * 2))
     if not cluster_results:
         return [], [], []
 
     clusters = []
     for ids, record in enumerate(cluster_results):
-        clusters.append(
-            {'code': ids, 'cluster_id': record['id'], 'summary': record.get('summary', '')})
-    
+        clusters.append({
+            'code': ids,
+            'cluster_id': record['id'],
+            'summary': record.get('summary', record.get('name', '')),
+            'similarity': record.get('similarity', 0.0)
+        })
+
     cluster_ids = rerank_clusters(model, clusters, query_text)
-    cluster_ids = [
-        c for c in cluster_ids if 0 <= c and c < len(clusters)]
     if not cluster_ids:
         cluster_ids = [0]
-    
-    neighbors = []
-    for cluster_id in cluster_ids[:2]:
-        cluster_node_id = clusters[cluster_id]['cluster_id']
-        
-        # 在该Cluster中找最相似的Node
-        # 先找到属于该cluster的所有Cases节点
-        cluster_cases = []
-        for node_id, node_info in db.nodes_data.items():
-            if node_info['type'] == 'Cases':
-                # 检查是否有BELONGS_TO关系指向该cluster
-                neighbors_list = db.get_neighbors(node_id, 'BELONGS_TO')
-                if cluster_node_id in neighbors_list:
-                    node_data = node_info['data'].copy()
-                    node_data['id'] = node_id
-                    cluster_cases.append(node_data)
-        
-        # 计算相似度并排序
-        case_similarities = []
-        for case_data in cluster_cases:
-            emb = case_data.get('embedding')
-            if emb is not None:
-                sim = db.cosine_similarity(query_embedding, np.array(emb))
-                case_similarities.append((case_data, sim))
-        
-        case_similarities.sort(key=lambda x: x[1], reverse=True)
-        
-        for case_data, similarity in case_similarities[:top_k]:
-            neighbors.append({
-                'id': case_data['id'],
-                'description': case_data.get('description', ''),
-                'caseId': case_data.get('caseId', ''),
-                'similarity': similarity
-            })
-    
-    neighbors = sorted(
-        neighbors, key=lambda x: x['similarity'], reverse=True)
-    for ids, neighbor in enumerate(neighbors):
-        neighbor['rank'] = ids + 1
-    neighbors = rerank(model, query_text, neighbors)
-    
-    cases = []
-    laws = []
-    for neighbor in neighbors:
-        # 获取关联的Laws节点
-        law_neighbors = db.get_neighbors(neighbor['id'], 'RELATES_TO_LAW')
-        for law_id in law_neighbors:
-            law_data = db.get_node(law_id)
-            if law_data:
-                laws.append({
-                    'id': law_id,
-                    'entry': law_data.get('entry'),
-                    'description': law_data.get('description'),
-                    'crimes': law_data.get('crimes'),
-                    'judge_dep': law_data.get('judge_dep'),
-                    'related_laws': law_data.get('related_laws'),
-                    'insights': law_data.get('insights', '')
-                })
-        cases.append(neighbor)
 
-    return clusters, cases, laws
+    # 2. Collect candidate laws belonging to top matching Document Clusters
+    candidate_laws = []
+    seen_law_ids = set()
+    cluster_cases = []
+    seen_case_ids = set()
+
+    for c_idx in cluster_ids[:3]:
+        if c_idx >= len(clusters):
+            continue
+        cluster_node_id = clusters[c_idx]['cluster_id']
+        
+        # Collect member laws from CONTAINS_LAW or BELONGS_TO
+        law_neighbors = db.get_neighbors(cluster_node_id, 'CONTAINS_LAW')
+        if not law_neighbors:
+            for nid, ninfo in db.nodes_data.items():
+                if ninfo['type'] == 'Laws' and cluster_node_id in db.get_neighbors(nid, 'BELONGS_TO'):
+                    law_neighbors.append(nid)
+
+        for law_id in law_neighbors:
+            if law_id not in seen_law_ids:
+                law_data = db.get_node(law_id)
+                if law_data:
+                    emb = law_data.get('embedding')
+                    sim = 0.0
+                    if emb is not None and query_embedding is not None:
+                        sim = db.cosine_similarity(query_embedding, np.array(emb))
+                    candidate_laws.append({
+                        'id': law_id,
+                        'entry': law_data.get('entry', ''),
+                        'description': law_data.get('description', ''),
+                        'crimes': law_data.get('crimes', []),
+                        'judge_dep': law_data.get('judge_dep', []),
+                        'related_laws': law_data.get('related_laws', []),
+                        'insights': law_data.get('insights', ''),
+                        'similarity': sim
+                    })
+                    seen_law_ids.add(law_id)
+
+        # Collect cases linked to this cluster if any
+        for node_id, node_info in db.nodes_data.items():
+            if node_info['type'] == 'Cases' and node_id not in seen_case_ids:
+                if cluster_node_id in db.get_neighbors(node_id, 'BELONGS_TO'):
+                    cluster_cases.append({
+                        'id': node_id,
+                        'description': node_info['data'].get('description', ''),
+                        'caseId': node_info['data'].get('caseId', ''),
+                    })
+                    seen_case_ids.add(node_id)
+
+    # 3. Sort candidate laws by similarity and rerank
+    candidate_laws.sort(key=lambda x: x.get('similarity', 0.0), reverse=True)
+    laws_pool = candidate_laws[:top_k * 4]
+
+    for idx, law in enumerate(laws_pool):
+        law['rank'] = idx + 1
+
+    reranked_laws = rerank(model, query_text, laws_pool)
+    for law in reranked_laws:
+        if 'rerank_score' not in law:
+            law['rerank_score'] = law.get('similarity', 0.0)
+
+    return clusters, cluster_cases[:top_k], reranked_laws[:top_k]
 
 
 _bm25_initialized = False
@@ -1065,6 +1069,5 @@ def construct_feature_graph(model, nodes_data):
     # Store nodes and embeddings in graph DB
     store_nodes_with_embeddings(nodes_data)
 
-    # Run KNN and clustering
-    run_knn(top_k=3)
+    # Create hierarchical legal document clusters (grouped by file name, no KNN required)
     create_clusters(model)
