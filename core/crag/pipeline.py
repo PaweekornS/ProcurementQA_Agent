@@ -1,6 +1,7 @@
-"""CRAG Pipeline Orchestrator for LegalGraphRAG"""
 import json
+import re
 from typing import Dict, Any, List, Optional
+
 
 from core.crag.classifier import IssueDecomposer
 from core.crag.synthesizer import LegalSynthesizer
@@ -8,7 +9,9 @@ from core.crag.auditor import CompletenessAuditor
 from core.crag.refiner import QueryRefiner
 
 from core.graph_construct.feature_graph import query_similar_nodes
+from core.graph_construct.graph_db import GraphDBManager
 from core.crag.intra_doc_search import intra_doc_search
+from core.crag.intra_doc_graph import traverse_intra_doc_graph, build_intra_doc_relations
 from core.utils.util import concat_feature_descriptions, filter_facts
 from core.judge.judge_crime import FALLBACK_NO_LAW_ANSWER
 
@@ -138,10 +141,10 @@ class CRAGPipeline:
             issues=issues
         )
 
-        direct_text = str(draft_answer.get("direct_answer", ""))
-        reasoning_text = str(draft_answer.get("legal_reasoning", ""))
-        if "ไม่พบข้อกฎหมาย" in direct_text or "ไม่พบข้อกฎหมาย" in reasoning_text or "ไม่อยู่ในขอบเขต" in direct_text:
+        direct_text = str(draft_answer.get("direct_answer", "")).strip()
+        if direct_text.startswith("ไม่พบข้อกฎหมาย") or direct_text.startswith("ไม่อยู่ในขอบเขต"):
             draft_answer["status"] = "NO_LAW_FOUND"
+
 
         audit_res = {}
         # If classified as NO_LAW_FOUND, do not immediately give up if we have retries left!
@@ -192,7 +195,18 @@ class CRAGPipeline:
             retry_count += 1
             new_law_batches = []
 
-            # 5.1 Targeted Intra-Document Scan across already retrieved candidate docs
+            # 5.1 Intra-Document Legal Graph Traversal (Cross-Citation, Adjacency & Chapter Edges)
+            try:
+                db_inst = GraphDBManager.get_db()
+                for miss in missing_issues:
+                    aspect = miss.get("search_query") or miss.get("missing_aspect") or ""
+                    graph_neighbors = traverse_intra_doc_graph(db_inst, law_used, aspect, top_k=2)
+                    if graph_neighbors:
+                        new_law_batches.append(graph_neighbors)
+            except Exception:
+                pass
+
+            # 5.2 Targeted Intra-Document Scan across already retrieved candidate docs
             intra_matched = []
             for miss in missing_issues:
                 aspect = miss.get("search_query") or miss.get("missing_aspect") or ""
@@ -204,7 +218,7 @@ class CRAGPipeline:
             if intra_matched:
                 new_law_batches.append(intra_matched)
 
-            # 5.2 Agent 4 Refiner (Graph neighbors + targeted refined search)
+            # 5.3 Agent 4 Refiner (Graph neighbors + targeted refined search)
             refine_res = self.refiner.refine(missing_issues, raw_fact, law_used)
             refined_queries = refine_res.get("refined_queries", [])
             neighbor_laws = refine_res.get("neighbor_laws", [])
@@ -222,8 +236,14 @@ class CRAGPipeline:
 
             if new_law_batches:
                 candidate_laws = merge_and_dedup_laws([candidate_laws] + new_law_batches)
-                # Expand context slightly for synthesis with newly discovered sections
-                law_used = candidate_laws[:max_laws + 2]
+                # Filter coarse multi-page raw chunk bundles (_p...) to protect context token budget
+                clean_candidates = [
+                    l for l in candidate_laws
+                    if not re.search(r"_p\d+", str(l.get("id", "")))
+                ]
+                if clean_candidates:
+                    candidate_laws = clean_candidates
+                law_used = candidate_laws[:max_laws]
                 fact_used = filter_facts(law_used, all_retrieved_facts) if all_retrieved_facts else []
 
             # Re-synthesize with full context
@@ -235,10 +255,10 @@ class CRAGPipeline:
                 unfound_issues=missing_issues
             )
 
-            direct_text = str(draft_answer.get("direct_answer", ""))
-            reasoning_text = str(draft_answer.get("legal_reasoning", ""))
-            if "ไม่พบข้อกฎหมาย" in direct_text or "ไม่พบข้อกฎหมาย" in reasoning_text or "ไม่อยู่ในขอบเขต" in direct_text:
+            direct_text = str(draft_answer.get("direct_answer", "")).strip()
+            if direct_text.startswith("ไม่พบข้อกฎหมาย") or direct_text.startswith("ไม่อยู่ในขอบเขต"):
                 draft_answer["status"] = "NO_LAW_FOUND"
+
 
             # Post-retry audit to strictly verify grounding
             post_audit = self.auditor.audit(issues, law_used, draft_answer)
@@ -253,9 +273,9 @@ class CRAGPipeline:
         # 2. All issues lack statutory basis or auditor explicitly recommended fallback
         should_fallback = (
             draft_answer.get("status") == "NO_LAW_FOUND"
-            or audit_res.get("all_issues_lack_law", False)
-            or audit_res.get("recommend_fallback_no_law", False)
+            or (audit_res.get("all_issues_lack_law", False) and not draft_answer.get("applicable_laws"))
         )
+
 
         if should_fallback:
             draft_answer = {
