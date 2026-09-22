@@ -211,6 +211,6 @@ def recalculate_file(json_path: str, stats_path: str = None, dataset_path: str =
         print(f"Updated {stats_path}")
 
 if __name__ == "__main__":
-    combined_file = sys.argv[1] if len(sys.argv) > 1 else "./outputs/THAI/openrouter_results_combined.json"
+    combined_file = sys.argv[1] if len(sys.argv) > 1 else "./outputs/THAI/openrouter_results.json"
     stats_file = sys.argv[2] if len(sys.argv) > 2 else "./outputs/THAI/openrouter_stats.json"
     recalculate_file(combined_file, stats_file)
