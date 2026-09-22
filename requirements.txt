@@ -12,5 +12,17 @@ python-dotenv>=1.0.0
 # OpenAI API client (for DeepSeek, GPT-4o-mini)
 openai>=1.0.0
 
+# Hybrid retrieval: Thai BM25 + dense/cross-encoder reranking (core/graph_construct/)
+pythainlp>=5.0.0
+rank_bm25>=0.2.2
+sentence-transformers>=3.0.0
+
+# Corpus preparation (scripts/prepare_thai_corpus.py): statute/FAQ ingestion
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# MCP server (mcp_server.py): exposes the CRAG pipeline as a tool for other agents
+mcp>=1.2.0
+
 # Optional: For quantized model loading
 # bitsandbytes>=0.39.0  # For quantization (optional)
