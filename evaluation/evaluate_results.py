@@ -1194,7 +1194,7 @@ def main():
         "--results",
         type=str,
         default=None,
-        help="Path to input results JSON (default: auto-detect latest outputs/THAI/*_resultsd.json)",
+        help="Path to input results JSON (default: auto-detect latest outputs/THAI/*_results_combined.json)",
     )
     parser.add_argument(
         "--output",
@@ -1260,8 +1260,8 @@ def main():
     else:
         # Try finding standard LegalGraphRAG results
         candidate_files = [
-            project_root / "outputs" / "THAI" / "openrouter_results.json",
-            project_root / "outputs" / "openrouter_results.json",
+            project_root / "outputs" / "THAI" / "openrouter_results_combined.json",
+            project_root / "outputs" / "openrouter_results_combined.json",
         ]
         found = False
         for cand in candidate_files:
@@ -1272,23 +1272,23 @@ def main():
                 break
         if not found:
             # Fallback search
-            matching = sorted(project_root.glob("outputs/**/openrouter_results.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            matching = sorted(project_root.glob("outputs/**/openrouter_results_combined.json"), key=lambda f: f.stat().st_mtime, reverse=True)
             if matching:
                 input_path = matching[0]
                 print(f"[*] Auto-detected input file: {input_path}")
             else:
-                input_path = (project_root / "outputs" / "THAI" / "openrouter_results.json").resolve()
+                input_path = (project_root / "outputs" / "THAI" / "openrouter_results_combined.json").resolve()
 
     # Default output paths based on input path
     if args.output is None:
-        output_path = input_path.parent / "eval_results.json"
+        output_path = input_path.parent / f"{input_path.stem}_eval.json"
     else:
         output_path = Path(args.output)
         if not output_path.is_absolute():
             output_path = (project_root / output_path).resolve()
 
     if args.summary_md is None:
-        summary_path = input_path.parent / "eval_summary.md"
+        summary_path = input_path.parent / f"{input_path.stem}_summary.md"
     else:
         summary_path = Path(args.summary_md)
         if not summary_path.is_absolute():

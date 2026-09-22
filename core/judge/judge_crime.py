@@ -131,28 +131,13 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         if not parsed.get("legal_reasoning") and not parsed.get("answer"):
             parsed["legal_reasoning"] = cleaned
 
-    # Check status and detect NO_LAW_FOUND state or degenerate backtick output
+    # Check status and detect NO_LAW_FOUND state
     raw_status = str(parsed.get("status", "")).strip().upper()
     direct_ans = str(parsed.get("direct_answer", "")).strip()
-    reasoning_ans = str(parsed.get("legal_reasoning", "")).strip()
-
-    # Detect degenerate backtick loops, empty responses, or corrupt LLM formatting
-    is_degenerate = (
-        not cleaned
-        or direct_ans.startswith("```")
-        or set(direct_ans.replace(" ", "").replace("\n", "")) <= {'`'}
-        or (len(direct_ans) == 0 and len(reasoning_ans) == 0)
-        or (response.count("```") > 10 and not parsed.get("direct_answer"))
-    )
-
     is_no_law = (
         raw_status == "NO_LAW_FOUND"
-        or is_degenerate
-        or direct_ans.startswith("ไม่พบข้อกฎหมาย")
-        or direct_ans.startswith("ไม่อยู่ในขอบเขต")
+        or (len(direct_ans) < 250 and ("ไม่พบข้อกฎหมาย" in direct_ans or "ไม่อยู่ในขอบเขต" in direct_ans))
     )
-
-
 
     if is_no_law:
         parsed["status"] = "NO_LAW_FOUND"

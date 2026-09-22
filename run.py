@@ -583,12 +583,11 @@ def run_evaluation(
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
     print(f"{'='*65}\n")
     
-    results_file = os.path.join(output_dir, f"{model_name}_results.json")
-    with open(results_file, "w", encoding="utf-8") as f:
+    combined_file = os.path.join(output_dir, f"{model_name}_results_combined.json")
+    with open(combined_file, "w", encoding="utf-8") as f:
         json.dump(combined_results, f, ensure_ascii=False, indent=2)
     
-    print(f"QA results saved to {results_file}")
-
+    print(f"Combined QA results saved to {combined_file}")
     
     stats_file = os.path.join(output_dir, f"{model_name}_stats.json")
     stats = {
@@ -602,7 +601,7 @@ def run_evaluation(
         "section_hits": total_section_hits,
         "section_hit_rate": sec_rate,
         "elapsed_time": elapsed_time,
-        "output_file": results_file
+        "output_file": combined_file
     }
     with open(stats_file, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
