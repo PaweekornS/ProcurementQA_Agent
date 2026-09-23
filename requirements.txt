@@ -22,7 +22,10 @@ pandas>=2.0.0
 openpyxl>=3.1.0
 
 # MCP server (mcp_server.py): exposes the CRAG pipeline as a tool for other agents
-mcp>=1.2.0
+# Pinned to <2.0.0 because mcp 2.x introduces breaking changes (FastMCP renamed to MCPServer)
+mcp>=1.2.0,<2.0.0
+starlette>=0.35.0
+uvicorn>=0.25.0
 
 # Optional: For quantized model loading
 # bitsandbytes>=0.39.0  # For quantization (optional)

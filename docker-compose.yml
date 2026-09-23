@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Default to CPU torch wheel for fast builds and lightweight footprint.
+        # Switch to "https://download.pytorch.org/whl/cu124" if enabling GPU reservations below.
+        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cpu"
     image: legalgraphrag-procurement-mcp:latest
     container_name: legalgraphrag-mcp
     env_file:
@@ -13,6 +17,7 @@ services:
       MCP_PORT: 8000
       DOTENV_PATH: .env
       PYTHONPATH: /app
+      HF_HOME: /app/.cache/huggingface
     ports:
       - "8000:8000"
     volumes:
@@ -20,6 +25,8 @@ services:
       - ./outputs:/app/outputs
       - ./datasets:/app/datasets
       - ./logs:/app/logs
+      # Persistent HuggingFace model cache (rerankers / tokenizers)
+      - hf_cache:/app/.cache/huggingface
       # Source data & env mounted read-only
       - ./datas:/app/datas
       - ./procurement_data:/app/procurement_data:ro
@@ -39,3 +46,7 @@ services:
     #           count: 1
     #           capabilities: [gpu]
     restart: unless-stopped
+
+volumes:
+  hf_cache:
+    driver: local
