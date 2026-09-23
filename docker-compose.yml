@@ -47,6 +47,24 @@ services:
     #           capabilities: [gpu]
     restart: unless-stopped
 
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: legalgraphrag-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/procurement_secret123
+      - NEO4J_PLUGINS=["apoc"]
+    ports:
+      - "7474:7474"   # Neo4j Browser UI
+      - "7687:7687"   # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+
 volumes:
   hf_cache:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
     driver: local

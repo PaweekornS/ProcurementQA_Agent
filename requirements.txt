@@ -27,5 +27,8 @@ mcp>=1.2.0,<2.0.0
 starlette>=0.35.0
 uvicorn>=0.25.0
 
+# Graph Database & Visualization
+neo4j>=5.15.0
+
 # Optional: For quantized model loading
 # bitsandbytes>=0.39.0  # For quantization (optional)
