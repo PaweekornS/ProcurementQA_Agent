@@ -1,0 +1,39 @@
+services:
+  legalgraphrag-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: legalgraphrag-procurement-mcp:latest
+    container_name: legalgraphrag-mcp
+    env_file:
+      # Copy env.example -> .env and fill in your OPENROUTER_API_KEY before
+      # running. See README.md / REPORT.md.
+      - .env
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+      DOTENV_PATH: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Generated corpus/index artifacts. Mounted read-write so the container
+      # can build and cache the graph DB on first run; re-run with these
+      # volumes in place afterwards to skip rebuilding.
+      - ./outputs:/app/outputs
+      - ./datasets:/app/datasets
+      # Source statute/FAQ/benchmark data (gitignored, supply locally).
+      - ./procurement_data:/app/procurement_data:ro
+      # Env config (gitignored). Also passed via env_file above; mounted here
+      # too so DOTENV_PATH resolution inside scripts sees the same file.
+      - ./.env:/app/.env:ro
+    # Uncomment to use the GPU cross-encoder reranker (requires the NVIDIA
+    # Container Toolkit on the host):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    restart: unless-stopped
