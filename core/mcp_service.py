@@ -68,6 +68,28 @@ class ProcurementService:
         self.rag = LegalGraphRAG(config=self.config)
         self._section_index: Dict[str, List[Dict[str, Any]]] = {}
         self._build_section_lookup_index()
+        self._warmup_models()
+
+    def _warmup_models(self):
+        """Pre-warm reranker and embedder during service startup so first queries are instant."""
+        try:
+            from core.graph_construct.feature_graph import get_embedding
+            from core.graph_construct.hybrid_reranker import get_reranker
+            import torch
+
+            reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+            reranker_device = os.getenv("reranker_device", "cuda:0" if (torch and torch.cuda.is_available()) else "cpu")
+            reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+
+            print(f"[ProcurementService] Pre-warming CrossEncoder '{reranker_model}' on '{reranker_device}'...")
+            reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+            if reranker and reranker.model:
+                print(f"[ProcurementService] CrossEncoder successfully pre-warmed on '{reranker.device}'.")
+
+            _ = get_embedding("warmup query")
+            print("[ProcurementService] Embedder successfully pre-warmed.")
+        except Exception as e:
+            print(f"[ProcurementService Warmup Warning] {e}")
 
     @classmethod
     def get_instance(

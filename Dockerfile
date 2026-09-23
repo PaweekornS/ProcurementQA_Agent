@@ -23,6 +23,13 @@ COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --extra-index-url ${TORCH_INDEX_URL} -r requirements.txt
 
+# Pre-download default Cross-Encoder reranker into image cache during build time
+RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+    m = 'BAAI/bge-reranker-v2-m3'; \
+    print(f'Pre-caching {m}...'); \
+    AutoTokenizer.from_pretrained(m); \
+    AutoModelForSequenceClassification.from_pretrained(m)"
+
 # Create application user and runtime directories (including HuggingFace model cache)
 RUN useradd -u 10001 -m -d /app appuser \
     && mkdir -p /app/outputs /app/datasets /app/logs /app/datas /app/.cache/huggingface \
