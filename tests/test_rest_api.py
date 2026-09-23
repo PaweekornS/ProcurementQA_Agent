@@ -11,9 +11,9 @@ Smoke-tests the dual-protocol REST API endpoints of mcp_server.py:
   - POST /api/v1/ask (optional)
 
 Usage:
-    python scripts/test_rest_api.py
-    python scripts/test_rest_api.py --host http://localhost:8000
-    python scripts/test_rest_api.py --run-qa
+    python tests/test_rest_api.py
+    python tests/test_rest_api.py --host http://localhost:8000
+    python tests/test_rest_api.py --run-qa
 """
 
 import argparse
