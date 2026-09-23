@@ -34,7 +34,7 @@ class LegalSynthesizer:
             return {
                 "status": "NO_LAW_FOUND",
                 "direct_answer": FALLBACK_NO_LAW_ANSWER,
-                "legal_reasoning": FALLBACK_NO_LAW_ANSWER,
+                "decisive_quotes": [],
                 "applicable_laws": [],
                 "exceptions_or_conditions": "",
                 "law_article": []

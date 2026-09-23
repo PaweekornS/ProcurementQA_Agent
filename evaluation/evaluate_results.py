@@ -642,10 +642,7 @@ def run_evaluation(
             continue
 
         # Extract answer text across various schema aliases
-        direct_ans = (item.get("direct_answer") or "").strip()
-        legal_reas = (item.get("legal_reasoning") or item.get("answer") or "").strip()
-        
-        # Combined concise answer: direct answer followed by legal reasoning
+        direct_ans = (item.get("direct_answer") or item.get("answer") or "").strip()
         answer = direct_ans
 
         ground_truth = item.get("ground_truth") or ""
@@ -656,10 +653,8 @@ def run_evaluation(
         is_fallback_answer = (
             status == "NO_LAW_FOUND"
             or "ไม่พบข้อกฎหมาย" in direct_ans
-            or "ไม่พบข้อกฎหมาย" in legal_reas
             or "ไม่พบข้อกฎหมาย" in answer
             or "ไม่อยู่ในขอบเขต" in direct_ans
-            or "ไม่อยู่ในขอบเขต" in legal_reas
             or "ไม่อยู่ในขอบเขต" in answer
         )
 
@@ -1163,7 +1158,7 @@ def run_evaluation(
             if len(q_text) > 50:
                 q_text = q_text[:47] + "..."
             st = s.get("status") or s.get("overall_status") or "NO_LAW_FOUND"
-            ans_text = (s.get("answer") or s.get("legal_reasoning") or "ไม่พบข้อกฎหมายที่เกี่ยวข้อง").replace("\n", " ").replace("|", "\\|")
+            ans_text = (s.get("direct_answer") or s.get("answer") or "ไม่พบข้อกฎหมายที่เกี่ยวข้อง").replace("\n", " ").replace("|", "\\|")
             if len(ans_text) > 65:
                 ans_text = ans_text[:62] + "..."
             md_lines.append(f"| {r_idx} | {q_text} | {st} | {ans_text} |")
@@ -1194,7 +1189,7 @@ def main():
         "--results",
         type=str,
         default=None,
-        help="Path to input results JSON (default: auto-detect latest outputs/THAI/*_results_combined.json)",
+        help="Path to input results JSON (default: auto-detect latest outputs/THAI/*_resultsd.json)",
     )
     parser.add_argument(
         "--output",
@@ -1246,8 +1241,8 @@ def main():
         "--workers",
         "-w",
         type=int,
-        default=4,
-        help="Number of concurrent worker threads for LLM-as-a-Judge evaluation (default: 4)",
+        default=8,
+        help="Number of concurrent worker threads for LLM-as-a-Judge evaluation (default: 8)",
     )
 
     args = parser.parse_args()
@@ -1260,8 +1255,8 @@ def main():
     else:
         # Try finding standard LegalGraphRAG results
         candidate_files = [
-            project_root / "outputs" / "THAI" / "openrouter_results_combined.json",
-            project_root / "outputs" / "openrouter_results_combined.json",
+            project_root / "outputs" / "THAI" / "openrouter_results.json",
+            project_root / "outputs" / "openrouter_results.json",
         ]
         found = False
         for cand in candidate_files:
@@ -1272,23 +1267,23 @@ def main():
                 break
         if not found:
             # Fallback search
-            matching = sorted(project_root.glob("outputs/**/openrouter_results_combined.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            matching = sorted(project_root.glob("outputs/**/openrouter_results.json"), key=lambda f: f.stat().st_mtime, reverse=True)
             if matching:
                 input_path = matching[0]
                 print(f"[*] Auto-detected input file: {input_path}")
             else:
-                input_path = (project_root / "outputs" / "THAI" / "openrouter_results_combined.json").resolve()
+                input_path = (project_root / "outputs" / "THAI" / "openrouter_results.json").resolve()
 
     # Default output paths based on input path
     if args.output is None:
-        output_path = input_path.parent / f"{input_path.stem}_eval.json"
+        output_path = input_path.parent / "eval_results.json"
     else:
         output_path = Path(args.output)
         if not output_path.is_absolute():
             output_path = (project_root / output_path).resolve()
 
     if args.summary_md is None:
-        summary_path = input_path.parent / f"{input_path.stem}_summary.md"
+        summary_path = input_path.parent / "eval_summary.md"
     else:
         summary_path = Path(args.summary_md)
         if not summary_path.is_absolute():

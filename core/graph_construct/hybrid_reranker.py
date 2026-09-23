@@ -319,6 +319,10 @@ def expand_numeric_query(query: str, chatbot: Optional[Any] = None) -> str:
     if any(trig in query for trig in num_triggers):
         boost_terms.extend(["เกณฑ์", "อัตรา", "หลักเกณฑ์", "กำหนดไว้"])
 
+    # 10. Specifications & Terms of Reference concepts (TOR / ขอบเขตของงาน / สเปก / ยี่ห้อ -> คุณลักษณะเฉพาะ)
+    if any(k in q_lower for k in ["tor", "ขอบเขตของงาน", "สเปก", "สเปค", "ยี่ห้อ"]):
+        boost_terms.extend(["คุณลักษณะเฉพาะ", "การกำหนดคุณลักษณะเฉพาะ"])
+
     if boost_terms:
         unique_terms = list(dict.fromkeys(boost_terms))
         return f"{query} {' '.join(unique_terms)}"

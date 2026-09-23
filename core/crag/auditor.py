@@ -36,7 +36,8 @@ class CompletenessAuditor:
                 "missing_issues": []
             }
 
-        reasoning = draft_answer.get("legal_reasoning", "")
+        quotes = draft_answer.get("decisive_quotes", [])
+        quotes_str = "\n".join([f"- [{q.get('law', '')}]: {q.get('quote', '')}" for q in quotes if isinstance(q, dict)]) if isinstance(quotes, list) else str(quotes)
         direct = draft_answer.get("direct_answer", "")
 
         # Format concise issues
@@ -53,7 +54,7 @@ class CompletenessAuditor:
             law_lines.append(f"* {entry}: {desc}")
         law_context = "\n".join(law_lines)
 
-        draft_text = f"คำตอบตรง (Direct Answer): {direct}\nเหตุผลและข้อกฎหมาย (Reasoning): {reasoning}"
+        draft_text = f"คำตอบตรง (Direct Answer): {direct}\nข้อความตัวบทกฎหมายที่ใช้ชี้ขาด (Decisive Quotes): {quotes_str}"
 
         prompt = (
             get_prompt("AUDIT_COMPLETENESS_PROMPT")
