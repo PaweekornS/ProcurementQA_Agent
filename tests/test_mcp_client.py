@@ -9,9 +9,9 @@ inspects tools, resources, and prompts, and exercises atomic lookups,
 compliance checks, and Q&A.
 
 Usage:
-    python scripts/test_mcp_client.py
-    python scripts/test_mcp_client.py --url http://localhost:8000/mcp
-    python scripts/test_mcp_client.py --run-qa
+    python tests/test_mcp_client.py
+    python tests/test_mcp_client.py --url http://localhost:8000/mcp
+    python tests/test_mcp_client.py --run-qa
 """
 
 import argparse

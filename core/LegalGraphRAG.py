@@ -85,8 +85,12 @@ class RetrieveConfig:
 class GraphConfig:
     """Graph database configuration"""
     graph_db_path: Optional[str] = None  # Graph database save/load path
+    embedding_provider: str = "local"  # "local" or "tokenmind"
     embedding_api_url: str = "http://localhost:11434/api/embed"
     embedding_model: str = "unsloth/embeddinggemma-300m"
+    tokenmind_api_key: Optional[str] = None
+    tokenmind_base_url: Optional[str] = None
+    tokenmind_embedding_model: str = "BAAI/bge-m3"
     auto_save: bool = True  # Whether to auto-save graph database
     auto_build: bool = True  # Whether to auto-build if graph doesn't exist
 
@@ -184,8 +188,12 @@ class LegalGraphRAGConfig:
         # Graph configuration
         graph_config = GraphConfig(
             graph_db_path=os.getenv("graph_db_path"),
+            embedding_provider=os.getenv("embedding_provider", "local").lower(),
             embedding_api_url=os.getenv("embedding_api_url", "http://localhost:11434/api/embed"),
             embedding_model=os.getenv("embedding_model", "unsloth/embeddinggemma-300m"),
+            tokenmind_api_key=os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key"),
+            tokenmind_base_url=os.getenv("TOKENMIND_BASE_URL") or os.getenv("tokenmind_base_url", "https://tokenmind.abdul.in.th/v1"),
+            tokenmind_embedding_model=os.getenv("TOKENMIND_EMBEDDING_MODEL") or os.getenv("tokenmind_embedding_model", "BAAI/bge-m3"),
             auto_save=os.getenv("auto_save", "True") == "True",
             auto_build=os.getenv("auto_build", "True") == "True"
         )
@@ -250,8 +258,12 @@ class LegalGraphRAGConfig:
             "retrieve": self.retrieve.to_dict(),
             "graph": {
                 "graph_db_path": self.graph.graph_db_path,
+                "embedding_provider": self.graph.embedding_provider,
                 "embedding_api_url": self.graph.embedding_api_url,
                 "embedding_model": self.graph.embedding_model,
+                "tokenmind_api_key": self.graph.tokenmind_api_key,
+                "tokenmind_base_url": self.graph.tokenmind_base_url,
+                "tokenmind_embedding_model": self.graph.tokenmind_embedding_model,
                 "auto_save": self.graph.auto_save,
                 "auto_build": self.graph.auto_build
             },
@@ -287,7 +299,11 @@ class LegalGraphRAG:
         set_prompt_language(self.config.model.prompt_language)
         configure_embedding(
             api_url=self.config.graph.embedding_api_url,
-            model=self.config.graph.embedding_model
+            model=self.config.graph.embedding_model,
+            provider=self.config.graph.embedding_provider,
+            tokenmind_api_key=self.config.graph.tokenmind_api_key,
+            tokenmind_base_url=self.config.graph.tokenmind_base_url,
+            tokenmind_model=self.config.graph.tokenmind_embedding_model
         )
 
         # Initialize model
