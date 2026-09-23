@@ -10,8 +10,12 @@ from .graph_db import GraphDBManager
 from tqdm import tqdm
 
 
+_embedding_provider = "local"
 _embedding_api_url = "http://localhost:11434/api/embed"
 _embedding_model = "unsloth/embeddinggemma-300m"
+_tokenmind_api_key = None
+_tokenmind_base_url = "https://tokenmind.abdul.in.th/v1"
+_tokenmind_model = "BAAI/bge-m3"
 _embedding_dim = 768
 _local_embedder = None
 _local_embedder_lock = threading.Lock()
@@ -26,9 +30,23 @@ def _init_vector_cache():
     # Vector cache is maintained in-memory during execution
 
 
-def configure_embedding(api_url=None, model=None):
+def configure_embedding(
+    api_url=None,
+    model=None,
+    provider=None,
+    tokenmind_api_key=None,
+    tokenmind_base_url=None,
+    tokenmind_model=None
+):
     """Configure the embedding backend used by graph construction and retrieval."""
-    global _embedding_api_url, _embedding_model, _local_embedder, _http_embedder_available
+    global _embedding_api_url, _embedding_model, _embedding_provider
+    global _tokenmind_api_key, _tokenmind_base_url, _tokenmind_model
+    global _local_embedder, _http_embedder_available, _embedding_dim
+
+    if provider:
+        _embedding_provider = provider.lower()
+        if _embedding_provider == "tokenmind":
+            _embedding_dim = 1024
     if api_url:
         _embedding_api_url = api_url
     if model:
@@ -36,11 +54,47 @@ def configure_embedding(api_url=None, model=None):
             _local_embedder = None
             _http_embedder_available = None
         _embedding_model = model
+    if tokenmind_api_key:
+        _tokenmind_api_key = tokenmind_api_key
+    if tokenmind_base_url:
+        _tokenmind_base_url = tokenmind_base_url.rstrip("/")
+    if tokenmind_model:
+        _tokenmind_model = tokenmind_model
     _init_vector_cache()
+
+
+def batch_embed_tokenmind(texts, batch_size=16):
+    """Batch embed texts using Tokenmind API"""
+    api_key = _tokenmind_api_key or os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key")
+    base_url = (_tokenmind_base_url or os.getenv("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
+    model = _tokenmind_model or os.getenv("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        chunk = [str(t)[:2000] for t in texts[i:i + batch_size]]
+        try:
+            payload = {"model": model, "input": chunk}
+            resp = requests.post(f"{base_url}/embeddings", headers=headers, json=payload, timeout=30.0)
+            resp.raise_for_status()
+            res_data = resp.json()
+            items = res_data.get("data", [])
+            for item in items:
+                all_embeddings.append(item["embedding"])
+        except Exception as e:
+            print(f"[feature_graph] Tokenmind batch embed failed at offset {i}: {e}, falling back to sequential")
+            for t in chunk:
+                all_embeddings.append(get_embedding(t))
+    return all_embeddings
 
 
 def get_embedding(text):
     global _embedding_dim, _http_embedder_available, _local_embedder
+    global _embedding_provider, _tokenmind_api_key, _tokenmind_base_url, _tokenmind_model
 
     if not text:
         return [0.0] * _embedding_dim
@@ -52,7 +106,37 @@ def get_embedding(text):
     if text[:200] in _vector_cache:
         return _vector_cache[text[:200]]
 
-    # 2. Try HTTP embedding endpoint first (e.g. Ollama with unsloth/embeddinggemma-300m)
+    # 2. Try Tokenmind API if configured as active provider
+    provider = (_embedding_provider or os.getenv("embedding_provider", "local")).lower()
+    if provider == "tokenmind":
+        api_key = _tokenmind_api_key or os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key")
+        base_url = (_tokenmind_base_url or os.getenv("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
+        model = _tokenmind_model or os.getenv("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
+
+        if api_key and base_url:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": model,
+                    "input": str(text)[:2000]
+                }
+                response = requests.post(f"{base_url}/embeddings", json=payload, headers=headers, timeout=10.0)
+                response.raise_for_status()
+                result = response.json()
+                data = result.get('data') or result.get('embeddings')
+                if data and len(data) > 0:
+                    item = data[0]
+                    vec = item['embedding'] if isinstance(item, dict) and 'embedding' in item else item
+                    _embedding_dim = len(vec)
+                    _vector_cache[text] = vec
+                    return vec
+            except Exception as e:
+                print(f"[feature_graph] Tokenmind embedding failed: {e}")
+
+    # 3. Try HTTP embedding endpoint (e.g. Ollama with unsloth/embeddinggemma-300m)
     if _http_embedder_available is not False and _embedding_api_url:
         try:
             data = {
@@ -75,7 +159,7 @@ def get_embedding(text):
         except Exception:
             _http_embedder_available = False
 
-    # 3. Try local SentenceTransformer as fallback
+    # 4. Try local SentenceTransformer as fallback
     if _local_embedder is None:
         with _local_embedder_lock:
             if _local_embedder is None:
@@ -99,7 +183,7 @@ def get_embedding(text):
         except Exception:
             pass
 
-    # 4. Deterministic fallback pseudo-vector based on hash matching active dimension
+    # 5. Deterministic fallback pseudo-vector based on hash matching active dimension
     h = hashlib.sha256(text.encode('utf-8')).digest()
     dim = _embedding_dim
     np.random.seed(int.from_bytes(h[:4], 'big'))
@@ -705,9 +789,11 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
         rrf_k=int(os.getenv("rrf_k", "60"))
     )
 
-    # 4. GPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
-    # Expand candidate pool to top 50 before reranking to maximize recall@k
-    rerank_pool = fused_candidates[:50]
+    # 4. GPU/CPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
+    # Default candidate pool: 50 on GPU, 15 on CPU for fast sub-8s latency
+    default_pool_size = 15 if "cpu" in str(reranker_device).lower() else 50
+    pool_size = int(os.getenv("rerank_pool_size", default_pool_size))
+    rerank_pool = fused_candidates[:pool_size]
     reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
     if reranker and reranker.model is not None:
         top_candidates = reranker.rerank(
@@ -1011,49 +1097,73 @@ def construct_feature_graph(model, nodes_data):
     law_nodes_data = nodes_data['law']
     crime_nodes_data = nodes_data['crime']
 
-    # Attempt fast batch encoding on GPU if CUDA is available
-    use_gpu_build = torch.cuda.is_available()
-    embedder_model_name = _embedding_model or "unsloth/embeddinggemma-300m"
+    # Check if Tokenmind embedding provider is active
+    active_provider = (_embedding_provider or os.getenv("embedding_provider", "local")).lower()
+    if active_provider == "tokenmind":
+        print(f"[GraphConstruct] Acceleration: Batch encoding nodes with Tokenmind API ({_tokenmind_model})...")
+        case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]
+        if case_texts:
+            case_embs = batch_embed_tokenmind(case_texts, batch_size=16)
+            for i, emb in enumerate(case_embs):
+                case_nodes_data[i]['embedding'] = emb
 
-    if use_gpu_build:
-        print(f"[GraphConstruct] Acceleration: Encoding nodes with '{embedder_model_name}' on GPU (cuda:0, fp16)...")
-        try:
-            from sentence_transformers import SentenceTransformer
-            embedder = SentenceTransformer(
-                embedder_model_name,
-                device="cuda:0",
-                model_kwargs={"dtype": torch.float16}
-            )
-            embedder.max_seq_length = 512
+        law_texts = [str(n.get('description', ''))[:1500] for n in law_nodes_data]
+        if law_texts:
+            law_embs = batch_embed_tokenmind(law_texts, batch_size=16)
+            for i, emb in enumerate(law_embs):
+                law_nodes_data[i]['embedding'] = emb
 
-            # 1. Batch encode Cases
-            case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]
-            if case_texts:
-                case_embs = embedder.encode(case_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
-                for i, emb in enumerate(case_embs):
-                    case_nodes_data[i]['embedding'] = emb.tolist()
+        crime_texts = [str(n.get('description', ''))[:1500] for n in crime_nodes_data]
+        if crime_texts:
+            crime_embs = batch_embed_tokenmind(crime_texts, batch_size=16)
+            for i, emb in enumerate(crime_embs):
+                crime_nodes_data[i]['embedding'] = emb
 
-            # 2. Batch encode Laws
-            law_texts = [str(n.get('description', ''))[:1500] for n in law_nodes_data]
-            if law_texts:
-                law_embs = embedder.encode(law_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
-                for i, emb in enumerate(law_embs):
-                    law_nodes_data[i]['embedding'] = emb.tolist()
+        use_gpu_build = True
+    else:
+        # Attempt fast batch encoding on GPU if CUDA is available
+        use_gpu_build = torch.cuda.is_available()
+        embedder_model_name = _embedding_model or "unsloth/embeddinggemma-300m"
 
-            # 3. Batch encode Crimes
-            crime_texts = [str(n.get('description', ''))[:1500] for n in crime_nodes_data]
-            if crime_texts:
-                crime_embs = embedder.encode(crime_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
-                for i, emb in enumerate(crime_embs):
-                    crime_nodes_data[i]['embedding'] = emb.tolist()
+        if use_gpu_build:
+            print(f"[GraphConstruct] Acceleration: Encoding nodes with '{embedder_model_name}' on GPU (cuda:0, fp16)...")
+            try:
+                from sentence_transformers import SentenceTransformer
+                embedder = SentenceTransformer(
+                    embedder_model_name,
+                    device="cuda:0",
+                    model_kwargs={"dtype": torch.float16}
+                )
+                embedder.max_seq_length = 512
 
-            # Free GPU memory completely for Reranker and inference
-            del embedder
-            torch.cuda.empty_cache()
-            print("[GraphConstruct] Finished GPU batch encoding. Released GPU memory.")
-        except Exception as e:
-            print(f"[GraphConstruct] GPU batch encoding failed ({e}), falling back to sequential get_embedding...")
-            use_gpu_build = False
+                # 1. Batch encode Cases
+                case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]
+                if case_texts:
+                    case_embs = embedder.encode(case_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                    for i, emb in enumerate(case_embs):
+                        case_nodes_data[i]['embedding'] = emb.tolist()
+
+                # 2. Batch encode Laws
+                law_texts = [str(n.get('description', ''))[:1500] for n in law_nodes_data]
+                if law_texts:
+                    law_embs = embedder.encode(law_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                    for i, emb in enumerate(law_embs):
+                        law_nodes_data[i]['embedding'] = emb.tolist()
+
+                # 3. Batch encode Crimes
+                crime_texts = [str(n.get('description', ''))[:1500] for n in crime_nodes_data]
+                if crime_texts:
+                    crime_embs = embedder.encode(crime_texts, batch_size=8, device="cuda:0", normalize_embeddings=True, show_progress_bar=True)
+                    for i, emb in enumerate(crime_embs):
+                        crime_nodes_data[i]['embedding'] = emb.tolist()
+
+                # Free GPU memory completely for Reranker and inference
+                del embedder
+                torch.cuda.empty_cache()
+                print("[GraphConstruct] Finished GPU batch encoding. Released GPU memory.")
+            except Exception as e:
+                print(f"[GraphConstruct] GPU batch encoding failed ({e}), falling back to sequential get_embedding...")
+                use_gpu_build = False
 
     if not use_gpu_build:
         # Fallback to sequential get_embedding (e.g. via HTTP Ollama)
