@@ -1,149 +1,198 @@
-# Running LegalGraphRAG as an MCP Sub-Agent
+# Production LegalGraphRAG: Multi-Tier MCP & REST Server for Thai Government Procurement
 
-This document covers `mcp_server.py`: it exposes the CRAG pipeline as an [MCP](https://modelcontextprotocol.io) tool so a larger orchestrator (or any MCP-compatible client) can call it directly, plus how to build, run, and test it via Docker.
-
-For what the pipeline itself does, see [REPORT.md](REPORT.md). For the general project layout, see [README.md](README.md).
+This document defines the architecture, tool contracts, dual-protocol exposure (MCP + REST API), and production deployment guide for the **LegalGraphRAG Procurement Sub-Agent**.
 
 ---
 
-## 1. What was added
+## 1. Architectural Overview & 4-Tier Design
 
+Rather than exposing a single monolithic tool, the system provides a **4-Tier specialized interface** optimized for outer orchestrator agents (e.g., Enterprise Procurement Copilots, Compliance Auditor Agents, LangGraph/AutoGen workflows) and traditional REST clients.
 
-| File                         | Purpose                                                                                                                                            |
-| :----------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp_server.py`              | MCP server. Loads`LegalGraphRAG` once, exposes it as two tools: `ask_procurement_law(question)` and `healthcheck()`.                               |
-| `Dockerfile`                 | Builds a container with all runtime deps (torch, sentence-transformers, pythainlp, rank_bm25, mcp) and the app code.                               |
-| `docker-compose.yml`         | Runs the server over the`streamable-http` transport on port 8000, mounting `outputs/`, `datasets/`, `procurement_data/`, `configs/` from the host. |
-| `scripts/test_mcp_client.py` | A minimal Python MCP client that lists tools and calls`ask_procurement_law` against a running server — the automated way to smoke-test it.        |
+```mermaid
+flowchart TD
+    subgraph CLIENTS["Consumer Layer"]
+        ORCH["Orchestrator Agent (MCP Client)"]
+        WEB["Web / ERP / Legacy Client (REST API)"]
+    end
 
-`mcp_server.py` does not change any CRAG logic — it's a thin adapter around `LegalGraphRAG.analyze_case()` (see `core/LegalGraphRAG.py`), which already returns the same `judge_result` / `crag_meta` structure `run.py` produces for the benchmark.
+    subgraph SERVER["Dual-Mode Service (Port 8000)"]
+        direction TB
+        ENDPOINT_MCP["/mcp (FastMCP Streamable-HTTP)"]
+        ENDPOINT_REST["/api/v1 (FastAPI REST Endpoints)"]
+        
+        subgraph T1["Tier 1: Atomic Retrieval & Lookup (Low Latency / 0-LLM)"]
+            T1_1["get_statute_section\nExact article lookup"]
+            T1_2["search_procurement_clauses\nHybrid Dense + BM25 + Rerank"]
+            T1_3["search_procurement_faqs\nComptroller General FAQ precedents"]
+        end
 
-### Tool contract
+        subgraph T2["Tier 2: Knowledge Graph Traversal"]
+            T2_1["get_related_regulations\nSubordinate rules & circulars cross-refs"]
+        end
 
-**`ask_procurement_law(question: str) -> dict`**
+        subgraph T3["Tier 3: Reasoning & Compliance (Multi-Agent CRAG)"]
+            T3_1["ask_procurement_law\nFull CRAG (fast / deep modes)"]
+            T3_2["verify_procurement_compliance\nDeterministic & statutory audit"]
+        end
 
-```json
-{
-  "status": "OK",
-  "direct_answer": "...",
-  "decisive_quotes": [
-    {"law": "มาตรา ๕๖ (๒) (ข)", "quote": "..."}
-  ],
-  "applicable_laws": ["มาตรา ๕๖ (๒) (ข)", "ข้อ ๗๙"],
-  "exceptions_or_conditions": "...",
-  "citations": [{"entry": "...", "topics": ["..."]}],
-  "crag_meta": {"issues": [...], "retries": 0, "audited_complete": true}
-}
+        subgraph T4["Tier 4: Resources & Prompts (MCP Primitives)"]
+            T4_1["Resource: procurement://rules/thresholds\nBudget & method summary"]
+            T4_2["Resource: procurement://catalog/documents\nIndexed law & circular list"]
+            T4_3["Prompt: audit_procurement_plan\nAuditor workflow template"]
+            T4_4["Prompt: appeal_procedure_advisor\n7-day appeal process guide"]
+        end
+    end
+
+    ORCH --> ENDPOINT_MCP
+    WEB --> ENDPOINT_REST
+    ENDPOINT_MCP --> T1 & T2 & T3 & T4
+    ENDPOINT_REST --> T1 & T3
 ```
 
-`status` is `"NO_LAW_FOUND"` when the 3-tier guardrail determines the question is out of scope, or `"ERROR"` if the call itself failed (bad input, exception during inference) — check `error` in that case.
+---
 
-**`healthcheck() -> dict`** — reports whether the model/graph DB loaded successfully, without running inference. Use this first when debugging a new deployment.
+## 2. Tool, Resource & Prompt Specifications
+
+### 🛠️ Tier 1: Atomic Retrieval & Lookup (Zero-LLM Cost, 50–300ms)
+
+Fast fact-retrieval tools designed for agents that already know what they are searching for and do not require multi-agent generative reasoning.
+
+1. **`get_statute_section(doc_title: str, section: str) -> dict`**
+   - **Description**: Exact verbatim statutory lookup. Retrieves the precise clause text, title, and topic annotations without hallucination.
+   - **Example**: `doc_title="พระราชบัญญัติการจัดซื้อจัดจ้างฯ พ.ศ. 2560"`, `section="56"`
+   - **Returns**: `{"found": true, "doc_title": "...", "section": "...", "content": "...", "topics": [...]}`
+
+2. **`search_procurement_clauses(query: str, top_k: int = 5, doc_filter: Optional[str] = None) -> dict`**
+   - **Description**: Direct hybrid search (Dense Vector + Thai BM25 + Cross-Encoder Reranker) over statutory clauses *without* LLM synthesis.
+   - **Returns**: `{"results": [{"score": 0.89, "entry": "...", "content": "...", "doc_title": "..."}]}`
+
+3. **`search_procurement_faqs(query: str, top_k: int = 3) -> dict`**
+   - **Description**: Semantic search through official Comptroller General's Department (กรมบัญชีกลาง) Q&A and consultation rulings (`cases_with_feature.json`).
+   - **Returns**: `{"results": [{"question": "...", "answer": "...", "law_reference": "..."}]}`
 
 ---
 
-## 2. Prerequisites
+### 🕸️ Tier 2: Knowledge Graph Traversal (10–50ms)
 
-1. `.env` (project root) — copy from `env.example` and fill in `OPENROUTER_API_KEY`:
-   ```bash
-   cp env.example .env
-   ```
-   `mcp_server.py` and `docker-compose.yml` both read `.env` by default (`DOTENV_PATH=.env`). `configs/thai_procurement.env` is not used by the MCP server — that path is only relevant if you're invoking `run.py`/`index_knowledge_base.py` directly with their own `--dotenv_path`/`--config` defaults.
-2. `procurement_data/` — statute markdown, FAQ Excel, and `qa_*.csv` benchmark files (gitignored, supply locally).
-3. A built graph DB at `outputs/openrouter_graph_db.pkl` — build it once with:
-   ```bash
-   python scripts/index_knowledge_base.py --config .env --force
-   ```
-
-   (Or let the container build it on first run — `auto_build=True` by default in `env.example` — but that adds startup latency and needs `procurement_data/` mounted, which `docker-compose.yml` already does.)
+4. **`get_related_regulations(section_reference: str) -> dict`**
+   - **Description**: Traverses the NetworkX knowledge graph (`openrouter_graph_db.pkl`) to locate subordinate legislation (กฎกระทรวง), finance ministry regulations (ระเบียบกระทรวงการคลังฯ), or committee circulars (หนังสือเวียน ว.) linked to a parent statutory section.
+   - **Returns**: `{"parent": "มาตรา 56", "related_subordinates": [{"entry": "ข้อ 79", "relation": "IMPLEMENTS"}, ...]}`
 
 ---
 
-## 3. Build & run with Docker
+### 🧠 Tier 3: Reasoning & Compliance (Multi-Agent CRAG)
 
+5. **`ask_procurement_law(question: str, mode: str = "deep") -> dict`**
+   - **Description**: Executes the Multi-Agent Corrective RAG (CRAG) pipeline with Guardrails.
+   - **Parameters**:
+     - `question` (str): Inquiring legal question in Thai or English.
+     - `mode` ("deep" | "fast"):
+       - `"deep"` (default): Full CRAG loop (Decomposer $\rightarrow$ Multi-retrieval $\rightarrow$ Synthesizer $\rightarrow$ Completeness Auditor $\rightarrow$ Targeted Refiner Retry).
+       - `"fast"`: Single-pass hybrid retrieval + Synthesizer (skips auditor/refinement retry, latency ~3-4s).
+   - **Returns**:
+     ```json
+     {
+       "status": "OK",
+       "direct_answer": "...",
+       "decisive_quotes": [{"law": "มาตรา ๕๖ (๒) (ข)", "quote": "..."}],
+       "applicable_laws": ["มาตรา ๕๖ (๒) (ข)", "ข้อ ๗๙"],
+       "exceptions_or_conditions": "...",
+       "citations": [{"entry": "...", "topics": ["..."]}],
+       "crag_meta": {"issues": [...], "retries": 0, "audited_complete": true}
+     }
+     ```
+
+6. **`verify_procurement_compliance(procurement_item: str, estimated_budget: float, proposed_method: str, justification_reason: Optional[str] = None) -> dict`**
+   - **Description**: Evaluates structured procurement project parameters against statutory thresholds (e.g. Specific method $\le$ 500,000 THB, e-bidding $\gt$ 500,000 THB, emergency justifications).
+   - **Returns**:
+     ```json
+     {
+       "is_compliant": true,
+       "compliance_status": "PASSED",
+       "statutory_threshold": "วงเงินไม่เกิน 500,000 บาท ตามกฎกระทรวง...",
+       "required_approvals": ["หัวหน้าหน่วยงานของรัฐ"],
+       "potential_risks": []
+     }
+     ```
+
+---
+
+### 📦 Tier 4: Native MCP Resources & Prompts
+
+#### Resources (Direct Context Ingestion)
+- **`procurement://rules/thresholds`**: Pre-compiled statutory monetary thresholds, procurement method conditions, and mandatory appeal deadlines (0 latency, 0 token cost).
+- **`procurement://catalog/documents`**: Master index of available statutes, regulations, and circular letters in the active knowledge graph.
+
+#### Prompts (Standardized Workflow Templates)
+- **`audit_procurement_plan`**: Orchestrator prompt template for auditing draft procurement plans against Thai regulations.
+- **`appeal_procedure_advisor`**: Guidance template for verifying bidder disqualification rights, appeal conditions, and the statutory 7-day appeal filing window.
+
+---
+
+### 🌐 Dual Protocol: REST API Compatibility Endpoints
+
+For non-MCP clients (e.g. web frontends, Postman, legacy ERP systems), the server exposes standard HTTP endpoints on the same port:
+
+- `POST /api/v1/ask`: JSON body `{"question": "...", "mode": "deep"}` $\rightarrow$ returns CRAG response.
+- `POST /api/v1/search`: JSON body `{"query": "...", "top_k": 5}` $\rightarrow$ returns raw retrieved clauses.
+- `POST /api/v1/verify`: JSON body `{"procurement_item": "...", "estimated_budget": 500000, "proposed_method": "..."}` $\rightarrow$ compliance audit.
+- `GET /healthz`: Liveness probe (returns `{"status": "alive"}`).
+- `GET /ready`: Readiness probe (returns `{"ready": true, "graph_loaded": true, "model": "..."}`).
+
+---
+
+## 3. Production Deployment & Containerization
+
+### Dockerfile Highlights
+- Python 3.11-slim base image.
+- Pre-cached dependencies and model weights.
+- Multi-worker or async event loop handling streamable-http and REST routes concurrently.
+- Readiness & Liveness probes for Kubernetes / Docker Compose health checks.
+
+### Environment Configuration (`.env`)
+```bash
+# Model Provider
+model_name=openrouter
+OPENROUTER_API_KEY=your-api-key-here
+OPENROUTER_MODEL=google/gemini-2.5-flash
+
+# Transport & Host
+MCP_TRANSPORT=streamable-http
+MCP_HOST=0.0.0.0
+MCP_PORT=8000
+
+# Pipeline Settings
+crag_enabled=True
+crag_max_retry=1
+reranker_device=cpu # or cuda:0 if NVIDIA Container Toolkit is enabled
+```
+
+### Running with Docker Compose
 ```bash
 docker compose build
-docker compose up
+docker compose up -d
 ```
 
-This starts the MCP server on `http://localhost:8000/mcp` using the `streamable-http` transport. Watch the logs for:
-
-```
-[mcp_server] Loading LegalGraphRAG config from: .env
-[mcp_server] LegalGraphRAG ready.
-```
-
-To run without Docker (e.g. local development):
-
+Check health:
 ```bash
-pip install -r requirements.txt
-python mcp_server.py                       # stdio transport (default)
-MCP_TRANSPORT=streamable-http python mcp_server.py   # HTTP transport on :8000
+curl http://localhost:8000/ready
 ```
 
 ---
 
-## 4. How other people can test it
+## 4. Testing & Verification
 
-### Option A — MCP Inspector (fastest, no code)
-
-The `mcp` Python package ships a dev inspector with a web UI for calling tools by hand:
-
-```bash
-pip install "mcp[cli]"
-mcp dev mcp_server.py
-```
-
-This opens a browser UI where you can call `ask_procurement_law` and `healthcheck` directly, see raw request/response JSON, and inspect the tool schemas — the easiest way for someone unfamiliar with the codebase to poke at it.
-
-### Option B — the included test client (automated / CI)
-
-Against a running `docker compose up` server:
-
-```bash
-python scripts/test_mcp_client.py
-python scripts/test_mcp_client.py --question "ผู้มีสิทธิอุทธรณ์ผลการจัดซื้อจัดจ้างต้องยื่นภายในกี่วัน"
-```
-
-It lists available tools, calls `healthcheck`, then calls `ask_procurement_law` and prints the structured JSON response. Point `--url` at a remote deployment to test that instead of localhost.
-
-### Option C — plug it into an orchestrator / Claude Desktop / Claude Code
-
-For **stdio** clients (Claude Desktop, Claude Code, most local agent frameworks), add an MCP server entry pointing at the script directly, e.g. for Claude Desktop's `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "legalgraphrag-procurement": {
-      "command": "python",
-      "args": ["/absolute/path/to/mcp_server.py"],
-      "env": { "DOTENV_PATH": "/absolute/path/to/.env" }
-    }
-  }
-}
-```
-
-For an orchestrator that talks HTTP (the more likely case for "a big orchestrator working with sub-agents"), point its MCP client config at the running container's endpoint instead:
-
-```json
-{
-  "mcpServers": {
-    "legalgraphrag-procurement": {
-      "url": "http://<host>:8000/mcp",
-      "transport": "streamable-http"
-    }
-  }
-}
-```
-
-The exact config keys depend on the orchestrator framework — the important part is it needs the URL above and the `streamable-http` transport.
-
----
-
-## 5. Troubleshooting
-
-- **Server hangs on startup / first call is very slow**: expected on a cold start if `auto_build=True` and no `outputs/openrouter_graph_db.pkl` exists yet — it's building the graph from `procurement_data/`. Check `healthcheck()` — `ready: false` plus a `FileNotFoundError` means `datas/law_to_crime.json` or `datas/cases_with_feature.json` is missing (run `scripts/prepare_thai_corpus.py` first).
-- **`ready: false` with an API-key-shaped error**: `OPENROUTER_API_KEY` (or equivalent) isn't set in `.env` / the container's environment.
-- **GPU reranker not used / falls back to CPU**: `reranker_device=cuda:0` in the env file requires a GPU visible to the container — uncomment the `deploy.resources` block in `docker-compose.yml` and ensure the NVIDIA Container Toolkit is installed on the host; otherwise set `reranker_device=cpu`.
-- **`docker compose up` can't find `.env`**: it's gitignored and not created automatically — `cp env.example .env` first (see §2).
-- **Docker Desktop isn't running**: `docker compose build`/`up` need the Docker daemon started first — open Docker Desktop (or start the `docker` service) before running these commands. Until then, test locally with `python mcp_server.py` instead (see §3, "run without Docker").
+1. **MCP Client Smoke Test**:
+   ```bash
+   python scripts/test_mcp_client.py --url http://localhost:8000/mcp
+   ```
+2. **REST API Smoke Test**:
+   ```bash
+   curl -X POST http://localhost:8000/api/v1/ask \
+        -H "Content-Type: application/json" \
+        -d '{"question": "วิธีเฉพาะเจาะจงวงเงินไม่เกินเท่าใด", "mode": "fast"}'
+   ```
+3. **MCP Inspector**:
+   ```bash
+   mcp dev mcp_server.py
+   ```
