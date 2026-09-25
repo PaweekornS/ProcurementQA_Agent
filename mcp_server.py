@@ -33,7 +33,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, HTMLResponse
 
 from core.mcp_service import ProcurementService
 
@@ -302,6 +302,147 @@ def prompt_appeal_procedure_advisor(
 # ==============================================================================
 # DUAL PROTOCOL: REST API ENDPOINTS (STARLETTE CUSTOM ROUTES)
 # ==============================================================================
+OPENAPI_SCHEMA = {
+    "openapi": "3.0.0",
+    "info": {
+        "title": "LegalGraphRAG Procurement QA & MCP Server",
+        "version": "1.0.0",
+        "description": "Production Dual-Protocol (MCP + REST API) Server for Thai Government Procurement Law & Regulations."
+    },
+    "paths": {
+        "/ready": {
+            "get": {
+                "summary": "Readiness Probe",
+                "description": "Reports whether model, embeddings, and Knowledge Graph DB are initialized.",
+                "responses": {"200": {"description": "Service Ready"}}
+            }
+        },
+        "/healthz": {
+            "get": {
+                "summary": "Liveness Probe",
+                "description": "Simple health probe for Docker / Kubernetes.",
+                "responses": {"200": {"description": "Service Healthy"}}
+            }
+        },
+        "/api/v1/verify": {
+            "post": {
+                "summary": "Verify Procurement Compliance",
+                "description": "Rule-based statutory compliance verification against procurement methods and budget thresholds.",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "procurement_item": {"type": "string", "example": "จัดซื้อคอมพิวเตอร์และอุปกรณ์ต่อพ่วง"},
+                                    "estimated_budget": {"type": "number", "example": 450000.0},
+                                    "proposed_method": {"type": "string", "example": "เฉพาะเจาะจง"},
+                                    "justification_reason": {"type": "string", "example": "วงเงินไม่เกิน 500,000 บาท"}
+                                },
+                                "required": ["procurement_item", "proposed_method"]
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "Compliance evaluation report"}}
+            }
+        },
+        "/api/v1/search": {
+            "post": {
+                "summary": "Hybrid Statutory Search",
+                "description": "Direct hybrid retrieval (Dense Vector + Thai BM25 + Cross-Encoder reranking) over statutory clauses.",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string", "example": "การจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง วงเงินไม่เกินเท่าใด"},
+                                    "top_k": {"type": "integer", "example": 5},
+                                    "doc_filter": {"type": "string", "example": "พระราชบัญญัติ"}
+                                },
+                                "required": ["query"]
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "List of ranked statutory clauses with relevance scores"}}
+            }
+        },
+        "/api/v1/ask": {
+            "post": {
+                "summary": "Multi-Agent Procurement QA",
+                "description": "Full Corrective RAG (CRAG) Multi-Agent Legal QA with Issue Decomposition and Completeness Auditing.",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string", "example": "การจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง วงเงินไม่เกินเท่าใด และต้องขออนุมัติใครบ้าง"},
+                                    "mode": {"type": "string", "enum": ["fast", "deep"], "example": "fast"}
+                                },
+                                "required": ["question"]
+                            }
+                        }
+                    }
+                },
+                "responses": {"200": {"description": "Legal judgment with direct answer, reasoning, and cited clauses"}}
+            }
+        }
+    }
+}
+
+SWAGGER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+    <title>LegalGraphRAG Procurement QA - Swagger UI</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <link rel="icon" type="image/png" href="https://fastapi.tiangolo.com/img/favicon.png">
+    <style>
+        body { margin: 0; background: #fafafa; font-family: sans-serif; }
+        .topbar { display: none; }
+    </style>
+</head>
+<body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+        window.onload = function() {
+            SwaggerUIBundle({
+                url: "/openapi.json",
+                dom_id: '#swagger-ui',
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIBundle.SwaggerUIStandalonePreset
+                ],
+                layout: "BaseLayout",
+                deepLinking: true,
+                displayRequestDuration: true
+            });
+        };
+    </script>
+</body>
+</html>
+"""
+
+
+@mcp.custom_route("/openapi.json", methods=["GET"])
+async def route_openapi(request: Request) -> Response:
+    """OpenAPI 3.0 specification for Swagger UI."""
+    return JSONResponse(OPENAPI_SCHEMA)
+
+
+@mcp.custom_route("/docs", methods=["GET"])
+async def route_docs(request: Request) -> Response:
+    """Interactive Swagger UI Documentation."""
+    return HTMLResponse(SWAGGER_HTML)
+
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def route_liveness(request: Request) -> Response:
