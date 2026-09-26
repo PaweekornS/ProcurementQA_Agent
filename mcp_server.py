@@ -14,7 +14,7 @@ Exposes LegalGraphRAG across 4 specialized tiers:
 Also provides native REST endpoints on the same port:
   - GET  /healthz
   - GET  /ready
-  - POST /api/v1/ask
+  - POST /api/v1/qa
   - POST /api/v1/search
   - POST /api/v1/verify
 """
@@ -56,10 +56,12 @@ def _get_service() -> ProcurementService:
 
 
 # ==============================================================================
-# TIER 1: ATOMIC RETRIEVAL & LOOKUP TOOLS
+# TIER 1 & 2: ATOMIC RETRIEVAL & LOOKUP TOOLS (INTERNAL / LOW-LEVEL)
 # ==============================================================================
 
-@mcp.tool()
+_expose_internal = os.getenv("expose_internal_tools", "false").strip().lower() in ("true", "1", "yes")
+
+
 def get_statute_section(section: str, doc_title: Optional[str] = None) -> Dict[str, Any]:
     """
     Exact verbatim statutory section lookup without generative overhead.
@@ -78,15 +80,13 @@ def get_statute_section(section: str, doc_title: Optional[str] = None) -> Dict[s
         return {"found": False, "error": f"{type(e).__name__}: {e}"}
 
 
-@mcp.tool()
 def search_procurement_clauses(
     query: str,
     top_k: int = 5,
     doc_filter: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Direct hybrid search (Dense Vector + Thai BM25 + Cross-Encoder Reranker)
-    over statutory clauses without LLM synthesis.
+    Direct hybrid search (Dense Vector + Thai BM25) over statutory clauses without LLM synthesis.
 
     Args:
         query: Search query in Thai or English.
@@ -104,7 +104,6 @@ def search_procurement_clauses(
         return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
 
-@mcp.tool()
 def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
     """
     Search historical consultation rulings and Comptroller General FAQs.
@@ -124,11 +123,6 @@ def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
         return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
 
-# ==============================================================================
-# TIER 2: KNOWLEDGE GRAPH TRAVERSAL TOOLS
-# ==============================================================================
-
-@mcp.tool()
 def get_related_regulations(section_reference: str) -> Dict[str, Any]:
     """
     Traverse the NetworkX knowledge graph to locate subordinate rules, ministerial
@@ -147,17 +141,26 @@ def get_related_regulations(section_reference: str) -> Dict[str, Any]:
         return {"target": section_reference, "error": f"{type(e).__name__}: {e}"}
 
 
+# Expose low-level tools only if explicitly enabled via expose_internal_tools=true
+if _expose_internal:
+    mcp.tool()(get_statute_section)
+    mcp.tool()(search_procurement_clauses)
+    mcp.tool()(search_procurement_faqs)
+    mcp.tool()(get_related_regulations)
+
+
 # ==============================================================================
-# TIER 3: REASONING & COMPLIANCE TOOLS
+# TIER 3: HIGH-LEVEL REASONING & COMPLIANCE TOOLS (PRIMARY AGENT INTERFACE)
 # ==============================================================================
 
 @mcp.tool()
-def ask_procurement_law(question: str, mode: str = "deep") -> Dict[str, Any]:
+def procurement_qa(question: str, mode: str = "deep") -> Dict[str, Any]:
     """
     Answer a Thai government procurement law question using the Multi-Agent CRAG pipeline.
+    Performs issue decomposition, statutory retrieval, legal synthesis, completeness auditing, and guardrails.
 
     Args:
-        question: Question about Thai procurement law.
+        question: Question about Thai procurement law and regulations.
         mode: "deep" (default, full CRAG with completeness audit & refiner retry)
               or "fast" (single-pass hybrid retrieval + synthesis, ~3s).
 
@@ -179,6 +182,12 @@ def ask_procurement_law(question: str, mode: str = "deep") -> Dict[str, Any]:
             "crag_meta": {},
             "error": f"{type(e).__name__}: {e}",
         }
+
+
+# Alias for backward compatibility
+ask_procurement_law = procurement_qa
+if _expose_internal:
+    mcp.tool()(ask_procurement_law)
 
 
 @mcp.tool()
@@ -371,10 +380,10 @@ OPENAPI_SCHEMA = {
                 "responses": {"200": {"description": "List of ranked statutory clauses with relevance scores"}}
             }
         },
-        "/api/v1/ask": {
+        "/api/v1/qa": {
             "post": {
                 "summary": "Multi-Agent Procurement QA",
-                "description": "Full Corrective RAG (CRAG) Multi-Agent Legal QA with Issue Decomposition and Completeness Auditing.",
+                "description": "Streamlined Legal QA returning direct answer and decisive statutory quotes for clean Master Agent integration.",
                 "requestBody": {
                     "required": True,
                     "content": {
@@ -383,16 +392,21 @@ OPENAPI_SCHEMA = {
                                 "type": "object",
                                 "properties": {
                                     "question": {"type": "string", "example": "การจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง วงเงินไม่เกินเท่าใด และต้องขออนุมัติใครบ้าง"},
-                                    "mode": {"type": "string", "enum": ["fast", "deep"], "example": "fast"}
+                                    "mode": {"type": "string", "enum": ["fast", "deep"], "example": "fast"},
+                                    "full": {"type": "boolean", "example": False, "description": "Optional: return full internal debug metadata"}
                                 },
                                 "required": ["question"]
                             }
                         }
                     }
                 },
-                "responses": {"200": {"description": "Legal judgment with direct answer, reasoning, and cited clauses"}}
+                "responses": {
+                    "200": {
+                        "description": "Streamlined legal response with mode, direct_answer, and decisive_quote"
+                    }
+                }
             }
-        }
+        },
     }
 }
 
@@ -465,9 +479,10 @@ async def route_readiness(request: Request) -> Response:
         return JSONResponse({"ready": False, "status": "not_ready", "error": str(e)}, status_code=503)
 
 
+@mcp.custom_route("/api/v1/qa", methods=["POST"])
 @mcp.custom_route("/api/v1/ask", methods=["POST"])
-async def route_api_ask(request: Request) -> Response:
-    """REST API endpoint for procurement law Q&A."""
+async def route_api_qa(request: Request) -> Response:
+    """REST API endpoint for procurement law Q&A returning streamlined response."""
     try:
         body = await request.json()
     except Exception:
@@ -475,15 +490,32 @@ async def route_api_ask(request: Request) -> Response:
 
     question = body.get("question", "")
     mode = body.get("mode", "deep")
+    full_response = bool(body.get("full", False) or request.query_params.get("full", "false").lower() == "true")
     if not question:
         return JSONResponse({"error": "Missing 'question' in request body"}, status_code=400)
 
     try:
         service = _get_service()
         result = service.ask_procurement_law(question=question, mode=mode)
-        return JSONResponse(result)
+        if full_response:
+            return JSONResponse(result)
+
+        quotes = result.get("decisive_quotes") or []
+        clean_result = {
+            "mode": result.get("mode", mode),
+            "direct_answer": result.get("direct_answer", ""),
+            "decisive_quote": quotes,
+            "decisive_quotes": quotes,
+        }
+        return JSONResponse(clean_result)
     except Exception as e:
-        return JSONResponse({"status": "ERROR", "error": str(e)}, status_code=500)
+        return JSONResponse({
+            "mode": mode,
+            "direct_answer": "",
+            "decisive_quote": [],
+            "decisive_quotes": [],
+            "error": str(e)
+        }, status_code=500)
 
 
 @mcp.custom_route("/api/v1/search", methods=["POST"])

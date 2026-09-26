@@ -71,20 +71,22 @@ class ProcurementService:
         self._warmup_models()
 
     def _warmup_models(self):
-        """Pre-warm reranker and embedder during service startup so first queries are instant."""
         try:
             from core.graph_construct.feature_graph import get_embedding
-            from core.graph_construct.hybrid_reranker import get_reranker
-            import torch
+            from core.graph_construct.hybrid_reranker import get_reranker, is_reranker_enabled
 
-            reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-            reranker_device = os.getenv("reranker_device", "cuda:0" if (torch and torch.cuda.is_available()) else "cpu")
-            reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+            if is_reranker_enabled():
+                import torch
+                reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+                reranker_device = os.getenv("reranker_device", "cuda:0" if (torch and torch.cuda.is_available()) else "cpu")
+                reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
 
-            print(f"[ProcurementService] Pre-warming CrossEncoder '{reranker_model}' on '{reranker_device}'...")
-            reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
-            if reranker and reranker.model:
-                print(f"[ProcurementService] CrossEncoder successfully pre-warmed on '{reranker.device}'.")
+                print(f"[ProcurementService] Pre-warming CrossEncoder '{reranker_model}' on '{reranker_device}'...")
+                reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+                if reranker and reranker.model:
+                    print(f"[ProcurementService] CrossEncoder successfully pre-warmed on '{reranker.device}'.")
+            else:
+                print("[ProcurementService] Reranker is disabled (enable_reranker=false). Running in Pure Hybrid Retriever mode.")
 
             _ = get_embedding("warmup query")
             print("[ProcurementService] Embedder successfully pre-warmed.")
@@ -515,6 +517,9 @@ class ProcurementService:
             ],
             "crag_meta": item.get("crag_meta", {})
         }
+
+    # Alias for consistent high-level agent naming
+    procurement_qa = ask_procurement_law
 
     # --------------------------------------------------------------------------
     # Tier 4: Resources
