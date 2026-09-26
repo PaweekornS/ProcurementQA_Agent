@@ -85,10 +85,10 @@ async def main(url: str, run_qa: bool, question: str) -> None:
             health = await session.call_tool("healthcheck", {})
             print(json.dumps(_extract(health), ensure_ascii=False, indent=2))
 
-            # 5. Tool Call: verify_procurement_compliance (Primary High-Level Tool)
-            print("\n--- 5. Testing verify_procurement_compliance (Budget: 450,000 THB, Specific Method) ---")
+            # 5. Tool Call: check_procurement_threshold (Primary High-Level Tool)
+            print("\n--- 5. Testing check_procurement_threshold (Budget: 450,000 THB, Specific Method) ---")
             comp_res = await session.call_tool(
-                "verify_procurement_compliance",
+                "check_procurement_threshold",
                 {
                     "procurement_item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
                     "estimated_budget": 450000.0,

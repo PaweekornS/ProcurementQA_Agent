@@ -283,7 +283,7 @@ def node_subagent_compliance(state: OrchestratorDialogueState) -> Dict[str, Any]
     """
     params = state["parsed_params"]
     print("\n" + "="*70)
-    print("🔄 [Orchestrator -> Sub-Agent] Sending request to 'verify_procurement_compliance'...")
+    print("🔄 [Orchestrator -> Sub-Agent] Sending request to 'check_procurement_threshold'...")
     print("="*70)
 
     verdict = call_subagent_verify_compliance(

@@ -31,8 +31,8 @@ flowchart TD
         end
 
         subgraph T3["Tier 3: Reasoning & Compliance (Multi-Agent CRAG)"]
-            T3_1["ask_procurement_law\nFull CRAG (fast / deep modes)"]
-            T3_2["verify_procurement_compliance\nDeterministic & statutory audit"]
+            T3_1["procurement_qa / ask_procurement_law\nFull CRAG (fast / deep modes)"]
+            T3_2["check_procurement_threshold\nFast budget & method rule check (~2ms)"]
         end
 
         subgraph T4["Tier 4: Resources & Prompts (MCP Primitives)"]
@@ -82,8 +82,8 @@ Fast fact-retrieval tools designed for agents that already know what they are se
 
 ### 🧠 Tier 3: Reasoning & Compliance (Multi-Agent CRAG)
 
-5. **`ask_procurement_law(question: str, mode: str = "deep") -> dict`**
-   - **Description**: Executes the Multi-Agent Corrective RAG (CRAG) pipeline with Guardrails.
+5. **`procurement_qa(question: str, mode: str = "deep") -> dict`** (Alias: `ask_procurement_law`)
+   - **Description**: Executes the Multi-Agent Corrective RAG (CRAG) pipeline with Guardrails for open-ended legal inquiries, statutory interpretation, dispute resolution, and exceptions.
    - **Parameters**:
      - `question` (str): Inquiring legal question in Thai or English.
      - `mode` ("deep" | "fast"):
@@ -93,8 +93,16 @@ Fast fact-retrieval tools designed for agents that already know what they are se
      ```json
      {
        "status": "OK",
+       "mode": "fast",
        "direct_answer": "...",
-       "decisive_quotes": [{"law": "มาตรา ๕๖ (๒) (ข)", "quote": "..."}],
+       "decisive_quotes": [
+         {
+           "filename": "พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md",
+           "page": "18-20/42",
+           "law": "มาตรา ๕๖ (๒) (ข)",
+           "quote": "..."
+         }
+       ],
        "applicable_laws": ["มาตรา ๕๖ (๒) (ข)", "ข้อ ๗๙"],
        "exceptions_or_conditions": "...",
        "citations": [{"entry": "...", "topics": ["..."]}],
@@ -102,15 +110,20 @@ Fast fact-retrieval tools designed for agents that already know what they are se
      }
      ```
 
-6. **`verify_procurement_compliance(procurement_item: str, estimated_budget: float, proposed_method: str, justification_reason: Optional[str] = None) -> dict`**
-   - **Description**: Evaluates structured procurement project parameters against statutory thresholds (e.g. Specific method $\le$ 500,000 THB, e-bidding $\gt$ 500,000 THB, emergency justifications).
+6. **`check_procurement_threshold(procurement_item: str, estimated_budget: float, proposed_method: str, justification_reason: Optional[str] = None) -> dict`** (Alias: `verify_procurement_compliance`)
+   - **Description**: Fast deterministic statutory ceiling audit (~2ms, 0-LLM cost). **Trigger Immediately** when the user specifies a concrete budget number and asks whether a procurement method is permitted (e.g. *"Can 450,000 THB use Specific Selection?"*), or to perform pre-/post-approval validation.
+   - **Parameters**:
+     - `procurement_item` (str): Item or service name.
+     - `estimated_budget` (float): Budget amount in THB.
+     - `proposed_method` (str): e.g. `"เฉพาะเจาะจง"`, `"e-bidding"`, `"คัดเลือก"`.
+     - `justification_reason` (Optional[str]): e.g. `"จำเป็นเร่งด่วน"`, `"มีตัวแทนจำหน่ายรายเดียว"`.
    - **Returns**:
      ```json
      {
        "is_compliant": true,
        "compliance_status": "PASSED",
        "statutory_threshold": "วงเงินไม่เกิน 500,000 บาท ตามกฎกระทรวง...",
-       "required_approvals": ["หัวหน้าหน่วยงานของรัฐ"],
+       "required_approvals": ["หัวหน้าเจ้าหน้าที่", "หัวหน้าหน่วยงานของรัฐ"],
        "potential_risks": []
      }
      ```
