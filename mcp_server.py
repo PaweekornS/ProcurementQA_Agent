@@ -8,7 +8,7 @@ Production Dual-Protocol (MCP + REST API) Server for Thai Government Procurement
 Exposes LegalGraphRAG across 4 specialized tiers:
   Tier 1: Atomic Retrieval & Lookup (get_statute_section, search_procurement_clauses, search_procurement_faqs)
   Tier 2: Knowledge Graph Traversal (get_related_regulations)
-  Tier 3: Reasoning & Compliance (ask_procurement_law with fast/deep modes, verify_procurement_compliance)
+  Tier 3: Reasoning & Compliance (ask_procurement_law with fast/deep modes, check_procurement_threshold)
   Tier 4: Native MCP Resources & Prompts (thresholds, catalog, auditor prompts)
 
 Also provides native REST endpoints on the same port:
@@ -191,21 +191,26 @@ if _expose_internal:
 
 
 @mcp.tool()
-def verify_procurement_compliance(
+def check_procurement_threshold(
     procurement_item: str,
     estimated_budget: float,
     proposed_method: str,
     justification_reason: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Evaluate structured procurement project parameters against statutory thresholds
-    under the Thai Public Procurement Act B.E. 2560 and Ministerial Regulations.
+    [FAST THRESHOLD CHECK] Use this tool IMMEDIATELY when the user mentions a specific budget 
+    amount and asks if a procurement method is permitted (e.g., 'Can 450,000 THB use Specific Selection?').
+    
+    Evaluates statutory monetary thresholds (e.g. <= 500,000 THB for specific selection) and required approvers
+    under Thai Public Procurement Act B.E. 2560 in ~2ms without LLM latency.
+    
+    Do NOT use this for open-ended legal advice (use 'procurement_qa' instead).
 
     Args:
         procurement_item: Description of item or service to procure.
         estimated_budget: Estimated budget in Thai Baht (THB).
         proposed_method: Proposed method (e.g. "เฉพาะเจาะจง", "e-bidding", "คัดเลือก").
-        justification_reason: Justification (e.g. "จำเป็นเร่งด่วน", "วงเงินไม่เกิน 500,000").
+        justification_reason: Justification (e.g. "จำเป็นเร่งด่วน", "วงเงินไม่เกิน 500,000", "มีตัวแทนจำหน่ายรายเดียว").
 
     Returns:
         Audit verdict: is_compliant, compliance_status (PASSED|FLAGGED|VIOLATION),
@@ -228,6 +233,8 @@ def verify_procurement_compliance(
             "compliance_status": "ERROR",
             "error": f"{type(e).__name__}: {e}"
         }
+
+
 
 
 @mcp.tool()
@@ -281,7 +288,7 @@ def prompt_audit_procurement_plan(
         f"- วิธีจัดซื้อจัดจ้างที่เสนอ: {proposed_method}\n"
         f"- เหตุผลความจำเป็น: {justification or 'ไม่มี'}\n\n"
         f"คำสั่งสำหรับ Agent:\n"
-        f"1. เรียกใช้เครื่องมือ `verify_procurement_compliance` เพื่อตรวจสอบเกณฑ์วงเงินและข้อห้าม\n"
+        f"1. เรียกใช้เครื่องมือ `check_procurement_threshold` เพื่อตรวจสอบเกณฑ์วงเงินและข้อห้าม\n"
         f"2. หากมีข้อสงสัยเกี่ยวกับมาตราที่เกี่ยวข้อง ให้ค้นหาเพิ่มเติมด้วย `get_statute_section` หรือ `search_procurement_clauses`\n"
         f"3. สรุปผลการตรวจสอบโดยระบุ: สถานะ (ผ่าน/มีความเสี่ยง/ขัดต่อกฎหมาย), ฐานกฎหมายที่รองรับ, ผู้มีอำนาจอนุมัติ, และข้อควรระวังเรื่องการแบ่งซื้อแบ่งจ้าง"
     )

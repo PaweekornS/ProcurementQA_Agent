@@ -652,7 +652,7 @@ class ProcurementService:
 
     # Alias for consistent high-level agent naming
     procurement_qa = ask_procurement_law
-    verify_procurement_compliance = verify_compliance
+    check_procurement_threshold = verify_compliance
 
     # --------------------------------------------------------------------------
     # Tier 4: Resources
