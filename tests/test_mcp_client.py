@@ -110,15 +110,10 @@ async def main(url: str, run_qa: bool, question: str) -> None:
             else:
                 print("\n--- 6. Low-level internal tools hidden (expose_internal_tools=false) ---")
 
-            if "search_procurement_faqs" in tool_names:
-                print("\n--- 7. Testing internal tool search_procurement_faqs(query='ขึ้นทะเบียนผู้ค้างานก่อสร้าง') ---")
-                faq_res = await session.call_tool("search_procurement_faqs", {"query": "ขึ้นทะเบียนผู้ค้างานก่อสร้าง", "top_k": 1})
-                print(json.dumps(_extract(faq_res), ensure_ascii=False, indent=2))
-
             # 7. Full Procurement QA (Primary High-Level Agent Tool)
             if run_qa:
                 qa_tool_name = "procurement_qa" if "procurement_qa" in tool_names else "ask_procurement_law"
-                print(f"\n--- 8. Testing {qa_tool_name} (mode='fast') ---")
+                print(f"\n--- 7. Testing {qa_tool_name} (mode='fast') ---")
                 print(f"Question: {question}")
                 qa_res = await session.call_tool(qa_tool_name, {"question": question, "mode": "fast"})
                 print(json.dumps(_extract(qa_res), ensure_ascii=False, indent=2))
@@ -130,7 +125,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test client for LegalGraphRAG 4-Tier MCP Server")
     parser.add_argument("--url", default="http://localhost:8000/mcp", help="FastMCP streamable-http URL")
     parser.add_argument("--run-qa", action="store_true", help="Run full generative procurement_qa call")
-    parser.add_argument("--question", default="หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงได้ไม่เกินวงเงินเท่าใด", help="Test question")
+    parser.add_argument("--question", default="หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงเนื่องจากเป็นพัสดุที่มีวงเงินเล็กน้อยตาม พ.ร.บ. ได้ไม่เกินวงเงินเท่าใด และต้องขอความเห็นชอบรายงานขอซื้อขอจ้างจากใครก่อนจัดซื้อ", help="Test question")
     args = parser.parse_args()
 
     asyncio.run(main(args.url, args.run_qa, args.question))
