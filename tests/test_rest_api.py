@@ -8,12 +8,12 @@ Smoke-tests the dual-protocol REST API endpoints of mcp_server.py:
   - GET  /ready
   - POST /api/v1/verify
   - POST /api/v1/search
-  - POST /api/v1/ask (optional)
+  - POST /api/v1/qa
 
 Usage:
-    python tests/test_rest_api.py
-    python tests/test_rest_api.py --host http://localhost:8000
-    python tests/test_rest_api.py --run-qa
+    python scripts/test_rest_api.py
+    python scripts/test_rest_api.py --host http://localhost:8000
+    python scripts/test_rest_api.py --run-qa
 """
 
 import argparse
@@ -70,13 +70,13 @@ def main(base_url: str, run_qa: bool):
 
     # 5. Full Q&A
     if run_qa:
-        print("\n[5] POST /api/v1/ask")
-        payload_ask = {
+        print("\n[5] POST /api/v1/qa")
+        payload_qa = {
             "question": "หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงได้ไม่เกินวงเงินเท่าใด",
             "mode": "fast"
         }
         try:
-            r = requests.post(f"{base_url}/api/v1/ask", json=payload_ask, timeout=60)
+            r = requests.post(f"{base_url}/api/v1/qa", json=payload_qa, timeout=60)
             print(f"Status: {r.status_code}")
             print(json.dumps(r.json(), ensure_ascii=False, indent=2))
         except Exception as e:

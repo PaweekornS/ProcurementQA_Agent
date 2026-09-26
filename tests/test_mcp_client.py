@@ -9,9 +9,9 @@ inspects tools, resources, and prompts, and exercises atomic lookups,
 compliance checks, and Q&A.
 
 Usage:
-    python tests/test_mcp_client.py
-    python tests/test_mcp_client.py --url http://localhost:8000/mcp
-    python tests/test_mcp_client.py --run-qa
+    python scripts/test_mcp_client.py
+    python scripts/test_mcp_client.py --url http://localhost:8000/mcp
+    python scripts/test_mcp_client.py --run-qa
 """
 
 import argparse
@@ -85,16 +85,8 @@ async def main(url: str, run_qa: bool, question: str) -> None:
             health = await session.call_tool("healthcheck", {})
             print(json.dumps(_extract(health), ensure_ascii=False, indent=2))
 
-            # 5. Tool Call: get_statute_section (Atomic Tier 1)
-            print("\n--- 5. Testing get_statute_section(section='มาตรา 56') ---")
-            sec_res = await session.call_tool("get_statute_section", {"section": "มาตรา 56"})
-            extracted_sec = _extract(sec_res)
-            print(f"Found: {extracted_sec.get('found')}")
-            print(f"Source: {extracted_sec.get('source_id')}")
-            print(f"Snippet: {extracted_sec.get('focused_content', '')[:250]}...\n")
-
-            # 6. Tool Call: verify_procurement_compliance (Tier 3)
-            print("--- 6. Testing verify_procurement_compliance (Budget: 450,000 THB, Specific Method) ---")
+            # 5. Tool Call: verify_procurement_compliance (Primary High-Level Tool)
+            print("\n--- 5. Testing verify_procurement_compliance (Budget: 450,000 THB, Specific Method) ---")
             comp_res = await session.call_tool(
                 "verify_procurement_compliance",
                 {
@@ -106,26 +98,40 @@ async def main(url: str, run_qa: bool, question: str) -> None:
             )
             print(json.dumps(_extract(comp_res), ensure_ascii=False, indent=2))
 
-            # 7. Tool Call: search_procurement_faqs (Tier 1)
-            print("\n--- 7. Testing search_procurement_faqs(query='ขึ้นทะเบียนผู้ค้างานก่อสร้าง') ---")
-            faq_res = await session.call_tool("search_procurement_faqs", {"query": "ขึ้นทะเบียนผู้ค้างานก่อสร้าง", "top_k": 1})
-            print(json.dumps(_extract(faq_res), ensure_ascii=False, indent=2))
+            # 6. Check for Low-Level Tools (if expose_internal_tools=true)
+            tool_names = [t.name for t in tools.tools]
+            if "get_statute_section" in tool_names:
+                print("\n--- 6. Testing internal tool get_statute_section(section='มาตรา 56') ---")
+                sec_res = await session.call_tool("get_statute_section", {"section": "มาตรา 56"})
+                extracted_sec = _extract(sec_res)
+                print(f"Found: {extracted_sec.get('found')}")
+                print(f"Source: {extracted_sec.get('source_id')}")
+                print(f"Snippet: {extracted_sec.get('focused_content', '')[:250]}...\n")
+            else:
+                print("\n--- 6. Low-level internal tools hidden (expose_internal_tools=false) ---")
 
-            # 8. Full Q&A (Optional)
+            if "search_procurement_faqs" in tool_names:
+                print("\n--- 7. Testing internal tool search_procurement_faqs(query='ขึ้นทะเบียนผู้ค้างานก่อสร้าง') ---")
+                faq_res = await session.call_tool("search_procurement_faqs", {"query": "ขึ้นทะเบียนผู้ค้างานก่อสร้าง", "top_k": 1})
+                print(json.dumps(_extract(faq_res), ensure_ascii=False, indent=2))
+
+            # 7. Full Procurement QA (Primary High-Level Agent Tool)
             if run_qa:
-                print(f"\n--- 8. Testing ask_procurement_law (mode='fast') ---")
+                qa_tool_name = "procurement_qa" if "procurement_qa" in tool_names else "ask_procurement_law"
+                print(f"\n--- 8. Testing {qa_tool_name} (mode='fast') ---")
                 print(f"Question: {question}")
-                qa_res = await session.call_tool("ask_procurement_law", {"question": question, "mode": "fast"})
+                qa_res = await session.call_tool(qa_tool_name, {"question": question, "mode": "fast"})
                 print(json.dumps(_extract(qa_res), ensure_ascii=False, indent=2))
             else:
-                print("\n[Tip] Pass --run-qa to test generative ask_procurement_law inference.")
+                print("\n[Tip] Pass --run-qa to test generative procurement_qa inference.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test client for LegalGraphRAG 4-Tier MCP Server")
     parser.add_argument("--url", default="http://localhost:8000/mcp", help="FastMCP streamable-http URL")
-    parser.add_argument("--run-qa", action="store_true", help="Run full generative ask_procurement_law call")
+    parser.add_argument("--run-qa", action="store_true", help="Run full generative procurement_qa call")
     parser.add_argument("--question", default="หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงได้ไม่เกินวงเงินเท่าใด", help="Test question")
     args = parser.parse_args()
 
     asyncio.run(main(args.url, args.run_qa, args.question))
+

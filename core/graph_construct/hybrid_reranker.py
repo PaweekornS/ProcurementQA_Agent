@@ -237,11 +237,19 @@ _reranker_init_lock = threading.Lock()
 _bm25_init_lock = threading.Lock()
 
 
+def is_reranker_enabled() -> bool:
+    """Check if cross-encoder reranker is enabled via environment variables."""
+    val = os.getenv("enable_reranker", os.getenv("reranker_enabled", "true")).strip().lower()
+    return val in ("true", "1", "yes")
+
+
 def get_reranker(
     model_name: str = "BAAI/bge-reranker-v2-m3",
     device: str = "cuda:0",
     threshold: float = 0.20
 ) -> Optional[GPUReranker]:
+    if not is_reranker_enabled():
+        return None
     global _global_reranker
     if _global_reranker is None:
         with _reranker_init_lock:
@@ -252,6 +260,7 @@ def get_reranker(
                     threshold=threshold
                 )
     return _global_reranker
+
 
 
 def get_bm25_index() -> ThaiBM25Index:
