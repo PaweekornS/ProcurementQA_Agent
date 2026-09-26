@@ -52,7 +52,7 @@ def verify_procurement_compliance(
 
 def ask_procurement_law(question: str, mode: str = "fast") -> Dict[str, Any]:
     """Execute CRAG pipeline with guardrails (Tier 3, deep reasoning)."""
-    url = f"{SERVICE_BASE_URL}/api/v1/ask"
+    url = f"{SERVICE_BASE_URL}/api/v1/qa"
     res = requests.post(url, json={"question": question, "mode": mode}, timeout=60)
     return res.json()
 
