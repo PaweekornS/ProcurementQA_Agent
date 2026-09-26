@@ -158,6 +158,13 @@ class ProcurementService:
         candidates = self._section_index.get(sec_norm, [])
 
         if not candidates:
+            # Try matching base section like "มาตรา 56" or "ข้อ 79" from sub-clause "มาตรา 56 (2) (ข)"
+            m_base = re.search(r"(มาตรา|ข้อ)\s*(\d+)", sec_norm)
+            if m_base:
+                base_key = f"{m_base.group(1)} {m_base.group(2)}"
+                candidates = self._section_index.get(base_key, [])
+
+        if not candidates:
             # Try prepending มาตรา or ข้อ if user supplied just a number
             if re.match(r"^\d+", sec_norm):
                 candidates = self._section_index.get(f"มาตรา {sec_norm}", [])
@@ -201,6 +208,8 @@ class ProcurementService:
             "section": section,
             "source_id": matched_item["id"],
             "topics": matched_item["topics"],
+            "related_laws": matched_item.get("related_laws", []),
+            "judge_dep": matched_item.get("judge_dep", []),
             "focused_content": focused_text or full_text[:1500],
             "full_macro_chunk": full_text
         }
@@ -501,11 +510,14 @@ class ProcurementService:
         judge_result = item.get("judge_result", {}) or {}
         used_laws = item.get("used_laws", []) or []
 
+        raw_quotes = judge_result.get("decisive_quotes") or judge_result.get("decisive_quote") or []
+        enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws)
+
         return {
             "status": judge_result.get("status", "OK"),
             "mode": mode,
             "direct_answer": judge_result.get("direct_answer", ""),
-            "decisive_quotes": judge_result.get("decisive_quotes", []),
+            "decisive_quotes": enriched_quotes,
             "applicable_laws": judge_result.get("applicable_laws", []),
             "exceptions_or_conditions": judge_result.get("exceptions_or_conditions", ""),
             "citations": [
@@ -517,6 +529,126 @@ class ProcurementService:
             ],
             "crag_meta": item.get("crag_meta", {})
         }
+
+    def _enrich_decisive_quotes(
+        self,
+        raw_quotes: List[Any],
+        used_laws: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Enrich decisive quotes with statutory source metadata:
+        - filename: source document markdown filename
+        - page: page number or page range in document (e.g. '4-6/42')
+        - law: exact section or rule identifier
+        - quote: verbatim quoted text
+        """
+        enriched = []
+        if not raw_quotes:
+            return enriched
+
+        for q in raw_quotes:
+            if not isinstance(q, dict):
+                if isinstance(q, str) and q.strip():
+                    enriched.append({
+                        "filename": "ไม่ระบุ",
+                        "page": "ไม่ระบุ",
+                        "law": "ไม่ระบุ",
+                        "quote": q.strip()
+                    })
+                continue
+
+            law_name = str(q.get("law", "")).strip()
+            quote_text = str(q.get("quote", "")).strip()
+
+            filename = ""
+            page = ""
+
+            # 1. Match against used_laws from retrieval
+            norm_law = normalize_digits(law_name).lower()
+            law_num_match = re.search(r"(\d+)", norm_law)
+            law_num = law_num_match.group(1) if law_num_match else None
+
+            matched_law = None
+            if law_name or quote_text:
+                for cand in used_laws:
+                    cand_entry = normalize_digits(str(cand.get("entry", ""))).lower()
+                    cand_id = normalize_digits(str(cand.get("id", ""))).lower()
+                    cand_desc = str(cand.get("description", ""))
+                    cand_related = [normalize_digits(str(r)).lower() for r in cand.get("related_laws", [])]
+
+                    # Match by exact section identifier or number
+                    if (norm_law and (norm_law in cand_entry or norm_law in cand_id or any(norm_law in r for r in cand_related))) or \
+                       (law_num and (f" {law_num}" in cand_entry or f" {law_num}" in cand_id or any(f" {law_num}" in r for r in cand_related))) or \
+                       (quote_text and len(quote_text) > 15 and quote_text[:30] in cand_desc):
+                        matched_law = cand
+                        break
+
+            # 2. Extract metadata from matched used_law
+            if matched_law:
+                # Find filename from related_laws or id
+                related = matched_law.get("related_laws", [])
+                for r in related:
+                    if str(r).endswith((".md", ".pdf")):
+                        filename = str(r)
+                        break
+                if not filename:
+                    entry_raw = matched_law.get("entry") or matched_law.get("id") or ""
+                    parts = str(entry_raw).split("|")[0].strip()
+                    parts = re.sub(r"_p\d+.*$", "", parts).strip()
+                    if parts:
+                        filename = parts if parts.endswith(".md") else f"{parts}.md"
+
+                # Find page from judge_dep or id or description
+                judge_dep = str(matched_law.get("judge_dep", ""))
+                p_match = re.search(r"หน้า\s*([0-9\-\/]+)", judge_dep)
+                if p_match:
+                    page = p_match.group(1)
+                else:
+                    id_raw = str(matched_law.get("id", ""))
+                    pid_match = re.search(r"_p(\d+(?:_p\d+)?)", id_raw)
+                    if pid_match:
+                        page = pid_match.group(1).replace("_p", "-")
+
+            # 3. Fallback to lookup_section index if filename or page is still missing
+            if (not filename or not page) and law_name:
+                lookup_res = self.lookup_section(law_name)
+                if lookup_res.get("found"):
+                    source_id = str(lookup_res.get("source_id", ""))
+                    topics = lookup_res.get("topics", [])
+                    raw_text = lookup_res.get("full_macro_chunk", "")
+                    related = lookup_res.get("related_laws", [])
+                    judge_dep = str(lookup_res.get("judge_dep", ""))
+
+                    if not filename:
+                        for r in related:
+                            if str(r).endswith((".md", ".pdf")):
+                                filename = str(r)
+                                break
+                    if not filename:
+                        fn_match = re.search(r"^\[(.*?)\s*\|", raw_text)
+                        if fn_match:
+                            fn_title = fn_match.group(1).strip()
+                            filename = fn_title if fn_title.endswith(".md") else f"{fn_title}.md"
+                        elif topics:
+                            filename = f"{topics[-1]}.md"
+
+                    if not page:
+                        p_match = re.search(r"หน้า\s*([0-9\-\/]+)", judge_dep) or re.search(r"หน้า\s*([0-9\-\/]+)", raw_text)
+                        if p_match:
+                            page = p_match.group(1)
+                        else:
+                            pid_match = re.search(r"_p(\d+(?:_p\d+)?)", source_id)
+                            if pid_match:
+                                page = pid_match.group(1).replace("_p", "-")
+
+            enriched.append({
+                "filename": filename or "ไม่ระบุ",
+                "page": page or "ไม่ระบุ",
+                "law": law_name or "ไม่ระบุ",
+                "quote": quote_text
+            })
+
+        return enriched
 
     # Alias for consistent high-level agent naming
     procurement_qa = ask_procurement_law

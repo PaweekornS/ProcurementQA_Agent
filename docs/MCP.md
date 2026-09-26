@@ -133,7 +133,7 @@ Fast fact-retrieval tools designed for agents that already know what they are se
 
 For non-MCP clients (e.g. web frontends, Postman, legacy ERP systems), the server exposes standard HTTP endpoints on the same port:
 
-- `POST /api/v1/ask`: JSON body `{"question": "...", "mode": "deep"}` $\rightarrow$ returns CRAG response.
+- `POST /api/v1/qa`: JSON body `{"question": "...", "mode": "deep"}` $\rightarrow$ returns streamlined legal QA response (`mode`, `direct_answer`, `decisive_quotes`).
 - `POST /api/v1/search`: JSON body `{"query": "...", "top_k": 5}` $\rightarrow$ returns raw retrieved clauses.
 - `POST /api/v1/verify`: JSON body `{"procurement_item": "...", "estimated_budget": 500000, "proposed_method": "..."}` $\rightarrow$ compliance audit.
 - `GET /healthz`: Liveness probe (returns `{"status": "alive"}`).
@@ -188,7 +188,7 @@ curl http://localhost:8000/ready
    ```
 2. **REST API Smoke Test**:
    ```bash
-   curl -X POST http://localhost:8000/api/v1/ask \
+   curl -X POST http://localhost:8000/api/v1/qa \
         -H "Content-Type: application/json" \
         -d '{"question": "วิธีเฉพาะเจาะจงวงเงินไม่เกินเท่าใด", "mode": "fast"}'
    ```

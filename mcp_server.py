@@ -402,11 +402,34 @@ OPENAPI_SCHEMA = {
                 },
                 "responses": {
                     "200": {
-                        "description": "Streamlined legal response with mode, direct_answer, and decisive_quote"
+                        "description": "Streamlined legal response with mode, direct_answer, and decisive_quotes",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "mode": {"type": "string", "example": "fast"},
+                                        "direct_answer": {"type": "string", "example": "หน่วยงานของรัฐสามารถจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจงได้ในวงเงินไม่เกิน 500,000 บาท"},
+                                        "decisive_quotes": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "filename": {"type": "string", "example": "พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md"},
+                                                    "page": {"type": "string", "example": "4-6/42"},
+                                                    "law": {"type": "string", "example": "มาตรา ๕๖ (๒) (ข)"},
+                                                    "quote": {"type": "string", "example": "การจัดซื้อจัดจ้างพัสดุที่มีการผลิต จำหน่าย... หรือวงเงินไม่เกินที่กำหนดในกฎกระทรวง"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-        },
+        }
     }
 }
 
@@ -480,7 +503,6 @@ async def route_readiness(request: Request) -> Response:
 
 
 @mcp.custom_route("/api/v1/qa", methods=["POST"])
-@mcp.custom_route("/api/v1/ask", methods=["POST"])
 async def route_api_qa(request: Request) -> Response:
     """REST API endpoint for procurement law Q&A returning streamlined response."""
     try:
@@ -504,7 +526,6 @@ async def route_api_qa(request: Request) -> Response:
         clean_result = {
             "mode": result.get("mode", mode),
             "direct_answer": result.get("direct_answer", ""),
-            "decisive_quote": quotes,
             "decisive_quotes": quotes,
         }
         return JSONResponse(clean_result)
@@ -512,7 +533,6 @@ async def route_api_qa(request: Request) -> Response:
         return JSONResponse({
             "mode": mode,
             "direct_answer": "",
-            "decisive_quote": [],
             "decisive_quotes": [],
             "error": str(e)
         }, status_code=500)
