@@ -583,6 +583,46 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
     2. Traverse from top documents to their constituent law sections (Laws nodes).
     3. Rerank candidate laws using Cross-Encoder / vector similarity.
     """
+    if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+        from core.database import StorageManager
+        storage = StorageManager.get_instance()
+        neo_clusters = storage.neo4j.get_document_clusters()
+        if not neo_clusters:
+            return [], [], []
+
+        clusters = []
+        for idx, c in enumerate(neo_clusters):
+            clusters.append({
+                'code': idx,
+                'cluster_id': c.get('cluster_id'),
+                'summary': c.get('title', ''),
+                'similarity': 1.0
+            })
+
+        ranked_codes = rerank_clusters(model, clusters, query_text)
+        selected_doc_id = clusters[ranked_codes[0]]['cluster_id'] if ranked_codes else clusters[0]['cluster_id']
+
+        top_laws = storage.hybrid_search_clauses(
+            query_text=query_text,
+            query_dense=query_embedding if query_embedding is not None else get_embedding(query_text),
+            top_k=top_k,
+            doc_filter=selected_doc_id
+        )
+        formatted_laws = []
+        for idx, l in enumerate(top_laws):
+            formatted_laws.append({
+                'id': l.get('clause_id'),
+                'entry': l.get('entry', ''),
+                'description': l.get('content_thai', ''),
+                'crimes': l.get('topics', []),
+                'judge_dep': l.get('judge_dep', []),
+                'related_laws': l.get('related_laws', []),
+                'insights': '',
+                'rank': idx + 1,
+                'rerank_score': l.get('score', 0.0)
+            })
+        return clusters, [], formatted_laws
+
     db = GraphDBManager.get_db()
     
     # 1. Find most similar Document Clusters
@@ -717,6 +757,101 @@ def _ensure_bm25_index(db):
 
 
 def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
+    if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+        from core.database import StorageManager
+        storage = StorageManager.get_instance()
+        if query_embedding is None:
+            query_embedding = get_embedding(query_text)
+
+        # 1. Hybrid Search in Qdrant (1024-dim BGE-M3 + Native Sparse BM25 + RRF) + Postgres Hydration
+        dense_top_k = int(os.getenv("dense_top_k", "30"))
+        raw_clauses = storage.hybrid_search_clauses(
+            query_text=query_text,
+            query_dense=query_embedding,
+            top_k=max(top_k * 4, dense_top_k)
+        )
+        raw_cases = storage.hybrid_search_cases(
+            query_text=query_text,
+            query_dense=query_embedding,
+            top_k=top_k
+        )
+
+        candidates = []
+        for c in raw_clauses:
+            candidates.append({
+                'id': c.get('clause_id'),
+                'clause_id': c.get('clause_id'),
+                'entry': c.get('entry', ''),
+                'description': c.get('content_thai', ''),
+                'crimes': c.get('topics', []),
+                'judge_dep': c.get('judge_dep', []),
+                'related_laws': c.get('related_laws', []),
+                'insights': '',
+                'similarity': c.get('score', 0.0),
+                'score': c.get('score', 0.0),
+                'data': c
+            })
+
+        # 2. Cross-Encoder reranking if enabled
+        from .hybrid_reranker import get_reranker, is_reranker_enabled
+        reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+        reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+        reranker_device = os.getenv("reranker_device", "cuda:0")
+
+        if is_reranker_enabled() and candidates:
+            reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+            if reranker and reranker.model is not None:
+                top_candidates = reranker.rerank(
+                    query_text,
+                    candidates,
+                    top_k=top_k,
+                    threshold=reranker_thresh
+                )
+            else:
+                top_candidates = candidates[:top_k]
+        else:
+            top_candidates = candidates[:top_k]
+
+        # 3. Knowledge Graph traversal & expansion via Neo4j
+        laws = []
+        seen_law_ids = set()
+        for cand in top_candidates:
+            cid = cand.get('clause_id') or cand.get('id')
+            if cid and cid not in seen_law_ids:
+                laws.append(cand)
+                seen_law_ids.add(cid)
+
+                # Graph context expansion
+                graph_ctx = storage.traverse_clause_graph(cid)
+                for cited in graph_ctx.get("cited_clauses", []):
+                    tgt_id = cited.get("clause_id")
+                    if tgt_id and tgt_id not in seen_law_ids:
+                        tgt_rec = storage.pg.get_clause_by_id(tgt_id)
+                        if tgt_rec:
+                            laws.append({
+                                'id': tgt_rec.get('clause_id'),
+                                'clause_id': tgt_rec.get('clause_id'),
+                                'entry': tgt_rec.get('entry', ''),
+                                'description': tgt_rec.get('content_thai', ''),
+                                'crimes': tgt_rec.get('topics', []),
+                                'judge_dep': tgt_rec.get('judge_dep', []),
+                                'related_laws': tgt_rec.get('related_laws', []),
+                                'insights': '',
+                                'rerank_score': cand.get('rerank_score', 0.8)
+                            })
+                            seen_law_ids.add(tgt_id)
+
+        cases = []
+        for cs in raw_cases:
+            cases.append({
+                'id': cs.get('case_id'),
+                'description': cs.get('question', ''),
+                'caseId': cs.get('case_id'),
+                'rerank_score': cs.get('score', 1.0)
+            })
+
+        return cases, laws
+
     db = GraphDBManager.get_db()
     use_hybrid = os.getenv("hybrid_retrieval", "True").lower() == "true"
     dense_top_k = int(os.getenv("dense_top_k", "30"))
