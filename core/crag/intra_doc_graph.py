@@ -247,6 +247,68 @@ def traverse_intra_doc_graph(
     if not seed_laws:
         return []
 
+    if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+        from core.database import StorageManager
+        storage = StorageManager.get_instance()
+        seed_ids = {str(l.get("clause_id") or l.get("id")) for l in seed_laws if (l.get("clause_id") or l.get("id"))}
+        candidate_neighbor_ids: Set[str] = set()
+
+        for sid in list(seed_ids)[:5]:
+            graph_ctx = storage.traverse_clause_graph(sid)
+            for adj in graph_ctx.get("adjacent_sections", []):
+                aid = adj.get("clause_id")
+                if aid and aid not in seed_ids:
+                    candidate_neighbor_ids.add(aid)
+            for cited in graph_ctx.get("cited_clauses", []):
+                cid = cited.get("clause_id")
+                if cid and cid not in seed_ids:
+                    candidate_neighbor_ids.add(cid)
+            for sub in graph_ctx.get("subordinate_laws", []):
+                sub_id = sub.get("clause_id")
+                if sub_id and sub_id not in seed_ids:
+                    candidate_neighbor_ids.add(sub_id)
+
+        if not candidate_neighbor_ids:
+            return []
+
+        raw_nodes = storage.pg.get_clauses_by_ids(list(candidate_neighbor_ids))
+        candidate_nodes = []
+        for r in raw_nodes:
+            candidate_nodes.append({
+                "id": r.get("clause_id"),
+                "clause_id": r.get("clause_id"),
+                "entry": r.get("entry", ""),
+                "description": r.get("content_thai", ""),
+                "crimes": r.get("topics", []),
+                "judge_dep": r.get("judge_dep", []),
+                "related_laws": r.get("related_laws", []),
+                "insights": ""
+            })
+
+        # Score with reranker if missing_aspect provided
+        query_text = expand_numeric_query(missing_aspect) if missing_aspect else ""
+        if len(query_text.strip()) > 3:
+            reranker = get_reranker()
+            if reranker and reranker.model is not None:
+                rerank_input = [
+                    {"id": c.get("id"), "description": c.get("description", ""), "data": c}
+                    for c in candidate_nodes[:20]
+                ]
+                reranked = reranker.rerank(
+                    query_text,
+                    rerank_input,
+                    top_k=top_k,
+                    threshold=min_rerank_threshold
+                )
+                matched = []
+                for item in reranked:
+                    c_data = item.get("data", {})
+                    c_data["rerank_score"] = item.get("rerank_score", 0.0)
+                    matched.append(c_data)
+                return matched
+
+        return candidate_nodes[:top_k]
+
     # Ensure relations are built
     build_intra_doc_relations(db)
 

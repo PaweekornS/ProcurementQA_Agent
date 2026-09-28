@@ -131,8 +131,8 @@ class LegalGraphRAGConfig:
         if dotenv_path is None:
             dotenv_path = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") else ".env"
         from dotenv import load_dotenv
-        # The selected experiment file is authoritative over inherited shell values.
-        load_dotenv(dotenv_path=dotenv_path, override=True)
+        # Retain existing environment variables (such as Docker compose networking overrides)
+        load_dotenv(dotenv_path=dotenv_path, override=False)
         
         # If API key is not present, check workspace root .env
         if not (os.getenv("api_key") or os.getenv("OPENROUTER_API_KEY") or os.getenv("\ufeffOPENROUTER_API_KEY")):
@@ -314,7 +314,12 @@ class LegalGraphRAG:
         self.law_to_crime = self._load_law_to_crime()
         
         # Initialize graph database
-        if self.config.graph.graph_db_path and os.path.exists(self.config.graph.graph_db_path):
+        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+            from core.database import StorageManager
+            self.storage = StorageManager.get_instance()
+            self.storage.init_all_stores()
+            print("Tri-Store database active (PostgreSQL + Qdrant + Neo4j).")
+        elif self.config.graph.graph_db_path and os.path.exists(self.config.graph.graph_db_path):
             GraphDBManager.load(self.config.graph.graph_db_path)
             print(f"Graph database loaded from {self.config.graph.graph_db_path}")
         else:
@@ -628,6 +633,8 @@ class LegalGraphRAG:
     
     def __del__(self):
         """Destructor, auto-save graph database"""
+        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+            return
         if hasattr(self, 'config') and self.config.graph.auto_save and self.config.graph.graph_db_path:
             try:
                 db = GraphDBManager.get_db()
