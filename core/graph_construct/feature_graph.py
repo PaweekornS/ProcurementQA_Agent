@@ -214,6 +214,9 @@ def summarize_texts(model, text):
 def rerank_clusters(model, clusters, query_text):
     if not clusters:
         return []
+    from .hybrid_reranker import is_reranker_enabled
+    if not is_reranker_enabled():
+        return [c['code'] for c in clusters]
     # Try GPU Cross-Encoder Reranker first
     try:
         from .hybrid_reranker import get_reranker
@@ -249,6 +252,9 @@ def rerank_clusters(model, clusters, query_text):
 def rerank(model, query_text, neighbors):
     if not neighbors:
         return []
+    from .hybrid_reranker import is_reranker_enabled
+    if not is_reranker_enabled():
+        return neighbors
 
     # Use GPU Cross-Encoder Reranker (BAAI/bge-reranker-v2-m3)
     try:
@@ -700,11 +706,12 @@ def _ensure_bm25_index(db):
             _bm25_initialized = True
 
             # Warm up GPUReranker safely in the same lock so workers don't race on GPU allocation
-            from .hybrid_reranker import get_reranker
-            reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-            reranker_device = os.getenv("reranker_device", "cuda:0")
-            reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
-            get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+            from .hybrid_reranker import get_reranker, is_reranker_enabled
+            if is_reranker_enabled():
+                reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+                reranker_device = os.getenv("reranker_device", "cuda:0")
+                reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+                get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
         except Exception as e:
             print(f"[HybridRetrieval] Could not initialize BM25/Reranker index: {e}")
 
@@ -790,19 +797,24 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
     )
 
     # 4. GPU/CPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
-    # Default candidate pool: 50 on GPU, 15 on CPU for fast sub-8s latency
-    default_pool_size = 15 if "cpu" in str(reranker_device).lower() else 50
-    pool_size = int(os.getenv("rerank_pool_size", default_pool_size))
-    rerank_pool = fused_candidates[:pool_size]
-    reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
-    if reranker and reranker.model is not None:
-        top_candidates = reranker.rerank(
-            query_text,
-            rerank_pool,
-            top_k=top_k,
-            threshold=reranker_thresh
-        )
+    from .hybrid_reranker import is_reranker_enabled
+    if is_reranker_enabled():
+        # Default candidate pool: 50 on GPU, 15 on CPU for fast sub-8s latency
+        default_pool_size = 15 if "cpu" in str(reranker_device).lower() else 50
+        pool_size = int(os.getenv("rerank_pool_size", default_pool_size))
+        rerank_pool = fused_candidates[:pool_size]
+        reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
+        if reranker and reranker.model is not None:
+            top_candidates = reranker.rerank(
+                query_text,
+                rerank_pool,
+                top_k=top_k,
+                threshold=reranker_thresh
+            )
+        else:
+            top_candidates = fused_candidates[:top_k]
     else:
+        # Pure Retriever mode: bypass cross-encoder reranker completely
         top_candidates = fused_candidates[:top_k]
 
     # 5. Graph Traversal & Context Augmentation
