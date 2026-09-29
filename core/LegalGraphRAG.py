@@ -426,6 +426,31 @@ class LegalGraphRAG:
         """
         retrieve_config = self.config.retrieve.to_dict()
         crag_config = self.config.crag.to_dict() if hasattr(self.config, "crag") else {"enabled": True, "max_retry": 1}
+
+        # Check if LangGraph Agentic RAG is explicitly enabled (default: false for benchmark stability)
+        use_agentic = os.getenv("USE_AGENTIC_RAG", "false").lower() in ("true", "1", "yes")
+        if use_agentic:
+            try:
+                from core.agent import AgenticLegalGraphRAG
+                agent = AgenticLegalGraphRAG(model_client=self.model)
+                query_text = case.get("fact") or case.get("description") or case.get("question", "")
+                org_id = case.get("org_id", os.getenv("DEFAULT_ORG_ID", "DGA"))
+                mode = case.get("mode", "deep")
+                agent_res = agent.invoke(query=query_text, org_id=org_id, mode=mode)
+                used_laws = agent_res.get("retrieved_context", [])
+                return [{
+                    "name": case.get("name", "ผู้สอบถาม"),
+                    "description": query_text,
+                    "judge_result": agent_res,
+                    "retrieved_laws": used_laws,
+                    "retrieved_facts": [],
+                    "used_laws": used_laws,
+                    "used_facts": []
+                }]
+            except Exception as e:
+                import logging
+                logging.getLogger("LegalGraphRAG").warning(f"Agentic RAG fallback to CRAG: {e}")
+
         return analyze_case(
             self.model,
             case,
