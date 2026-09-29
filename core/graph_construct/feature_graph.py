@@ -576,7 +576,7 @@ def create_clusters(model=None):
                         connected_clusters.add(c_id)
 
 
-def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
+def search_similar_nodes_top(model, query_embedding, query_text, top_k=5, org_id=None):
     """
     Search similar nodes using Hierarchical Document Clusters:
     1. Find top matching legal documents (Cluster nodes) via vector similarity.
@@ -586,7 +586,8 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
     if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
         from core.database import StorageManager
         storage = StorageManager.get_instance()
-        neo_clusters = storage.neo4j.get_document_clusters()
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        neo_clusters = storage.neo4j.get_document_clusters(org_id=active_org)
         if not neo_clusters:
             return [], [], []
 
@@ -606,7 +607,8 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5):
             query_text=query_text,
             query_dense=query_embedding if query_embedding is not None else get_embedding(query_text),
             top_k=top_k,
-            doc_filter=selected_doc_id
+            doc_filter=selected_doc_id,
+            org_id=active_org
         )
         formatted_laws = []
         for idx, l in enumerate(top_laws):
@@ -756,10 +758,11 @@ def _ensure_bm25_index(db):
             print(f"[HybridRetrieval] Could not initialize BM25/Reranker index: {e}")
 
 
-def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
+def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org_id=None):
     if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
         from core.database import StorageManager
         storage = StorageManager.get_instance()
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         if query_embedding is None:
             query_embedding = get_embedding(query_text)
 
@@ -768,12 +771,14 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
         raw_clauses = storage.hybrid_search_clauses(
             query_text=query_text,
             query_dense=query_embedding,
-            top_k=max(top_k * 4, dense_top_k)
+            top_k=max(top_k * 4, dense_top_k),
+            org_id=active_org
         )
         raw_cases = storage.hybrid_search_cases(
             query_text=query_text,
             query_dense=query_embedding,
-            top_k=top_k
+            top_k=top_k,
+            org_id=active_org
         )
 
         candidates = []
@@ -822,11 +827,11 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5):
                 seen_law_ids.add(cid)
 
                 # Graph context expansion
-                graph_ctx = storage.traverse_clause_graph(cid)
+                graph_ctx = storage.traverse_clause_graph(cid, org_id=active_org)
                 for cited in graph_ctx.get("cited_clauses", []):
                     tgt_id = cited.get("clause_id")
                     if tgt_id and tgt_id not in seen_law_ids:
-                        tgt_rec = storage.pg.get_clause_by_id(tgt_id)
+                        tgt_rec = storage.pg.get_clause_by_id(tgt_id, org_id=active_org)
                         if tgt_rec:
                             laws.append({
                                 'id': tgt_rec.get('clause_id'),

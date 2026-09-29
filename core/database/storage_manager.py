@@ -55,17 +55,20 @@ class StorageManager:
         top_k: int = 10,
         doc_filter: Optional[str] = None,
         section_filter: Optional[int] = None,
+        org_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executes hybrid dense/sparse search in Qdrant, then hydrates authoritative text
-        and legal metadata from PostgreSQL in a single batch.
+        and legal metadata from PostgreSQL in a single batch, isolated by organization.
         """
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         qdrant_results = self.qdrant.hybrid_search_statutes(
             query_text=query_text,
             query_dense=query_dense,
             top_k=top_k,
             doc_filter=doc_filter,
             section_filter=section_filter,
+            org_id=active_org,
         )
 
         if not qdrant_results:
@@ -75,8 +78,8 @@ class StorageManager:
         score_map = {r["clause_id"]: r["score"] for r in qdrant_results if r.get("clause_id")}
         clause_ids = list(score_map.keys())
 
-        # Hydrate from PostgreSQL
-        pg_records = self.pg.get_clauses_by_ids(clause_ids)
+        # Hydrate from PostgreSQL with tenant check
+        pg_records = self.pg.get_clauses_by_ids(clause_ids, org_id=active_org)
         pg_map = {r["clause_id"]: r for r in pg_records}
 
         hydrated = []
@@ -96,12 +99,15 @@ class StorageManager:
         query_text: str,
         query_dense: List[float],
         top_k: int = 5,
+        org_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Hybrid search over FAQ cases in Qdrant hydrated with Postgres features."""
+        """Hybrid search over FAQ cases in Qdrant hydrated with Postgres features, isolated by organization."""
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         qdrant_results = self.qdrant.hybrid_search_cases(
             query_text=query_text,
             query_dense=query_dense,
             top_k=top_k,
+            org_id=active_org,
         )
         if not qdrant_results:
             return []
@@ -118,13 +124,14 @@ class StorageManager:
             })
         return results
 
-    def traverse_clause_graph(self, clause_id: str) -> Dict[str, Any]:
-        """Traverses Neo4j for structural and citation graph context around a clause."""
+    def traverse_clause_graph(self, clause_id: str, org_id: Optional[str] = None) -> Dict[str, Any]:
+        """Traverses Neo4j for structural and citation graph context around a clause, isolated by organization."""
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         return {
-            "adjacent_sections": self.neo4j.get_adjacent_sections(clause_id),
-            "cited_clauses": self.neo4j.get_cited_clauses(clause_id),
-            "subordinate_laws": self.neo4j.get_subordinate_laws(clause_id),
-            "related_cases": self.neo4j.get_related_cases(clause_id),
+            "adjacent_sections": self.neo4j.get_adjacent_sections(clause_id, org_id=active_org),
+            "cited_clauses": self.neo4j.get_cited_clauses(clause_id, org_id=active_org),
+            "subordinate_laws": self.neo4j.get_subordinate_laws(clause_id, org_id=active_org),
+            "related_cases": self.neo4j.get_related_cases(clause_id, org_id=active_org),
         }
 
     def get_stats(self) -> Dict[str, Any]:
