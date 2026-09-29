@@ -230,22 +230,24 @@ class ProcurementService:
             return match.group(0).strip()
         return None
 
-    def search_clauses(self, query: str, top_k: int = 5, doc_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search_clauses(self, query: str, top_k: int = 5, doc_filter: Optional[str] = None, org_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Direct hybrid search (Dense Vector + Thai BM25 + GPU Cross-Encoder Reranker)
-        over statutory clauses without LLM synthesis.
+        over statutory clauses without LLM synthesis, filtered by tenant org_id.
         """
         if not query or not query.strip():
             return []
 
         from core.graph_construct.feature_graph import search_similar_nodes_direct, get_embedding
 
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         query_emb = get_embedding(query.strip())
         cases, laws = search_similar_nodes_direct(
             self.rag.model,
             query_emb,
             query.strip(),
-            top_k=top_k * 2 if doc_filter else top_k
+            top_k=top_k * 2 if doc_filter else top_k,
+            org_id=active_org
         )
 
         results = []
@@ -319,13 +321,67 @@ class ProcurementService:
     # Tier 2: Knowledge Graph Traversal
     # --------------------------------------------------------------------------
 
-    def traverse_regulations(self, section_reference: str) -> Dict[str, Any]:
+    def traverse_regulations(self, section_reference: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Traverse the Knowledge Graph to find subordinate rules, ministerial regulations,
-        or circular letters linked to a parent statutory section.
+        or circular letters linked to a parent statutory section, filtered by organization.
         """
         if not section_reference or not section_reference.strip():
             return {"parent": section_reference, "related_nodes": []}
+
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+            from core.database import StorageManager
+            storage = StorageManager.get_instance()
+            norm_ref = normalize_digits(section_reference.strip()).lower()
+            num_m = re.search(r"(\d+)", norm_ref)
+            clause_records = []
+            if "ข้อ" in norm_ref and num_m:
+                clause_records = storage.pg.lookup_clause("", int(num_m.group(1)), org_id=active_org)
+            elif num_m:
+                clause_records = storage.pg.lookup_section("", int(num_m.group(1)), org_id=active_org)
+
+            related_results = []
+            matched_cid = None
+            if clause_records:
+                matched_cid = clause_records[0]["clause_id"]
+                graph_ctx = storage.traverse_clause_graph(matched_cid, org_id=active_org)
+                for adj in graph_ctx.get("adjacent_sections", []):
+                    related_results.append({
+                        "node_id": adj.get("clause_id"),
+                        "type": "Laws",
+                        "relation": "ADJACENT_SECTION",
+                        "description": f"Adjacent: {adj.get('entry', '')}"
+                    })
+                for cited in graph_ctx.get("cited_clauses", []):
+                    related_results.append({
+                        "node_id": cited.get("clause_id"),
+                        "type": "Laws",
+                        "relation": "CITES_CLAUSE",
+                        "description": f"Cited: {cited.get('quote', '')}"
+                    })
+                for sub in graph_ctx.get("subordinate_laws", []):
+                    related_results.append({
+                        "node_id": sub.get("clause_id"),
+                        "type": "Laws",
+                        "relation": "SUBORDINATE_RULE",
+                        "description": f"{sub.get('document_title', '')}: {sub.get('entry', '')}"
+                    })
+                for cs in graph_ctx.get("related_cases", []):
+                    related_results.append({
+                        "node_id": cs.get("case_id"),
+                        "type": "Cases",
+                        "relation": "RELATES_TO_LAW",
+                        "description": cs.get("question", "")
+                    })
+
+            return {
+                "target": section_reference,
+                "matched_graph_node": matched_cid,
+                "graph_neighbors_count": len(related_results),
+                "related_nodes": related_results,
+                "associated_topics": clause_records[0].get("topics", []) if clause_records else []
+            }
 
         db = GraphDBManager.get_db()
         norm_ref = normalize_digits(section_reference.strip()).lower()
@@ -459,11 +515,12 @@ class ProcurementService:
             "potential_risks": risks
         }
 
-    def ask_procurement_law(self, question: str, mode: str = "deep") -> Dict[str, Any]:
+    def ask_procurement_law(self, question: str, mode: str = "deep", org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute CRAG synthesis pipeline.
         mode="deep": full CRAG with Issue Decomposer, Synthesizer, Auditor, Refiner Retry.
         mode="fast": single-pass hybrid retrieval + Synthesizer without auditor retry loop.
+        Filtered by tenant org_id.
         """
         if not question or not question.strip():
             return {
@@ -477,7 +534,8 @@ class ProcurementService:
                 "error": "`question` must be a non-empty string."
             }
 
-        case = {"fact": question.strip(), "name": "ผู้สอบถาม"}
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org}
 
         # Temporarily override CRAG retry configuration based on mode
         original_retry = getattr(self.rag.config.crag, "max_retry", 1)
