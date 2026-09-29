@@ -83,7 +83,8 @@ def get_statute_section(section: str, doc_title: Optional[str] = None) -> Dict[s
 def search_procurement_clauses(
     query: str,
     top_k: int = 5,
-    doc_filter: Optional[str] = None
+    doc_filter: Optional[str] = None,
+    org_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Direct hybrid search (Dense Vector + Thai BM25) over statutory clauses without LLM synthesis.
@@ -92,13 +93,14 @@ def search_procurement_clauses(
         query: Search query in Thai or English.
         top_k: Number of ranked clauses to return (default: 5).
         doc_filter: Optional filter keyword (e.g. "พระราชบัญญัติ", "กฎกระทรวง").
+        org_id: Organization ID for tenant isolation (default: "DGA").
 
     Returns:
         Dictionary with list of ranked statutory clauses and relevance scores.
     """
     try:
         service = _get_service()
-        results = service.search_clauses(query=query, top_k=top_k, doc_filter=doc_filter)
+        results = service.search_clauses(query=query, top_k=top_k, doc_filter=doc_filter, org_id=org_id)
         return {"query": query, "count": len(results), "results": results}
     except Exception as e:
         return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
@@ -123,20 +125,21 @@ def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
         return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
 
-def get_related_regulations(section_reference: str) -> Dict[str, Any]:
+def get_related_regulations(section_reference: str, org_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Traverse the NetworkX knowledge graph to locate subordinate rules, ministerial
+    Traverse the knowledge graph to locate subordinate rules, ministerial
     regulations, or circular letters linked to a parent statutory section.
 
     Args:
         section_reference: Parent section identifier (e.g. "มาตรา 56", "ข้อ 79").
+        org_id: Organization ID for tenant isolation (default: "DGA").
 
     Returns:
         Linked nodes, relationship types, and related topics.
     """
     try:
         service = _get_service()
-        return service.traverse_regulations(section_reference=section_reference)
+        return service.traverse_regulations(section_reference=section_reference, org_id=org_id)
     except Exception as e:
         return {"target": section_reference, "error": f"{type(e).__name__}: {e}"}
 
@@ -154,7 +157,7 @@ if _expose_internal:
 # ==============================================================================
 
 @mcp.tool()
-def procurement_qa(question: str, mode: str = "deep") -> Dict[str, Any]:
+def procurement_qa(question: str, mode: str = "deep", org_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Answer a Thai government procurement law question using the Multi-Agent CRAG pipeline.
     Performs issue decomposition, statutory retrieval, legal synthesis, completeness auditing, and guardrails.
@@ -163,6 +166,7 @@ def procurement_qa(question: str, mode: str = "deep") -> Dict[str, Any]:
         question: Question about Thai procurement law and regulations.
         mode: "deep" (default, full CRAG with completeness audit & refiner retry)
               or "fast" (single-pass hybrid retrieval + synthesis, ~3s).
+        org_id: Organization ID for tenant isolation (default: "DGA").
 
     Returns:
         Structured answer including status, direct_answer, decisive_quotes,
@@ -170,7 +174,7 @@ def procurement_qa(question: str, mode: str = "deep") -> Dict[str, Any]:
     """
     try:
         service = _get_service()
-        return service.ask_procurement_law(question=question, mode=mode)
+        return service.ask_procurement_law(question=question, mode=mode, org_id=org_id)
     except Exception as e:
         return {
             "status": "ERROR",
@@ -520,12 +524,13 @@ async def route_api_qa(request: Request) -> Response:
     question = body.get("question", "")
     mode = body.get("mode", "deep")
     full_response = bool(body.get("full", False) or request.query_params.get("full", "false").lower() == "true")
+    org_id = request.headers.get("X-Organization-Id") or body.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA")
     if not question:
         return JSONResponse({"error": "Missing 'question' in request body"}, status_code=400)
 
     try:
         service = _get_service()
-        result = service.ask_procurement_law(question=question, mode=mode)
+        result = service.ask_procurement_law(question=question, mode=mode, org_id=org_id)
         if full_response:
             return JSONResponse(result)
 
@@ -534,6 +539,7 @@ async def route_api_qa(request: Request) -> Response:
             "mode": result.get("mode", mode),
             "direct_answer": result.get("direct_answer", ""),
             "decisive_quotes": quotes,
+            "organization_id": org_id,
         }
         return JSONResponse(clean_result)
     except Exception as e:
@@ -556,14 +562,15 @@ async def route_api_search(request: Request) -> Response:
     query = body.get("query", "")
     top_k = int(body.get("top_k", 5))
     doc_filter = body.get("doc_filter")
+    org_id = request.headers.get("X-Organization-Id") or body.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA")
 
     if not query:
         return JSONResponse({"error": "Missing 'query' in request body"}, status_code=400)
 
     try:
         service = _get_service()
-        results = service.search_clauses(query=query, top_k=top_k, doc_filter=doc_filter)
-        return JSONResponse({"query": query, "count": len(results), "results": results})
+        results = service.search_clauses(query=query, top_k=top_k, doc_filter=doc_filter, org_id=org_id)
+        return JSONResponse({"query": query, "count": len(results), "organization_id": org_id, "results": results})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
