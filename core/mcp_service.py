@@ -535,9 +535,36 @@ class ProcurementService:
             }
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org}
+        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org, "mode": mode}
 
-        # Temporarily override CRAG retry configuration based on mode
+        # Direct path to LangGraph Agentic RAG if enabled
+        use_agentic = os.getenv("USE_AGENTIC_RAG", "true").lower() in ("true", "1", "yes")
+        if use_agentic:
+            try:
+                from core.agent import AgenticLegalGraphRAG
+                agent = AgenticLegalGraphRAG(model_client=self.rag.model)
+                result = agent.invoke(query=question.strip(), org_id=active_org, mode=mode)
+                if result:
+                    return {
+                        "status": result.get("status", "SUCCESS"),
+                        "mode": mode,
+                        "direct_answer": result.get("direct_answer", ""),
+                        "decisive_quotes": result.get("decisive_quotes", []),
+                        "applicable_laws": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
+                        "exceptions_or_conditions": result.get("disclaimer", ""),
+                        "citations": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
+                        "crag_meta": {
+                            "grounding_score": result.get("grounding_score", 1.0),
+                            "guardrail_warnings": result.get("guardrail_warnings", [])
+                        },
+                        "organization_id": active_org,
+                        "disclaimer": result.get("disclaimer", "")
+                    }
+            except Exception as e:
+                import logging
+                logging.getLogger("ProcurementService").warning(f"LangGraph Agent invocation fallback: {e}")
+
+        # Fallback to legacy CRAG
         original_retry = getattr(self.rag.config.crag, "max_retry", 1)
         original_enabled = getattr(self.rag.config.crag, "enabled", True)
 

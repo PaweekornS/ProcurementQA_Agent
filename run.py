@@ -20,17 +20,45 @@ if hasattr(sys.stdout, 'reconfigure'):
 from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
 
 
+def sanitize_dataset_name(dataset_input: str) -> str:
+    """
+    Extracts a clean dataset name by stripping folder paths (e.g. 'datasets/'),
+    'crime_data_' prefix, and '_small.json' / '.json' extensions.
+    Examples:
+      '.\\datasets\\crime_data_THAI_small.json' -> 'THAI'
+      'datasets/crime_data_thai_procurement_small.json' -> 'thai_procurement'
+      'crime_data_THAI_small.json' -> 'THAI'
+      'THAI' -> 'THAI'
+    """
+    if not dataset_input:
+        return "THAI"
+    base = os.path.basename(dataset_input.replace("\\", "/").rstrip("/"))
+    clean = re.sub(r"^crime_data_", "", base, flags=re.IGNORECASE)
+    clean = re.sub(r"_small\.json$", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\.json$", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"_small$", "", clean, flags=re.IGNORECASE)
+    return clean or "THAI"
+
+
 def load_test_cases(datasets: str, datasets_path: str = "./datasets") -> List[Dict[str, Any]]:
+    clean_name = sanitize_dataset_name(datasets)
     if os.path.exists(datasets) and os.path.isfile(datasets):
         case_file = datasets
     else:
-        case_file = os.path.join(datasets_path, f"crime_data_{datasets}_small.json")
-        if not os.path.exists(case_file):
-            alt_file = os.path.join(datasets_path, datasets)
-            if os.path.exists(alt_file) and os.path.isfile(alt_file):
-                case_file = alt_file
-            else:
-                raise FileNotFoundError(f"Test dataset not found: {case_file}")
+        candidates = [
+            os.path.join(datasets_path, f"crime_data_{clean_name}_small.json"),
+            os.path.join(datasets_path, f"crime_data_{datasets}_small.json"),
+            os.path.join(datasets_path, f"{clean_name}.json"),
+            os.path.join(datasets_path, datasets),
+            os.path.join(datasets_path, f"crime_data_{clean_name}.json"),
+        ]
+        case_file = None
+        for cand in candidates:
+            if os.path.exists(cand) and os.path.isfile(cand):
+                case_file = cand
+                break
+        if not case_file:
+            raise FileNotFoundError(f"Test dataset not found for '{datasets}'. Checked: {candidates}")
     
     with open(case_file, "r", encoding="utf-8") as f:
         cases = json.load(f)
@@ -329,8 +357,8 @@ def run_evaluation(
     workers: int = 4
 ):
     config = LegalGraphRAGConfig.from_env_file(dotenv_path)
-    
-    output_dir = os.path.join(config.data.output_dir, datasets)
+    clean_dataset = sanitize_dataset_name(datasets)
+    output_dir = os.path.join(config.data.output_dir, clean_dataset)
     os.makedirs(output_dir, exist_ok=True)
     if datasets_path == "./datasets" and config.data.datasets_path:
         datasets_path = config.data.datasets_path
@@ -601,7 +629,7 @@ def run_evaluation(
     strict_hit_rate = (total_both_hits / total_cases * 100) if total_cases > 0 else 0.0
     
     print(f"\n{'='*65}")
-    print(f"Model: {model_name} | Dataset: {datasets}")
+    print(f"Model: {model_name} | Dataset: {clean_dataset}")
     print(f"Total Questions Evaluated: {total_cases}")
     print(f"🎯 STRICT HIT RATE [Doc AND Section] (Recall@k): {total_both_hits}/{total_cases} ({strict_hit_rate:.1f}%)")
     print(f"   ├─ Document Hit Rate: {total_document_hits}/{total_cases} ({doc_rate:.1f}%)")
@@ -615,11 +643,10 @@ def run_evaluation(
     
     print(f"QA results saved to {results_file}")
 
-    
     stats_file = os.path.join(output_dir, f"{model_name}_stats.json")
     stats = {
         "model_name": model_name,
-        "dataset": datasets,
+        "dataset": clean_dataset,
         "total_cases": total_cases,
         "strict_hits": total_both_hits,
         "strict_hit_rate": strict_hit_rate,
