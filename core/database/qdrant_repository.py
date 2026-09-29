@@ -143,8 +143,9 @@ class QdrantRepository:
         self._ensure_payload_indexes()
 
     def _ensure_payload_indexes(self):
-        """Create payload indexes on frequently filtered fields."""
+        """Create payload indexes on frequently filtered fields, including tenant org_id."""
         fields_statutes = [
+            ("org_id", models.PayloadSchemaType.KEYWORD),
             ("doc_id", models.PayloadSchemaType.KEYWORD),
             ("entry", models.PayloadSchemaType.KEYWORD),
             ("section_num", models.PayloadSchemaType.INTEGER),
@@ -163,6 +164,7 @@ class QdrantRepository:
                 pass
 
         fields_cases = [
+            ("org_id", models.PayloadSchemaType.KEYWORD),
             ("case_id", models.PayloadSchemaType.KEYWORD),
             ("topics", models.PayloadSchemaType.KEYWORD),
         ]
@@ -180,9 +182,10 @@ class QdrantRepository:
         self,
         clauses: List[Dict[str, Any]],
         dense_embeddings: List[List[float]],
+        org_id: str = "PUBLIC",
         batch_size: int = 100,
     ):
-        """Upsert statutory clause points with both dense and sparse vectors."""
+        """Upsert statutory clause points with both dense and sparse vectors and org_id payload."""
         points = []
         for clause, dense_emb in zip(clauses, dense_embeddings):
             cid = str(clause["clause_id"])
@@ -204,6 +207,7 @@ class QdrantRepository:
 
             payload = {
                 "clause_id": cid,
+                "org_id": str(clause.get("org_id", org_id)),
                 "doc_id": str(clause.get("doc_id", "")),
                 "entry": str(clause.get("entry", "")),
                 "section_num": clause.get("section_num"),
@@ -226,9 +230,10 @@ class QdrantRepository:
         self,
         cases: List[Dict[str, Any]],
         dense_embeddings: List[List[float]],
+        org_id: str = "PUBLIC",
         batch_size: int = 100,
     ):
-        """Upsert FAQ case points with dense and sparse vectors."""
+        """Upsert FAQ case points with dense and sparse vectors and org_id payload."""
         points = []
         for case, dense_emb in zip(cases, dense_embeddings):
             cs_id = str(case["case_id"])
@@ -249,6 +254,7 @@ class QdrantRepository:
 
             payload = {
                 "case_id": cs_id,
+                "org_id": str(case.get("org_id", org_id)),
                 "question": q_text,
                 "topics": case.get("topics", []),
             }
@@ -269,26 +275,33 @@ class QdrantRepository:
         top_k: int = 10,
         doc_filter: Optional[str] = None,
         section_filter: Optional[int] = None,
+        org_id: str = "DGA",
     ) -> List[Dict[str, Any]]:
         """
-        Executes server-side Reciprocal Rank Fusion (RRF) between dense and sparse vectors in Qdrant.
+        Executes server-side Reciprocal Rank Fusion (RRF) between dense and sparse vectors in Qdrant,
+        filtering by tenant (visible: PUBLIC + org_id).
         """
-        query_filter = None
-        conditions = []
+        tenant_filter = models.Filter(
+            should=[
+                models.FieldCondition(key="org_id", match=models.MatchValue(value="PUBLIC")),
+                models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id)),
+            ]
+        )
+
+        must_conditions = [tenant_filter]
         if doc_filter:
-            conditions.append(
+            must_conditions.append(
                 models.FieldCondition(
                     key="doc_id", match=models.MatchValue(value=doc_filter)
                 )
             )
         if section_filter is not None:
-            conditions.append(
+            must_conditions.append(
                 models.FieldCondition(
                     key="section_num", match=models.MatchValue(value=section_filter)
                 )
             )
-        if conditions:
-            query_filter = models.Filter(must=conditions)
+        query_filter = models.Filter(must=must_conditions)
 
         sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
 
@@ -350,8 +363,15 @@ class QdrantRepository:
         query_text: str,
         query_dense: List[float],
         top_k: int = 5,
+        org_id: str = "DGA",
     ) -> List[Dict[str, Any]]:
-        """Hybrid search over Comptroller General FAQ precedent cases."""
+        """Hybrid search over FAQ precedent cases, filtering by tenant (PUBLIC + org_id)."""
+        tenant_filter = models.Filter(
+            should=[
+                models.FieldCondition(key="org_id", match=models.MatchValue(value="PUBLIC")),
+                models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id)),
+            ]
+        )
         sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
         if sparse_indices:
             try:
@@ -362,6 +382,7 @@ class QdrantRepository:
                             query=query_dense,
                             using="dense_bge_m3",
                             limit=max(15, top_k * 3),
+                            filter=tenant_filter,
                         ),
                         models.Prefetch(
                             query=models.SparseVector(
@@ -369,6 +390,7 @@ class QdrantRepository:
                             ),
                             using="sparse_bm25",
                             limit=max(15, top_k * 3),
+                            filter=tenant_filter,
                         ),
                     ],
                     query=models.FusionQuery(fusion=models.Fusion.RRF),
@@ -385,6 +407,7 @@ class QdrantRepository:
         response = self.client.search(
             collection_name=self.CASES_COLLECTION,
             query_vector=("dense_bge_m3", query_dense),
+            query_filter=tenant_filter,
             limit=top_k,
             with_payload=True,
         )
