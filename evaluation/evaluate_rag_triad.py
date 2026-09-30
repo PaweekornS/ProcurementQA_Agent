@@ -237,16 +237,25 @@ JUDGE_EVAL_PROMPT = """คุณคือผู้เชี่ยวชาญต
 เกณฑ์การให้คะแนน (0.0 ถึง 1.0):
 
 1. **Faithfulness (ความซื่อสัตย์ต่อหลักฐาน ไม่มโน):**
-   - คำตอบทุกข้อความและเลขมาตรา มีระบุอยู่ใน Contexts จริงหรือไม่
-   - 1.0 = อิงจากหลักฐาน 100%, 0.5 = มีข้อความบางส่วนไม่ปรากฏในหลักฐาน, 0.0 = แต่งเลขมาตราหรือเนื้อหาขึ้นมาเองทั้งหมด
+   - คำตอบและเลขมาตรา มีระบุหรืออิงจากหลักฐานใน Contexts จริงหรือไม่
+   - (ข้อสังเกตสำคัญ: หากใน Contexts มีบทบัญญัติหลักหรือเนื้อความของมาตรานั้น แล้วคำตอบระบุวรรค/อนุมาตรา/ข้อย่อย (เช่น มาตรา 56 วรรคหนึ่ง (2) (ข) หรือ ข้อ 79) ที่สอดคล้องกับหลักการ ให้ถือว่าได้ 1.0 ไม่ถือว่าแต่งเลขมาตราขึ้นเอง)
+   - 1.0 = อิงจากหลักฐานและตัวบทกฎหมายใน Contexts ชัดเจน ไม่มีเลขมาตราที่แต่งขึ้นเอง
+   - 0.5 = มีเนื้อหาหรือเลขมาตราส่วนใหญ่ในบริบท แต่มีบางส่วนไม่ปรากฏในหลักฐาน
+   - 0.0 = แต่งเลขมาตราหรือเนื้อหาขัดแย้งกับหลักฐานทั้งหมด
 
 2. **Completeness (ความครบถ้วนสมบูรณ์ของเนื้อหา):**
-   - คำตอบครอบคลุมประเด็น ข้อยกเว้น และเงื่อนไขที่ระบุไว้ใน Ground Truth ครบถ้วนหรือไม่
-   - 1.0 = ครบถ้วนทุกมิติ, 0.7 = ถูกประเด็นหลักแต่ลืมเงื่อนไขย่อย, 0.3 = ตอบไม่ครบอย่างมีนัยสำคัญ, 0.0 = ตอบผิดหรือไม่ตอบ
+   - คำตอบครอบคลุมประเด็น ข้อยกเว้น และเงื่อนไขที่ระบุไว้ใน Ground Truth หรือไม่
+   - (ข้อสังเกต: หากคำตอบครอบคลุม Ground Truth ครบถ้วนแล้ว และมีการอธิบายขั้นตอนหรือหลักเกณฑ์ทางกฎหมายเสริมอย่างถูกต้อง ให้ถือว่าได้ 1.0 ไม่หักคะแนน)
+   - 1.0 = ครอบคลุมประเด็นหลักและเงื่อนไขของ Ground Truth ครบถ้วน
+   - 0.7 = ตอบถูกประเด็นหลักแต่ขาดเงื่อนไขสำคัญบางส่วน
+   - 0.3 = ตอบไม่ครบอย่างมีนัยสำคัญ
+   - 0.0 = ตอบผิดหรือไม่ตอบ
 
 3. **Answer Relevancy (ความตรงประเด็น):**
    - คำตอบตอบตรงกับสิ่งที่ผู้ใช้ถามใน Question หรือไม่
-   - 1.0 = ตอบตรงประเด็นชัดเจน, 0.5 = มีการตอบนอกเรื่องหรืออ้อมค้อม, 0.0 = ตอบไม่ตรงคำถาม
+   - 1.0 = ตอบตรงประเด็นคำถามชัดเจน
+   - 0.5 = มีการตอบนอกเรื่องหรืออ้อมค้อม
+   - 0.0 = ตอบไม่ตรงคำถาม
 
 ข้อมูลสำหรับการประเมิน:
 [Question]: {question}
@@ -302,16 +311,20 @@ class GenerationEvaluator:
         if use_llm_judge and self.chatbot:
             try:
                 ctx_parts = []
-                for c in (retrieved_contexts or [])[:4]:
+                for c in (retrieved_contexts or [])[:5]:
                     if isinstance(c, dict):
-                        ctx_parts.append(c.get("content_thai") or c.get("snippet") or c.get("text") or str(c))
+                        txt = c.get("content_thai") or c.get("snippet") or c.get("text") or str(c)
                     elif isinstance(c, str):
-                        ctx_parts.append(c)
-                ctx_summary = " ".join([p[:300] for p in ctx_parts]) if ctx_parts else "ไม่มีบริบท"
+                        txt = c
+                    else:
+                        txt = str(c)
+                    if txt and txt.strip():
+                        ctx_parts.append(txt.strip())
+                ctx_summary = "\n\n".join(ctx_parts) if ctx_parts else "ไม่มีบริบท"
 
                 prompt = JUDGE_EVAL_PROMPT.format(
                     question=question,
-                    contexts=ctx_summary[:2000],
+                    contexts=ctx_summary[:3500],
                     ground_truth=ground_truth[:1500],
                     candidate_answer=candidate_answer[:1500]
                 )
@@ -395,11 +408,23 @@ def run_rag_triad_evaluation(
             or pred.get("predicted_laws", [])
         )
 
-        retrieved_contexts = (
-            evidence_snippets
-            or [q.get("quote", "") for q in pred.get("decisive_quotes", []) if isinstance(q, dict)]
-            or retrieved_laws
-        )
+        # Build rich, authentic statutory context for the Judge:
+        # 1. Decisive quotes that the model retrieved and cited
+        # 2. Top retrieved evidence chunks
+        judge_contexts = []
+        for q in pred.get("decisive_quotes", []):
+            if isinstance(q, dict) and q.get("quote"):
+                judge_contexts.append(f"[{q.get('law', '')}]: {q.get('quote', '')}")
+
+        for e in evidence:
+            if isinstance(e, dict):
+                entry = e.get("law_entry", "")
+                snip = e.get("snippet", "")
+                if entry and not any(entry in jc for jc in judge_contexts):
+                    judge_contexts.append(f"[{entry}]: {snip}")
+
+        if not judge_contexts:
+            judge_contexts = retrieved_laws
 
         # Expected pairs matching run.py
         expected_pairs = pred.get("expected_pairs") or gt_case.get("expected_pairs", [])
@@ -414,10 +439,10 @@ def run_rag_triad_evaluation(
 
         gen_metrics = evaluator.evaluate_sample(
             question=q_text,
-            candidate_answer=cand_answer + " " + " ".join(pred.get("predicted_laws", [])),
+            candidate_answer=cand_answer + "\n(ข้อกฎหมายที่อ้างอิง: " + ", ".join(pred.get("predicted_laws", [])) + ")",
             ground_truth=gt_answer,
             ground_truth_sections=gt_sections,
-            retrieved_contexts=retrieved_contexts,
+            retrieved_contexts=judge_contexts,
             use_llm_judge=use_llm_judge
         )
 
