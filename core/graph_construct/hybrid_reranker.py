@@ -10,9 +10,11 @@ and relevance gating for LegalGraphRAG.
 import os
 import re
 import sys
+import json
 import threading
 from typing import List, Dict, Any, Tuple, Optional
 
+import requests
 import numpy as np
 from pythainlp.tokenize import word_tokenize
 
@@ -230,9 +232,135 @@ class GPUReranker:
         return reranked[:top_k]
 
 
+class OpperAPIReranker:
+    """
+    API-first Reranker using Opper AI Gateway (/v3/rerank).
+    Zero local GPU/CPU memory footprint, EU-hosted, fast and scalable.
+    Supports models like 'berget/bge-reranker-v2-m3' and 'aws/cohere/rerank-v3.5'.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: str = "berget/bge-reranker-v2-m3",
+        endpoint: str = "https://api.opper.ai/v3/rerank",
+        threshold: float = 0.20,
+        timeout: int = 15
+    ):
+        self.api_key = api_key or os.getenv("OPPER_API_KEY", "").strip()
+        # Normalize model names to Opper's registered catalog identifiers
+        clean_model = model_name.strip() if model_name else ""
+        if not clean_model or clean_model in ["BAAI/bge-reranker-v2-m3", "bge-reranker-v2-m3"]:
+            self.model_name = "berget/bge-reranker-v2-m3"
+        elif clean_model in ["cohere/rerank-v3.5", "rerank-v3.5"]:
+            self.model_name = "aws/cohere/rerank-v3.5"
+        else:
+            self.model_name = clean_model
+
+        self.endpoint = endpoint
+        self.threshold = threshold
+        self.timeout = timeout
+        # Required for compatibility with `if reranker and reranker.model is not None` checks
+        self.model = self.model_name
+        self._warned_402 = False
+        print(f"[OpperReranker] Initialized API-first reranker with model '{self.model_name}' on '{self.endpoint}'")
+
+    def compute_score(self, query: str, text: str) -> float:
+        res = self.rerank(query=query, candidates=[{"text": text}], top_k=1)
+        if res and "rerank_score" in res[0]:
+            return float(res[0]["rerank_score"])
+        return 1.0
+
+    def rerank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        top_k: int = 5,
+        threshold: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Reranks candidates using Opper's /v3/rerank API endpoint.
+        Falls back gracefully without raising exceptions if the API is unreachable
+        or if billing requires a card on file (HTTP 402).
+        """
+        if not candidates:
+            return []
+
+        gate_threshold = threshold if threshold is not None else self.threshold
+
+        if not self.api_key:
+            print("[OpperReranker] Warning: OPPER_API_KEY not found in environment. Falling back to unranked candidates.")
+            return candidates[:top_k]
+
+        valid_candidates = []
+        documents = []
+        for c in candidates:
+            text = c.get("text") or c.get("description") or c.get("fact") or ""
+            if text:
+                valid_candidates.append(c)
+                # Cap each document preview to 2,000 characters for optimal latency and token economy
+                documents.append(str(text)[:2000])
+
+        if not valid_candidates:
+            return candidates[:top_k]
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": documents,
+            "top_n": min(len(documents), max(top_k * 2, 10)),
+            "return_documents": False
+        }
+
+        try:
+            resp = requests.post(self.endpoint, headers=headers, json=payload, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                reranked = []
+                for item in results:
+                    idx = item.get("index")
+                    score = float(item.get("relevance_score", 0.0))
+                    if idx is not None and idx < len(valid_candidates):
+                        cand_copy = dict(valid_candidates[idx])
+                        cand_copy["rerank_score"] = score
+                        if score >= gate_threshold:
+                            reranked.append(cand_copy)
+
+                if not reranked and results:
+                    # Fallback to top result if all fell below threshold
+                    best_idx = results[0].get("index", 0)
+                    best_cand = dict(valid_candidates[best_idx])
+                    best_cand["rerank_score"] = float(results[0].get("relevance_score", 0.0))
+                    reranked.append(best_cand)
+
+                return reranked[:top_k]
+
+            elif resp.status_code == 402:
+                if not self._warned_402:
+                    print(
+                        f"[OpperReranker] HTTP 402 Payment Required: Please add a card at "
+                        f"https://platform.opper.ai/go?to=billing to enable Opper Rerank API. "
+                        f"Falling back gracefully to retriever ordering."
+                    )
+                    self._warned_402 = True
+                return candidates[:top_k]
+            else:
+                print(f"[OpperReranker] API Error {resp.status_code}: {resp.text[:200]}. Falling back gracefully.")
+                return candidates[:top_k]
+
+        except Exception as e:
+            print(f"[OpperReranker] Request failed: {e}. Falling back gracefully.")
+            return candidates[:top_k]
+
+
 # Global Manager
 _global_bm25_index: Optional[ThaiBM25Index] = None
-_global_reranker: Optional[GPUReranker] = None
+_global_reranker: Optional[Any] = None
 _reranker_init_lock = threading.Lock()
 _bm25_init_lock = threading.Lock()
 
@@ -244,21 +372,39 @@ def is_reranker_enabled() -> bool:
 
 
 def get_reranker(
-    model_name: str = "BAAI/bge-reranker-v2-m3",
+    model_name: Optional[str] = None,
     device: str = "cuda:0",
-    threshold: float = 0.20
-) -> Optional[GPUReranker]:
+    threshold: Optional[float] = None
+) -> Optional[Any]:
     if not is_reranker_enabled():
         return None
     global _global_reranker
     if _global_reranker is None:
         with _reranker_init_lock:
             if _global_reranker is None:
-                _global_reranker = GPUReranker(
-                    model_name=model_name,
-                    device=device,
-                    threshold=threshold
-                )
+                provider = os.getenv("reranker_provider", "").strip().lower()
+                opper_key = os.getenv("OPPER_API_KEY", "").strip()
+
+                # Default to Opper API if OPPER_API_KEY is present or reranker_provider is 'opper' / 'api'
+                if provider in ("opper", "api") or (not provider and opper_key):
+                    resolved_model = os.getenv("OPPER_RERANKER_MODEL") or model_name or "berget/bge-reranker-v2-m3"
+                    thresh = float(os.getenv("reranker_threshold", threshold if threshold is not None else 0.20))
+                    endpoint = os.getenv("OPPER_RERANK_URL", "https://api.opper.ai/v3/rerank")
+                    _global_reranker = OpperAPIReranker(
+                        api_key=opper_key,
+                        model_name=resolved_model,
+                        endpoint=endpoint,
+                        threshold=thresh
+                    )
+                else:
+                    resolved_model = model_name or os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
+                    thresh = float(os.getenv("reranker_threshold", threshold if threshold is not None else 0.20))
+                    dev = os.getenv("reranker_device", device)
+                    _global_reranker = GPUReranker(
+                        model_name=resolved_model,
+                        device=dev,
+                        threshold=thresh
+                    )
     return _global_reranker
 
 
