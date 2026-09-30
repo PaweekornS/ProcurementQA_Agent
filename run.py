@@ -18,6 +18,7 @@ if hasattr(sys.stdout, 'reconfigure'):
         pass
 
 from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
+from evaluation.evaluate_rag_triad import compute_retrieval_metrics
 
 
 def sanitize_dataset_name(dataset_input: str) -> str:
@@ -150,7 +151,7 @@ def match_doc_and_section(expected_file: str, expected_section: str, candidate: 
     return match_document(expected_file, candidate)
 
 
-def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 5, snippet_len: int = 250) -> Dict[str, Any]:
+def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 10, snippet_len: int = 250) -> Dict[str, Any]:
     """
     Extracts high-value diagnostic features and top retrieval evidence with clean snippets.
     Omits bloated multi-page raw law text dumps.
@@ -259,54 +260,78 @@ def process_cases_worker(
                     expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
 
             # Candidate laws for evaluating retrieval hit rate:
-            # Combines retrieved candidates from retrieval/reranker + predicted laws
-            retrieved_candidates = []
+            eval_chunks = []
+            seen_chunk_keys = set()
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 first_item = case_res[0]
                 cand_pool = list(first_item.get("used_laws", [])) + list(first_item.get("retrieved_laws", []))
-                retrieved_candidates = [
-                    ul.get("entry", "")
-                    for ul in cand_pool
-                    if isinstance(ul, dict) and ul.get("entry")
-                ]
-            eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
+                for ul in cand_pool:
+                    if isinstance(ul, dict):
+                        entry = ul.get("entry", "")
+                        desc = ul.get("description", "") or ul.get("text", "")
+                        key = (entry, desc[:40])
+                        if key not in seen_chunk_keys and (entry or desc):
+                            seen_chunk_keys.add(key)
+                            eval_chunks.append({
+                                "law_entry": entry,
+                                "entry": entry,
+                                "text": desc,
+                                "snippet": desc[:300] if desc else ""
+                            })
+                    elif isinstance(ul, str) and ul.strip():
+                        if ul.strip() not in seen_chunk_keys:
+                            seen_chunk_keys.add(ul.strip())
+                            eval_chunks.append({
+                                "law_entry": ul.strip(),
+                                "entry": ul.strip(),
+                                "text": ul.strip()
+                            })
 
-            # 1. Section Hit
+            for pl in pred_laws:
+                if isinstance(pl, str) and pl.strip() and pl.strip() not in seen_chunk_keys:
+                    seen_chunk_keys.add(pl.strip())
+                    eval_chunks.append({
+                        "law_entry": pl.strip(),
+                        "entry": pl.strip(),
+                        "text": pl.strip()
+                    })
+
+            # Exact IR metrics calculation matching evaluate_rag_triad.py
+            eval_k = max(len(eval_chunks), 5)
+            ret_metrics = compute_retrieval_metrics(
+                retrieved_items=eval_chunks,
+                expected_pairs=expected_pairs,
+                ground_truth_sections=true_section,
+                k=eval_k
+            )
+
+            is_both_hit = (ret_metrics.get("hit_at_k", 0.0) > 0)
+            recall_at_k = ret_metrics.get("recall_at_k", 0.0)
+            prec_at_k = ret_metrics.get("precision_at_k", 0.0)
+            mrr_at_k = ret_metrics.get("mrr_at_k", 0.0)
+
+            # Section Hit & Document Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in eval_laws:
-                    if match_legal_section(ts_clean, str(pl)):
+                for item in eval_chunks:
+                    chunk_text = f"{item.get('law_entry', '')} {item.get('text', '')}".strip()
+                    if match_legal_section(ts_clean, chunk_text):
                         is_section_hit = True
                         break
                 if is_section_hit:
                     break
 
-            # 2. Document Hit
             is_document_hit = False
             for ed in expected_docs:
-                for pl in eval_laws:
-                    if match_document(ed, str(pl)):
+                for item in eval_chunks:
+                    chunk_text = f"{item.get('law_entry', '')} {item.get('text', '')}".strip()
+                    if match_document(ed, chunk_text):
                         is_document_hit = True
                         break
                 if is_document_hit:
-                    break
-
-            # 3. AND Condition: Must hit the EXACT PAIRED Document AND Section together
-            is_both_hit = False
-            for pair in expected_pairs:
-                ed = pair.get("doc", "")
-                ts = pair.get("section", "")
-                ts_clean = str(ts).strip()
-                if not ts_clean:
-                    continue
-                for pl in eval_laws:
-                    if match_doc_and_section(ed, ts_clean, str(pl)):
-                        is_both_hit = True
-                        break
-                if is_both_hit:
                     break
 
             if is_section_hit:
@@ -328,6 +353,10 @@ def process_cases_worker(
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
                 "is_both_hit": is_both_hit,
+                "recall_at_k": recall_at_k,
+                "hit_at_k": 1.0 if is_both_hit else 0.0,
+                "precision_at_k": prec_at_k,
+                "mrr_at_k": mrr_at_k,
                 "exceptions_or_conditions": exceptions,
                 "analysis": extract_case_analysis(case_res),
             })
@@ -354,9 +383,13 @@ def run_evaluation(
     build_graph: bool = True,
     force_rebuild: bool = False,
     limit: Optional[int] = None,
-    workers: int = 4
+    workers: int = 4,
+    rag_mode: Optional[str] = None
 ):
     config = LegalGraphRAGConfig.from_env_file(dotenv_path)
+    if rag_mode:
+        config.rag_mode = rag_mode.lower()
+        os.environ["RAG_MODE"] = rag_mode.lower()
     clean_dataset = sanitize_dataset_name(datasets)
     output_dir = os.path.join(config.data.output_dir, clean_dataset)
     os.makedirs(output_dir, exist_ok=True)
@@ -487,11 +520,12 @@ def run_evaluation(
         total_document_hits = 0
         total_section_hits = 0
         total_both_hits = 0
+        total_recall = 0.0
         results_lock = threading.Lock()
         pbar = tqdm(total=len(test_cases), desc=f"Evaluating ({workers} workers)")
         
         def process_single_case(case):
-            nonlocal total_document_hits, total_section_hits, total_both_hits
+            nonlocal total_document_hits, total_section_hits, total_both_hits, total_recall
             question = case.get("fact", "")
             true_category = case.get("crime", [])
             true_section = case.get("laws", [])
@@ -530,56 +564,78 @@ def run_evaluation(
                     expected_pairs = [{"doc": d, "section": s} for d in expected_docs for s in true_section]
 
             # Candidate laws for evaluating retrieval hit rate:
-            retrieved_candidates = []
+            eval_chunks = []
+            seen_chunk_keys = set()
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
                 first_item = case_res[0]
                 cand_pool = list(first_item.get("used_laws", [])) + list(first_item.get("retrieved_laws", []))
                 for ul in cand_pool:
                     if isinstance(ul, dict):
                         entry = ul.get("entry", "")
-                        if entry:
-                            retrieved_candidates.append(entry)
-                            for pl in pred_laws:
-                                if pl:
-                                    retrieved_candidates.append(f"{entry} | {pl}")
-            eval_laws = list(dict.fromkeys(pred_laws + retrieved_candidates))
+                        desc = ul.get("description", "") or ul.get("text", "")
+                        key = (entry, desc[:40])
+                        if key not in seen_chunk_keys and (entry or desc):
+                            seen_chunk_keys.add(key)
+                            eval_chunks.append({
+                                "law_entry": entry,
+                                "entry": entry,
+                                "text": desc,
+                                "snippet": desc[:300] if desc else ""
+                            })
+                    elif isinstance(ul, str) and ul.strip():
+                        if ul.strip() not in seen_chunk_keys:
+                            seen_chunk_keys.add(ul.strip())
+                            eval_chunks.append({
+                                "law_entry": ul.strip(),
+                                "entry": ul.strip(),
+                                "text": ul.strip()
+                            })
 
-            # 1. Section Hit
+            for pl in pred_laws:
+                if isinstance(pl, str) and pl.strip() and pl.strip() not in seen_chunk_keys:
+                    seen_chunk_keys.add(pl.strip())
+                    eval_chunks.append({
+                        "law_entry": pl.strip(),
+                        "entry": pl.strip(),
+                        "text": pl.strip()
+                    })
+
+            # Exact IR metrics calculation matching evaluate_rag_triad.py
+            eval_k = max(len(eval_chunks), 5)
+            ret_metrics = compute_retrieval_metrics(
+                retrieved_items=eval_chunks,
+                expected_pairs=expected_pairs,
+                ground_truth_sections=true_section,
+                k=eval_k
+            )
+
+            is_both_hit = (ret_metrics.get("hit_at_k", 0.0) > 0)
+            recall_at_k = ret_metrics.get("recall_at_k", 0.0)
+            prec_at_k = ret_metrics.get("precision_at_k", 0.0)
+            mrr_at_k = ret_metrics.get("mrr_at_k", 0.0)
+
+            # Section Hit & Document Hit
             is_section_hit = False
             for ts in true_section:
                 ts_clean = str(ts).strip()
                 if not ts_clean:
                     continue
-                for pl in eval_laws:
-                    if match_legal_section(ts_clean, str(pl)):
+                for item in eval_chunks:
+                    chunk_text = f"{item.get('law_entry', '')} {item.get('text', '')}".strip()
+                    if match_legal_section(ts_clean, chunk_text):
                         is_section_hit = True
                         break
                 if is_section_hit:
                     break
 
-            # 2. Document Hit
             is_document_hit = False
             for ed in expected_docs:
-                for pl in eval_laws:
-                    if match_document(ed, str(pl)):
+                for item in eval_chunks:
+                    chunk_text = f"{item.get('law_entry', '')} {item.get('text', '')}".strip()
+                    if match_document(ed, chunk_text):
                         is_document_hit = True
                         break
                 if is_document_hit:
-                    break
-
-            # 3. AND Condition: Must hit the EXACT PAIRED Document AND Section together
-            is_both_hit = False
-            for pair in expected_pairs:
-                ed = pair.get("doc", "")
-                ts = pair.get("section", "")
-                ts_clean = str(ts).strip()
-                if not ts_clean:
-                    continue
-                for pl in eval_laws:
-                    if match_doc_and_section(ed, ts_clean, str(pl)):
-                        is_both_hit = True
-                        break
-                if is_both_hit:
                     break
 
             case_data = {
@@ -594,6 +650,10 @@ def run_evaluation(
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
                 "is_both_hit": is_both_hit,
+                "recall_at_k": recall_at_k,
+                "hit_at_k": 1.0 if is_both_hit else 0.0,
+                "precision_at_k": prec_at_k,
+                "mrr_at_k": mrr_at_k,
                 "exceptions_or_conditions": exceptions,
                 "analysis": extract_case_analysis(case_res),
             }
@@ -605,6 +665,7 @@ def run_evaluation(
                     total_document_hits += 1
                 if is_both_hit:
                     total_both_hits += 1
+                total_recall += recall_at_k
                 combined_results.append(case_data)
                 pbar.update(1)
 
@@ -627,39 +688,42 @@ def run_evaluation(
     doc_rate = (total_document_hits / total_cases * 100) if total_cases > 0 else 0.0
     sec_rate = (total_section_hits / total_cases * 100) if total_cases > 0 else 0.0
     strict_hit_rate = (total_both_hits / total_cases * 100) if total_cases > 0 else 0.0
+    mean_recall = (total_recall / total_cases * 100) if total_cases > 0 else 0.0
     
+    active_mode = getattr(config, "rag_mode", "crag")
     print(f"\n{'='*65}")
-    print(f"Model: {model_name} | Dataset: {clean_dataset}")
+    print(f"Model: {model_name} | Dataset: {clean_dataset} | Mode: {active_mode}")
     print(f"Total Questions Evaluated: {total_cases}")
-    print(f"🎯 STRICT HIT RATE [Doc AND Section] (Recall@k): {total_both_hits}/{total_cases} ({strict_hit_rate:.1f}%)")
-    print(f"   ├─ Document Hit Rate: {total_document_hits}/{total_cases} ({doc_rate:.1f}%)")
-    print(f"   └─ Section Hit Rate:  {total_section_hits}/{total_cases} ({sec_rate:.1f}%)")
+    print(f"🎯 STRICT HIT RATE [Doc AND Section] (Hit@k): {total_both_hits}/{total_cases} ({strict_hit_rate:.1f}%)")
+    print(f"   ├─ Ground Truth Recall@k: {mean_recall:.2f}%")
+    print(f"   ├─ Document Hit Rate:     {total_document_hits}/{total_cases} ({doc_rate:.1f}%)")
+    print(f"   └─ Section Hit Rate:      {total_section_hits}/{total_cases} ({sec_rate:.1f}%)")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
     print(f"{'='*65}\n")
     
-    results_file = os.path.join(output_dir, f"{model_name}_results.json")
-    with open(results_file, "w", encoding="utf-8") as f:
-        json.dump(combined_results, f, ensure_ascii=False, indent=2)
-    
-    print(f"QA results saved to {results_file}")
-
-    stats_file = os.path.join(output_dir, f"{model_name}_stats.json")
+    mode_results_file = os.path.join(output_dir, f"{active_mode}_results.json")
     stats = {
         "model_name": model_name,
+        "rag_mode": active_mode,
         "dataset": clean_dataset,
         "total_cases": total_cases,
         "strict_hits": total_both_hits,
         "strict_hit_rate": strict_hit_rate,
+        "mean_recall_at_k": mean_recall,
         "document_hits": total_document_hits,
         "document_hit_rate": doc_rate,
         "section_hits": total_section_hits,
         "section_hit_rate": sec_rate,
-        "elapsed_time": elapsed_time,
-        "output_file": results_file
+        "elapsed_time": elapsed_time
     }
-    with open(stats_file, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
-    print(f"Statistics saved to {stats_file}")
+    output_payload = {
+        "stats": stats,
+        "results": combined_results
+    }
+    with open(mode_results_file, "w", encoding="utf-8") as f:
+        json.dump(output_payload, f, ensure_ascii=False, indent=2)
+    
+    print(f"Results and statistics saved to {mode_results_file}")
 
 
 if __name__ == "__main__":
@@ -720,6 +784,13 @@ if __name__ == "__main__":
         default=8,
         help="Number of concurrent worker threads for inference (default: 8)",
     )
+    parser.add_argument(
+        "--rag-mode",
+        type=str,
+        choices=["crag", "agentic"],
+        default=None,
+        help="RAG Pipeline Execution Mode: 'crag' (baseline single-pass) or 'agentic' (LangGraph self-correction)",
+    )
     
     args = parser.parse_args()
     
@@ -734,5 +805,6 @@ if __name__ == "__main__":
         build_graph=not args.no_build_graph,
         force_rebuild=args.force_rebuild,
         limit=args.limit,
-        workers=args.workers
+        workers=args.workers,
+        rag_mode=args.rag_mode
     )

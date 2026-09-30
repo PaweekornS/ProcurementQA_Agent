@@ -961,20 +961,21 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             top_candidates = reranker.rerank(
                 query_text,
                 rerank_pool,
-                top_k=top_k,
+                top_k=max(top_k * 2, 20),
                 threshold=reranker_thresh
             )
         else:
-            top_candidates = fused_candidates[:top_k]
+            top_candidates = fused_candidates[:max(top_k * 2, 20)]
     else:
         # Pure Retriever mode: bypass cross-encoder reranker completely
-        top_candidates = fused_candidates[:top_k]
+        top_candidates = fused_candidates[:max(top_k * 2, 20)]
 
     # 5. Graph Traversal & Context Augmentation
     cases = []
     laws = []
     seen_law_ids = set()
     seen_case_ids = set()
+    legal_relations = ['CITES', 'EMPOWERS', 'CITED_BY', 'EMPOWERED_BY', 'PREV_SECTION', 'NEXT_SECTION', 'RELATED_TO']
 
     for cand in top_candidates:
         node_id = cand.get('id')
@@ -982,7 +983,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
         data = cand.get('data', {})
 
         if node_type == 'Laws':
-            if node_id not in seen_law_ids:
+            if node_id not in seen_law_ids and len(laws) < top_k:
                 laws.append({
                     'id': node_id,
                     'entry': data.get('entry'),
@@ -995,25 +996,29 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                 })
                 seen_law_ids.add(node_id)
 
-            # Traverse to related Laws connected in Graph
-            neighbors = db.get_neighbors(node_id, 'RELATED_TO')
-            for n_id in neighbors:
-                if n_id not in seen_law_ids:
-                    n_data = db.get_node(n_id)
-                    if n_data:
-                        laws.append({
-                            'id': n_id,
-                            'entry': n_data.get('entry'),
-                            'description': n_data.get('description'),
-                            'crimes': n_data.get('crimes'),
-                            'judge_dep': n_data.get('judge_dep'),
-                            'related_laws': n_data.get('related_laws'),
-                            'insights': n_data.get('insights', '')
-                        })
-                        seen_law_ids.add(n_id)
+            # Traverse to related Laws connected in Graph (CITES, EMPOWERS, PREV/NEXT SECTION)
+            if len(laws) < top_k + 4:
+                connected_law_ids = []
+                for rel in legal_relations:
+                    connected_law_ids.extend(db.get_neighbors(node_id, rel))
+                for n_id in connected_law_ids[:2]:
+                    if n_id not in seen_law_ids and db.nodes_data.get(n_id, {}).get('type') == 'Laws':
+                        n_data = db.get_node(n_id)
+                        if n_data:
+                            laws.append({
+                                'id': n_id,
+                                'entry': n_data.get('entry'),
+                                'description': n_data.get('description'),
+                                'crimes': n_data.get('crimes'),
+                                'judge_dep': n_data.get('judge_dep'),
+                                'related_laws': n_data.get('related_laws'),
+                                'insights': n_data.get('insights', ''),
+                                'rerank_score': cand.get('rerank_score', 0.5) * 0.9
+                            })
+                            seen_law_ids.add(n_id)
 
         elif node_type == 'Cases':
-            if node_id not in seen_case_ids:
+            if node_id not in seen_case_ids and len(cases) < top_k:
                 cases.append({
                     'id': node_id,
                     'description': data.get('description', cand.get('description', '')),
@@ -1025,7 +1030,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             # Traverse from Case to Laws via RELATES_TO_LAW
             law_neighbors = db.get_neighbors(node_id, 'RELATES_TO_LAW')
             for law_id in law_neighbors:
-                if law_id not in seen_law_ids:
+                if law_id not in seen_law_ids and len(laws) < top_k + 4:
                     law_data = db.get_node(law_id)
                     if law_data:
                         laws.append({
@@ -1035,7 +1040,8 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                             'crimes': law_data.get('crimes'),
                             'judge_dep': law_data.get('judge_dep'),
                             'related_laws': law_data.get('related_laws'),
-                            'insights': law_data.get('insights', '')
+                            'insights': law_data.get('insights', ''),
+                            'rerank_score': cand.get('rerank_score', 0.5) * 0.85
                         })
                         seen_law_ids.add(law_id)
 
@@ -1352,3 +1358,7 @@ def construct_feature_graph(model, nodes_data):
 
     # Create hierarchical legal document clusters (grouped by file name, no KNN required)
     create_clusters(model)
+
+    # Link cross-statute, empowered, and inter-section citation edges
+    from core.graph_construct.citation_linker import LegalCitationLinker
+    LegalCitationLinker.link_citations(GraphDBManager.get_db())

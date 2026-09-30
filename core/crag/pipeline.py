@@ -111,6 +111,7 @@ class CRAGPipeline:
                         all_retrieved_facts.extend(sub_facts)
 
         candidate_laws = merge_and_dedup_laws(retrieved_law_batches)
+        raw_retrieved_laws = list(candidate_laws)
 
         # Handle NO_LAW_FOUND if initial retrieval is completely blank
         if not candidate_laws and not all_retrieved_facts:
@@ -250,6 +251,7 @@ class CRAGPipeline:
 
             if new_law_batches:
                 candidate_laws = merge_and_dedup_laws([candidate_laws] + new_law_batches)
+                raw_retrieved_laws = merge_and_dedup_laws([raw_retrieved_laws] + new_law_batches)
                 # Filter coarse multi-page raw chunk bundles (_p...) to protect context token budget
                 clean_candidates = [
                     l for l in candidate_laws
@@ -311,7 +313,8 @@ class CRAGPipeline:
             draft_answer.pop("legal_reasoning", None)
 
         item["judge_result"] = draft_answer
-        item["retrieved_laws"] = candidate_laws
+        item["retrieved_laws"] = raw_retrieved_laws
+        item["filtered_laws"] = candidate_laws
         item["retrieved_facts"] = all_retrieved_facts
         item["used_laws"] = law_used
         item["used_facts"] = fact_used
