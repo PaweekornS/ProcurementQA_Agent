@@ -24,7 +24,8 @@ _local_law_cache = None
 def _get_local_laws():
     global _local_law_cache
     if _local_law_cache is None:
-        path = "./datas/law_to_crime.json"
+        default_path = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
+        path = os.getenv("law_to_crime_path", default_path)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 _local_law_cache = json.load(f)

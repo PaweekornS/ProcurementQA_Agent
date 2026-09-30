@@ -360,7 +360,9 @@ def run_rag_triad_evaluation(
     output_report_file: Optional[str] = None,
     sample_limit: Optional[int] = None,
     use_llm_judge: bool = True,
-    workers: int = 5
+    workers: int = 5,
+    top_k: int = 5,
+    skip_no_law_found: bool = True
 ) -> Dict[str, Any]:
     """Runs end-to-end evaluation on output results JSON from run.py."""
     if not os.path.exists(results_file):
@@ -369,7 +371,12 @@ def run_rag_triad_evaluation(
         raise FileNotFoundError(f"Test cases file not found: {test_cases_file}")
 
     with open(results_file, "r", encoding="utf-8") as f:
-        pred_results = json.load(f)
+        raw_data = json.load(f)
+
+    if isinstance(raw_data, dict):
+        pred_results = raw_data.get("results", raw_data.get("cases", raw_data.get("data", [])))
+    else:
+        pred_results = raw_data
 
     with open(test_cases_file, "r", encoding="utf-8") as f:
         test_cases = json.load(f)
@@ -385,7 +392,7 @@ def run_rag_triad_evaluation(
     evaluator = GenerationEvaluator()
     items_to_eval = pred_results[:sample_limit] if sample_limit else pred_results
     total_count = len(items_to_eval)
-    print(f"[*] Starting RAG Triad Evaluation on {total_count} samples (Workers: {workers}, LLM Judge: {use_llm_judge})...")
+    print(f"[*] Starting RAG Triad Evaluation on {total_count} samples (Workers: {workers}, LLM Judge: {use_llm_judge}, Top-K: {top_k}, Skip NO_LAW_FOUND: {skip_no_law_found})...")
 
     def process_item(item_tuple: Tuple[int, Dict[str, Any]]) -> Dict[str, Any]:
         idx, pred = item_tuple
@@ -397,6 +404,17 @@ def run_rag_triad_evaluation(
         gt_answer = gt_case.get("ground_truth", "") or gt_case.get("answer", "")
         cand_answer = pred.get("pred_direct_answer", "") or pred.get("direct_answer", "") or pred.get("response", "")
 
+        pred_status = (
+            pred.get("status")
+            or pred.get("judge_result", {}).get("status")
+            or pred.get("pred_status", "")
+        )
+        is_no_law_found = (
+            pred_status == "NO_LAW_FOUND"
+            or "ไม่พบข้อกฎหมาย" in cand_answer
+            or "NO_LAW_FOUND" in cand_answer
+        )
+
         evidence = pred.get("analysis", {}).get("top_retrieved_evidence", [])
         evidence_entries = [e.get("law_entry", "") for e in evidence if isinstance(e, dict) and e.get("law_entry")]
         evidence_snippets = [e.get("snippet", "") for e in evidence if isinstance(e, dict) and e.get("snippet")]
@@ -407,6 +425,38 @@ def run_rag_triad_evaluation(
             or evidence_entries
             or pred.get("predicted_laws", [])
         )
+
+        # Expected pairs matching run.py
+        expected_pairs = pred.get("expected_pairs") or gt_case.get("expected_pairs", [])
+
+        # 1. Retrieval Layer Evaluation (Chunk Precision@K, Recall@K, Hit@K)
+        ret_metrics = compute_retrieval_metrics(
+            retrieved_items=evidence or retrieved_laws,
+            expected_pairs=expected_pairs,
+            ground_truth_sections=gt_sections,
+            k=top_k
+        )
+
+        # If NO_LAW_FOUND and skipping is enabled: skip LLM Judge & exclude from aggregate scoring
+        if is_no_law_found and skip_no_law_found:
+            return {
+                "sample_index": idx + 1,
+                "question": q_text,
+                "answer": cand_answer,
+                "status": "NO_LAW_FOUND",
+                "skipped": True,
+                "skip_reason": "NO_LAW_FOUND",
+                "retrieval": ret_metrics,
+                "generation": {
+                    "faithfulness": None,
+                    "completeness": None,
+                    "answer_relevancy": None,
+                    "citation_precision": 0.0,
+                    "citation_recall": 0.0,
+                    "citation_f1": 0.0,
+                    "rationale": "Skipped evaluation because system declared NO_LAW_FOUND"
+                }
+            }
 
         # Build rich, authentic statutory context for the Judge:
         # 1. Decisive quotes that the model retrieved and cited
@@ -426,17 +476,6 @@ def run_rag_triad_evaluation(
         if not judge_contexts:
             judge_contexts = retrieved_laws
 
-        # Expected pairs matching run.py
-        expected_pairs = pred.get("expected_pairs") or gt_case.get("expected_pairs", [])
-
-        # 1. Retrieval Layer Evaluation (Chunk Precision@5, Recall@5, Hit@5)
-        ret_metrics = compute_retrieval_metrics(
-            retrieved_items=evidence or retrieved_laws,
-            expected_pairs=expected_pairs,
-            ground_truth_sections=gt_sections,
-            k=5
-        )
-
         gen_metrics = evaluator.evaluate_sample(
             question=q_text,
             candidate_answer=cand_answer + "\n(ข้อกฎหมายที่อ้างอิง: " + ", ".join(pred.get("predicted_laws", [])) + ")",
@@ -446,12 +485,16 @@ def run_rag_triad_evaluation(
             use_llm_judge=use_llm_judge
         )
 
-        return {
+        sample_res = {
             "sample_index": idx + 1,
-            "question": q_text[:120],
+            "question": q_text,
+            "answer": cand_answer,
+            "status": pred_status or "ANSWERED",
+            "skipped": False,
             "retrieval": ret_metrics,
             "generation": gen_metrics
         }
+        return sample_res
 
     evaluated_samples = []
     item_tuples = list(enumerate(items_to_eval))
@@ -470,37 +513,47 @@ def run_rag_triad_evaluation(
             res = process_item(itm)
             evaluated_samples.append(res)
             idx = itm[0]
-            ret_metrics = res["retrieval"]
-            gen_metrics = res["generation"]
-            print(f"  [{idx+1}/{total_count}] Prec@5: {ret_metrics['precision_at_k']:.2f} | Recall@5: {ret_metrics['recall_at_k']:.2f} | Hit@5: {ret_metrics['hit_at_k']:.2f} | Faith: {gen_metrics['faithfulness']:.2f}")
+            if res.get("skipped"):
+                print(f"  [{idx+1}/{total_count}] [SKIPPED] NO_LAW_FOUND")
+            else:
+                ret_metrics = res["retrieval"]
+                gen_metrics = res["generation"]
+                print(f"  [{idx+1}/{total_count}] Prec@{top_k}: {ret_metrics['precision_at_k']:.2f} | Recall@{top_k}: {ret_metrics['recall_at_k']:.2f} | Hit@{top_k}: {ret_metrics['hit_at_k']:.2f} | Faith: {gen_metrics['faithfulness']:.2f}")
 
-    total_precision_k = [s["retrieval"]["precision_at_k"] for s in evaluated_samples]
-    total_adj_precision_k = [s["retrieval"]["adjusted_precision_at_k"] for s in evaluated_samples]
-    total_recall_k = [s["retrieval"]["recall_at_k"] for s in evaluated_samples]
-    total_hit_k = [s["retrieval"]["hit_at_k"] for s in evaluated_samples]
-    total_mrr_k = [s["retrieval"]["mrr_at_k"] for s in evaluated_samples]
-    total_faithfulness = [s["generation"]["faithfulness"] for s in evaluated_samples]
-    total_completeness = [s["generation"]["completeness"] for s in evaluated_samples]
-    total_relevancy = [s["generation"]["answer_relevancy"] for s in evaluated_samples]
-    total_citation_f1 = [s["generation"]["citation_f1"] for s in evaluated_samples]
+    # Split into valid (included in scoring) and skipped
+    valid_samples = [s for s in evaluated_samples if not s.get("skipped")]
+    skipped_count = len(evaluated_samples) - len(valid_samples)
+
+    total_precision_k = [s["retrieval"]["precision_at_k"] for s in valid_samples]
+    total_adj_precision_k = [s["retrieval"]["adjusted_precision_at_k"] for s in valid_samples]
+    total_recall_k = [s["retrieval"]["recall_at_k"] for s in valid_samples]
+    total_hit_k = [s["retrieval"]["hit_at_k"] for s in valid_samples]
+    total_mrr_k = [s["retrieval"]["mrr_at_k"] for s in valid_samples]
+    total_faithfulness = [s["generation"]["faithfulness"] for s in valid_samples if s["generation"].get("faithfulness") is not None]
+    total_completeness = [s["generation"]["completeness"] for s in valid_samples if s["generation"].get("completeness") is not None]
+    total_relevancy = [s["generation"]["answer_relevancy"] for s in valid_samples if s["generation"].get("answer_relevancy") is not None]
 
     def safe_avg(lst):
         return round(sum(lst) / len(lst), 4) if lst else 0.0
 
+    retrieval_summary = {
+        f"mean_hit_at_{top_k}": safe_avg(total_hit_k),
+        f"mean_mrr_at_{top_k}": safe_avg(total_mrr_k),
+        f"mean_adjusted_precision_at_{top_k}": safe_avg(total_adj_precision_k),
+        f"mean_precision_at_{top_k}": safe_avg(total_precision_k),
+        f"mean_recall_at_{top_k}": safe_avg(total_recall_k),
+        "evaluated_k": top_k
+    }
+
     summary_report = {
-        "total_evaluated": len(evaluated_samples),
-        "retrieval_layer": {
-            "mean_hit_at_5": safe_avg(total_hit_k),
-            "mean_mrr_at_5": safe_avg(total_mrr_k),
-            "mean_adjusted_precision_at_5": safe_avg(total_adj_precision_k),
-            "mean_precision_at_5": safe_avg(total_precision_k),
-            "mean_recall_at_5": safe_avg(total_recall_k),
-        },
+        "total_cases": total_count,
+        "evaluated_cases": len(valid_samples),
+        "skipped_no_law_found_cases": skipped_count,
+        "retrieval_layer": retrieval_summary,
         "generation_layer": {
             "mean_faithfulness": safe_avg(total_faithfulness),
             "mean_completeness": safe_avg(total_completeness),
             "mean_answer_relevancy": safe_avg(total_relevancy),
-            "mean_citation_f1": safe_avg(total_citation_f1),
         },
         "samples": evaluated_samples
     }
@@ -514,17 +567,18 @@ def run_rag_triad_evaluation(
     print("\n" + "=" * 60)
     print("🎯 RAG TRIAD & LEGAL EVALUATION SUMMARY REPORT")
     print("=" * 60)
-    print(f"1. RETRIEVAL LAYER (Top-5 Evidence Chunks):")
-    print(f"   - Strict Hit@5 (Success Rate):       {summary_report['retrieval_layer']['mean_hit_at_5'] * 100:.2f}%")
-    print(f"   - MRR@5 (Mean Reciprocal Rank):     {summary_report['retrieval_layer']['mean_mrr_at_5'] * 100:.2f}%")
-    print(f"   - Adjusted Precision@5 (vs GT size): {summary_report['retrieval_layer']['mean_adjusted_precision_at_5'] * 100:.2f}%")
-    print(f"   - Fixed Precision@5 (Raw / K=5):     {summary_report['retrieval_layer']['mean_precision_at_5'] * 100:.2f}%")
-    print(f"   - Ground Truth Recall@5:             {summary_report['retrieval_layer']['mean_recall_at_5'] * 100:.2f}%")
+    print(f"📊 Evaluated: {len(valid_samples)}/{total_count} cases | Skipped (NO_LAW_FOUND): {skipped_count}")
+    print("-" * 60)
+    print(f"1. RETRIEVAL LAYER (Top-{top_k} Evidence Chunks):")
+    print(f"   - Strict Hit@{top_k} (Success Rate):       {summary_report['retrieval_layer'][f'mean_hit_at_{top_k}'] * 100:.2f}%")
+    print(f"   - MRR@{top_k} (Mean Reciprocal Rank):     {summary_report['retrieval_layer'][f'mean_mrr_at_{top_k}'] * 100:.2f}%")
+    print(f"   - Adjusted Precision@{top_k} (vs GT size): {summary_report['retrieval_layer'][f'mean_adjusted_precision_at_{top_k}'] * 100:.2f}%")
+    print(f"   - Fixed Precision@{top_k} (Raw / K={top_k}):     {summary_report['retrieval_layer'][f'mean_precision_at_{top_k}'] * 100:.2f}%")
+    print(f"   - Ground Truth Recall@{top_k}:             {summary_report['retrieval_layer'][f'mean_recall_at_{top_k}'] * 100:.2f}%")
     print(f"2. GENERATION LAYER:")
-    print(f"   - Faithfulness (Ground):              {summary_report['generation_layer']['mean_faithfulness'] * 100:.2f}%")
+    print(f"   - Faithfulness (Grounding):           {summary_report['generation_layer']['mean_faithfulness'] * 100:.2f}%")
     print(f"   - Completeness:                      {summary_report['generation_layer']['mean_completeness'] * 100:.2f}%")
     print(f"   - Answer Relevancy:                  {summary_report['generation_layer']['mean_answer_relevancy'] * 100:.2f}%")
-    print(f"   - Citation F1:                       {summary_report['generation_layer']['mean_citation_f1'] * 100:.2f}%")
     print("=" * 60)
 
     return summary_report
@@ -532,24 +586,77 @@ def run_rag_triad_evaluation(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate RAG Triad: Retrieval & Generation Layers")
-    parser.add_argument("--results", default="./outputs/THAI/openrouter_results.json", help="Path to predictions JSON from run.py")
+    parser.add_argument("results_pos", nargs="?", default=None, help="Optional positional path to predictions JSON from run.py")
+    parser.add_argument("--results", default=None, help="Path to predictions JSON from run.py")
     parser.add_argument("--datasets", default="./datasets/crime_data_THAI_small.json", help="Path to ground truth dataset JSON")
-    parser.add_argument("--output", default=None, help="Output path for evaluation report (defaults to outputs/<dataset>/rag_triad_eval_report.json)")
+    parser.add_argument("--output", default=None, help="Output path for evaluation report (defaults to outputs/<dataset>/<mode>_rag_triad_report.json)")
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit for quick smoke test")
     parser.add_argument("--workers", type=int, default=8, help="Number of concurrent workers for LLM Judge evaluation")
     parser.add_argument("--no-llm-judge", action="store_true", help="Skip LLM Judge and run deterministic evaluation only")
+    parser.add_argument("--k", "-k", type=int, default=5, help="Number of evidence chunks to evaluate (default: 5)")
+    parser.add_argument("--include-no-law-found", action="store_true", help="Include NO_LAW_FOUND cases in average score calculations (default is to skip them)")
     args = parser.parse_args()
+
+    # 1. Resolve results_file safely
+    results_file = args.results_pos or args.results
+
+    # Safeguard: if user accidentally passed a results JSON file to --output without --results, redirect it as input
+    if args.output and ("_results.json" in args.output) and not results_file:
+        print(f"[*] Detected results file passed as --output: {args.output}. Using it as input --results.")
+        results_file = args.output
+        args.output = None
+
+    if not results_file or not os.path.exists(results_file):
+        candidates = [
+            "./outputs/THAI/crag_results.json",
+            "./outputs/THAI/agentic_results.json",
+            "./outputs/THAI/openrouter_crag_results.json",
+            "./outputs/THAI/openrouter_agentic_results.json",
+            "./outputs/crag_results.json",
+            "./outputs/agentic_results.json",
+            "./outputs/THAI/openrouter_results.json",
+            "./outputs/openrouter_crag_results.json",
+            "./outputs/openrouter_results.json"
+        ]
+        for cand in candidates:
+            if os.path.exists(cand):
+                results_file = cand
+                print(f"[*] Auto-detected results file: {results_file}")
+                break
+
+    if not results_file or not os.path.exists(results_file):
+        raise FileNotFoundError(f"Predictions results file not found: {args.results or args.results_pos}")
+
+    # 2. Resolve output_report_file safely (crag_triad_report.json / agentic_triad_report.json)
+    base_name = os.path.basename(results_file).lower()
+    results_dir = os.path.dirname(os.path.abspath(results_file))
+    
+    if "crag" in base_name:
+        default_report_name = "crag_triad_report.json"
+    elif "agentic" in base_name:
+        default_report_name = "agentic_triad_report.json"
+    else:
+        stem = re.sub(r"(_results|\.json)$", "", base_name, flags=re.IGNORECASE)
+        stem = re.sub(r"^(openrouter_|openai_|gemini_)", "", stem, flags=re.IGNORECASE)
+        default_report_name = f"{stem}_triad_report.json"
 
     output_report_file = args.output
     if not output_report_file:
-        results_dir = os.path.dirname(os.path.abspath(args.results))
-        output_report_file = os.path.join(results_dir, "rag_triad_eval_report.json")
+        output_report_file = os.path.join(results_dir, default_report_name)
+    else:
+        # Crucial safeguard: Never overwrite input results file
+        if os.path.abspath(output_report_file) == os.path.abspath(results_file):
+            print(f"[!] Warning: Specified --output matches input --results ({output_report_file}).")
+            output_report_file = os.path.join(results_dir, default_report_name)
+            print(f"[*] Diverted output to prevent data loss: {output_report_file}")
 
     run_rag_triad_evaluation(
-        results_file=args.results,
+        results_file=results_file,
         test_cases_file=args.datasets,
         output_report_file=output_report_file,
         sample_limit=args.limit,
         use_llm_judge=not args.no_llm_judge,
-        workers=args.workers
+        workers=args.workers,
+        top_k=args.k,
+        skip_no_law_found=not args.include_no_law_found
     )

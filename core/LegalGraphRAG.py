@@ -17,7 +17,7 @@ class ModelConfig:
     """Model configuration"""
     model_name: str = "openrouter"
     device: str = "cuda:0"
-    prompt_language: str = "en"
+    prompt_language: str = "th"
     # OpenAI-type model configuration
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -52,7 +52,7 @@ class ModelConfig:
 class DataConfig:
     """Data path configuration"""
     case_db_path: str = "./datas/cases_with_feature.json"
-    law_to_crime_path: str = "./datas/law_to_crime.json"
+    law_to_crime_path: str = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
     datasets_path: Optional[str] = None  # Dataset root directory
     output_dir: str = "./outputs"
     
@@ -116,6 +116,8 @@ class LegalGraphRAGConfig:
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     crag: CRAGConfig = field(default_factory=CRAGConfig)
+    rag_mode: str = "crag"  # "crag" or "agentic"
+    agentic_max_retries: int = 2
     
     @classmethod
     def from_env_file(cls, dotenv_path: str = None) -> "LegalGraphRAGConfig":
@@ -168,7 +170,7 @@ class LegalGraphRAGConfig:
         
         # Data configuration
         default_case_db = "./datas/cases_with_feature.json"
-        default_law_to_crime = "./datas/law_to_crime.json"
+        default_law_to_crime = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
         data_config = DataConfig(
             case_db_path=os.getenv("case_db_path", default_case_db),
             law_to_crime_path=os.getenv("law_to_crime_path", default_law_to_crime),
@@ -177,12 +179,17 @@ class LegalGraphRAGConfig:
         )
         
         # Retrieval configuration
+        def _parse_bool(val: Optional[str], default: bool) -> bool:
+            if val is None:
+                return default
+            return str(val).strip().lower() in ("true", "1", "yes")
+
         retrieve_config = RetrieveConfig(
-            top_retrieve=os.getenv("top_retrieve", "True") == "True",
-            direct_retrieve=os.getenv("direct_retrieve", "True") == "True",
-            augment_retrieve=os.getenv("augment_retrieve", "True") == "True",
+            top_retrieve=_parse_bool(os.getenv("top_retrieve"), False),
+            direct_retrieve=_parse_bool(os.getenv("direct_retrieve"), True),
+            augment_retrieve=_parse_bool(os.getenv("augment_retrieve"), True),
             top_retrieve_top_k=int(os.getenv("top_retrieve_top_k", 3)),
-            direct_retrieve_top_k=int(os.getenv("direct_retrieve_top_k", 5))
+            direct_retrieve_top_k=int(os.getenv("direct_retrieve_top_k", 10))
         )
         
         # Graph configuration
@@ -194,8 +201,8 @@ class LegalGraphRAGConfig:
             tokenmind_api_key=os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key"),
             tokenmind_base_url=os.getenv("TOKENMIND_BASE_URL") or os.getenv("tokenmind_base_url", "https://tokenmind.abdul.in.th/v1"),
             tokenmind_embedding_model=os.getenv("TOKENMIND_EMBEDDING_MODEL") or os.getenv("tokenmind_embedding_model", "BAAI/bge-m3"),
-            auto_save=os.getenv("auto_save", "True") == "True",
-            auto_build=os.getenv("auto_build", "True") == "True"
+            auto_save=_parse_bool(os.getenv("auto_save"), True),
+            auto_build=_parse_bool(os.getenv("auto_build"), True)
         )
         
         # CRAG configuration
@@ -203,13 +210,19 @@ class LegalGraphRAGConfig:
             enabled=os.getenv("crag_enabled", "True").lower() in ("true", "1", "yes"),
             max_retry=int(os.getenv("crag_max_retry", 1))
         )
+
+        # RAG mode configuration
+        rag_mode = os.getenv("RAG_MODE", "crag").lower()
+        agentic_max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", 2))
         
         return cls(
             model=model_config,
             data=data_config,
             retrieve=retrieve_config,
             graph=graph_config,
-            crag=crag_config
+            crag=crag_config,
+            rag_mode=rag_mode,
+            agentic_max_retries=agentic_max_retries
         )
     
     @classmethod
@@ -228,13 +241,17 @@ class LegalGraphRAGConfig:
         retrieve_config = RetrieveConfig(**config_dict.get("retrieve", {}))
         graph_config = GraphConfig(**config_dict.get("graph", {}))
         crag_config = CRAGConfig(**config_dict.get("crag", {}))
+        rag_mode = config_dict.get("rag_mode", "crag")
+        agentic_max_retries = int(config_dict.get("agentic_max_retries", 2))
         
         return cls(
             model=model_config,
             data=data_config,
             retrieve=retrieve_config,
             graph=graph_config,
-            crag=crag_config
+            crag=crag_config,
+            rag_mode=rag_mode,
+            agentic_max_retries=agentic_max_retries
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -267,7 +284,9 @@ class LegalGraphRAGConfig:
                 "auto_save": self.graph.auto_save,
                 "auto_build": self.graph.auto_build
             },
-            "crag": self.crag.to_dict()
+            "crag": self.crag.to_dict(),
+            "rag_mode": self.rag_mode,
+            "agentic_max_retries": self.agentic_max_retries
         }
     
     def save(self, filepath: str):
@@ -417,26 +436,22 @@ class LegalGraphRAG:
         retrieve_config = self.config.retrieve.to_dict()
         crag_config = self.config.crag.to_dict() if hasattr(self.config, "crag") else {"enabled": True, "max_retry": 1}
 
-        # Check if LangGraph Agentic RAG is explicitly enabled (default: false for benchmark stability)
-        use_agentic = os.getenv("USE_AGENTIC_RAG", "false").lower() in ("true", "1", "yes")
-        if use_agentic:
+        # Check if LangGraph Agentic RAG is enabled (via config or env)
+        is_agentic = (
+            getattr(self.config, "rag_mode", "crag") == "agentic"
+            or os.getenv("RAG_MODE", "").lower() == "agentic"
+            or os.getenv("USE_AGENTIC_RAG", "false").lower() in ("true", "1", "yes")
+        )
+        if is_agentic:
             try:
-                from core.agent import AgenticLegalGraphRAG
-                agent = AgenticLegalGraphRAG(model_client=self.model)
-                query_text = case.get("fact") or case.get("description") or case.get("question", "")
-                org_id = case.get("org_id", os.getenv("DEFAULT_ORG_ID", "DGA"))
-                mode = case.get("mode", "deep")
-                agent_res = agent.invoke(query=query_text, org_id=org_id, mode=mode)
-                used_laws = agent_res.get("retrieved_context", [])
-                return [{
-                    "name": case.get("name", "ผู้สอบถาม"),
-                    "description": query_text,
-                    "judge_result": agent_res,
-                    "retrieved_laws": used_laws,
-                    "retrieved_facts": [],
-                    "used_laws": used_laws,
-                    "used_facts": []
-                }]
+                from core.agent import ProcurementAgenticWorkflow
+                workflow = ProcurementAgenticWorkflow(
+                    self.model,
+                    retrieve_config=retrieve_config,
+                    max_retries=getattr(self.config, "agentic_max_retries", 2)
+                )
+                agent_res = workflow.invoke(case)
+                return [agent_res]
             except Exception as e:
                 import logging
                 logging.getLogger("LegalGraphRAG").warning(f"Agentic RAG fallback to CRAG: {e}")

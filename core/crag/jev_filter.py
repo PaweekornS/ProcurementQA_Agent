@@ -49,7 +49,7 @@ class JevChunkFilter:
             return 0.5
 
         entry = str(chunk.get("law_entry", chunk.get("entry", "")))
-        snippet = str(chunk.get("snippet", chunk.get("content_thai", chunk.get("text", ""))))
+        snippet = str(chunk.get("description", chunk.get("text", chunk.get("snippet", chunk.get("content_thai", "")))))
         state_text = f"Inquiry: {question}\n\nCandidate Statutory Text: {entry} {snippet}"
 
         payload = {
@@ -129,6 +129,6 @@ class JevChunkFilter:
             kept_chunks = scored_chunks[:min_keep]
 
         dt = time.time() - t0
-        print(f"[JevGatekeeper] Filtered {len(chunks_to_eval)} -> {len(kept_chunks)} chunks in {dt:.2f}s (Threshold: {self.threshold})")
+        # print(f"[JevGatekeeper] Filtered {len(chunks_to_eval)} -> {len(kept_chunks)} chunks in {dt:.2f}s (Threshold: {self.threshold})")
 
         return kept_chunks[:max_keep]
