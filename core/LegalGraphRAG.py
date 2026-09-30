@@ -342,10 +342,7 @@ class LegalGraphRAG:
     
     def _init_model(self) -> BaseModel:
         """Initialize model"""
-        from core.models import (
-            QwenChatbot, Qwen2Chatbot, GemmaChatbot, InternlmChatbot,
-            GlmChatbot, DeepSeekChatbot, GPT4OMiniChatbot, OpenRouterChatbot
-        )
+        from core.models import DeepSeekChatbot, GPT4OMiniChatbot, OpenRouterChatbot
         
         # Check if OpenRouter model
         is_openrouter = (
@@ -353,9 +350,7 @@ class LegalGraphRAG:
             or "/" in self.config.model.model_name
             or self.config.model.model_name.startswith("openrouter:")
             or (self.config.model.base_url and "openrouter" in self.config.model.base_url)
-        ) and self.config.model.model_name not in [
-            "qwen3", "qwen2_5", "gemma3", "internlm3", "glm4", "deepseek_v3", "gpt4o_mini"
-        ]
+        ) and self.config.model.model_name not in ["deepseek_v3", "gpt4o_mini"]
 
         if is_openrouter or self.config.model.model_name == "openrouter":
             actual_model = self.config.model.model_name
@@ -372,11 +367,6 @@ class LegalGraphRAG:
 
         model_map = {
             "openrouter": OpenRouterChatbot,
-            "qwen3": QwenChatbot,
-            "qwen2_5": Qwen2Chatbot,
-            "gemma3": GemmaChatbot,
-            "internlm3": InternlmChatbot,
-            "glm4": GlmChatbot,
             "deepseek_v3": DeepSeekChatbot,
             "gpt4o_mini": GPT4OMiniChatbot,
         }
