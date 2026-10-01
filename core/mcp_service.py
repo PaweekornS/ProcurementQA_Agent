@@ -517,9 +517,9 @@ class ProcurementService:
 
     def ask_procurement_law(self, question: str, mode: str = "deep", org_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Execute CRAG synthesis pipeline.
-        mode="deep": full CRAG with Issue Decomposer, Synthesizer, Auditor, Refiner Retry.
-        mode="fast": single-pass hybrid retrieval + Synthesizer without auditor retry loop.
+        Execute LangGraph Agentic RAG legal analysis workflow.
+        mode="deep": full Agentic RAG with Adaptive Query Rewriting & Guardrail (max_retries=2).
+        mode="fast": single-pass Agentic RAG without retry loops (max_retries=0).
         Filtered by tenant org_id.
         """
         if not question or not question.strip():
@@ -529,82 +529,35 @@ class ProcurementService:
                 "decisive_quotes": [],
                 "applicable_laws": [],
                 "exceptions_or_conditions": "",
-                "citations": [],
-                "crag_meta": {},
+                "issues_breakdown": [],
                 "error": "`question` must be a non-empty string."
             }
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org, "mode": mode}
 
-        # Direct path to LangGraph Agentic RAG if enabled
-        use_agentic = os.getenv("USE_AGENTIC_RAG", "true").lower() in ("true", "1", "yes")
-        if use_agentic:
-            try:
-                from core.agent import AgenticLegalGraphRAG
-                agent = AgenticLegalGraphRAG(model_client=self.rag.model)
-                result = agent.invoke(query=question.strip(), org_id=active_org, mode=mode)
-                if result:
-                    return {
-                        "status": result.get("status", "SUCCESS"),
-                        "mode": mode,
-                        "direct_answer": result.get("direct_answer", ""),
-                        "decisive_quotes": result.get("decisive_quotes", []),
-                        "applicable_laws": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
-                        "exceptions_or_conditions": result.get("disclaimer", ""),
-                        "citations": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
-                        "crag_meta": {
-                            "grounding_score": result.get("grounding_score", 1.0),
-                            "guardrail_warnings": result.get("guardrail_warnings", [])
-                        },
-                        "organization_id": active_org,
-                        "disclaimer": result.get("disclaimer", "")
-                    }
-            except Exception as e:
-                import logging
-                logging.getLogger("ProcurementService").warning(f"LangGraph Agent invocation fallback: {e}")
+        from core.agent import ProcurementAgenticWorkflow
+        retrieve_config = self.rag.config.retrieve.to_dict()
+        workflow = ProcurementAgenticWorkflow(
+            self.rag.model,
+            retrieve_config=retrieve_config,
+            max_retries=0 if mode == "fast" else 2
+        )
+        agent_res = workflow.invoke(case)
+        judge = agent_res.get("judge_result", {})
+        used_laws = agent_res.get("used_laws", [])
 
-        # Fallback to legacy CRAG
-        original_retry = getattr(self.rag.config.crag, "max_retry", 1)
-        original_enabled = getattr(self.rag.config.crag, "enabled", True)
-
-        try:
-            if mode == "fast":
-                self.rag.config.crag.max_retry = 0
-            else:
-                self.rag.config.crag.max_retry = max(1, original_retry)
-
-            results: List[Dict[str, Any]] = self.rag.analyze_case(case)
-        finally:
-            self.rag.config.crag.max_retry = original_retry
-            self.rag.config.crag.enabled = original_enabled
-
-        if not results:
-            return {
-                "status": "ERROR",
-                "direct_answer": "",
-                "decisive_quotes": [],
-                "applicable_laws": [],
-                "exceptions_or_conditions": "",
-                "citations": [],
-                "crag_meta": {},
-                "error": "Pipeline returned no results."
-            }
-
-        item = results[0]
-        judge_result = item.get("judge_result", {}) or {}
-        used_laws = item.get("used_laws", []) or []
-
-        raw_quotes = judge_result.get("decisive_quotes") or judge_result.get("decisive_quote") or []
+        raw_quotes = judge.get("decisive_quotes", [])
         enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws)
 
         return {
-            "status": judge_result.get("status", "OK"),
+            "status": judge.get("status", "COMPLIANT"),
             "mode": mode,
-            "direct_answer": judge_result.get("direct_answer", ""),
+            "direct_answer": judge.get("direct_answer", ""),
             "decisive_quotes": enriched_quotes,
-            "applicable_laws": judge_result.get("applicable_laws", []),
-            "exceptions_or_conditions": judge_result.get("exceptions_or_conditions", ""),
+            "applicable_laws": judge.get("applicable_laws", []),
+            "exceptions_or_conditions": judge.get("exceptions_or_conditions", ""),
+            "issues_breakdown": judge.get("issues_breakdown", []),
             "citations": [
                 {
                     "entry": law.get("entry", ""),
@@ -612,7 +565,9 @@ class ProcurementService:
                 }
                 for law in used_laws
             ],
-            "crag_meta": item.get("crag_meta", {})
+            "crag_meta": agent_res.get("crag_meta", {}),
+            "guardrail_verdict": judge.get("guardrail_verdict", {}),
+            "organization_id": active_org
         }
 
     def _enrich_decisive_quotes(

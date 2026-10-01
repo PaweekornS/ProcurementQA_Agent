@@ -536,9 +536,13 @@ async def route_api_qa(request: Request) -> Response:
 
         quotes = result.get("decisive_quotes") or []
         clean_result = {
+            "status": result.get("status", "COMPLIANT"),
             "mode": result.get("mode", mode),
             "direct_answer": result.get("direct_answer", ""),
+            "applicable_laws": result.get("applicable_laws", []),
             "decisive_quotes": quotes,
+            "issues_breakdown": result.get("issues_breakdown", []),
+            "exceptions_or_conditions": result.get("exceptions_or_conditions", ""),
             "organization_id": org_id,
         }
         return JSONResponse(clean_result)

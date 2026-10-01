@@ -384,12 +384,11 @@ def run_evaluation(
     force_rebuild: bool = False,
     limit: Optional[int] = None,
     workers: int = 4,
-    rag_mode: Optional[str] = None
+    rag_mode: str = "agentic"
 ):
     config = LegalGraphRAGConfig.from_env_file(dotenv_path)
-    if rag_mode:
-        config.rag_mode = rag_mode.lower()
-        os.environ["RAG_MODE"] = rag_mode.lower()
+    config.rag_mode = (rag_mode or "agentic").lower()
+    os.environ["RAG_MODE"] = config.rag_mode
     clean_dataset = sanitize_dataset_name(datasets)
     output_dir = os.path.join(config.data.output_dir, clean_dataset)
     os.makedirs(output_dir, exist_ok=True)
@@ -789,9 +788,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rag-mode",
         type=str,
-        choices=["crag", "agentic"],
-        default=None,
-        help="RAG Pipeline Execution Mode: 'crag' (baseline single-pass) or 'agentic' (LangGraph self-correction)",
+        choices=["agentic", "crag"],
+        default="agentic",
+        help="RAG Pipeline Execution Mode (default: 'agentic' - LangGraph self-reflective Agentic RAG)",
     )
     
     args = parser.parse_args()

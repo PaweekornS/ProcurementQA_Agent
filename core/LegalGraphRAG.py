@@ -8,7 +8,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 from core.models import BaseModel
-from core.utils.util import analyze_case
 from core.graph_construct.graph_db import GraphDBManager
 
 
@@ -115,8 +114,8 @@ class LegalGraphRAGConfig:
     data: DataConfig = field(default_factory=DataConfig)
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
-    crag: CRAGConfig = field(default_factory=CRAGConfig)
-    rag_mode: str = "crag"  # "crag" or "agentic"
+    crag: Optional[CRAGConfig] = field(default_factory=CRAGConfig)
+    rag_mode: str = "agentic"  # Pure Agentic RAG
     agentic_max_retries: int = 2
     
     @classmethod
@@ -425,7 +424,7 @@ class LegalGraphRAG:
     
     def analyze_case(self, case: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Analyze a single case
+        Analyze a single case using compiled LangGraph Agentic RAG workflow.
         
         Args:
             case: Case dictionary containing "fact" and "name" fields
@@ -434,36 +433,14 @@ class LegalGraphRAG:
             List of analysis results, each element corresponds to a defendant's analysis result
         """
         retrieve_config = self.config.retrieve.to_dict()
-        crag_config = self.config.crag.to_dict() if hasattr(self.config, "crag") else {"enabled": True, "max_retry": 1}
-
-        # Check if LangGraph Agentic RAG is enabled (via config or env)
-        is_agentic = (
-            getattr(self.config, "rag_mode", "crag") == "agentic"
-            or os.getenv("RAG_MODE", "").lower() == "agentic"
-            or os.getenv("USE_AGENTIC_RAG", "false").lower() in ("true", "1", "yes")
-        )
-        if is_agentic:
-            try:
-                from core.agent import ProcurementAgenticWorkflow
-                workflow = ProcurementAgenticWorkflow(
-                    self.model,
-                    retrieve_config=retrieve_config,
-                    max_retries=getattr(self.config, "agentic_max_retries", 2)
-                )
-                agent_res = workflow.invoke(case)
-                return [agent_res]
-            except Exception as e:
-                import logging
-                logging.getLogger("LegalGraphRAG").warning(f"Agentic RAG fallback to CRAG: {e}")
-
-        return analyze_case(
+        from core.agent import ProcurementAgenticWorkflow
+        workflow = ProcurementAgenticWorkflow(
             self.model,
-            case,
-            self.law_to_crime,
-            self.cases_db,
-            retrieve_config,
-            crag_config=crag_config
+            retrieve_config=retrieve_config,
+            max_retries=getattr(self.config, "agentic_max_retries", 2)
         )
+        agent_res = workflow.invoke(case)
+        return [agent_res]
     
     def analyze_cases(self, cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
