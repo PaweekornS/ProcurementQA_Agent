@@ -151,7 +151,7 @@ def match_doc_and_section(expected_file: str, expected_section: str, candidate: 
     return match_document(expected_file, candidate)
 
 
-def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 10, snippet_len: int = 250) -> Dict[str, Any]:
+def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 20, snippet_len: int = 250) -> Dict[str, Any]:
     """
     Extracts high-value diagnostic features and top retrieval evidence with clean snippets.
     Omits bloated multi-page raw law text dumps.
@@ -547,6 +547,7 @@ def run_evaluation(
                 pred_quotes = judge_result.get("decisive_quotes", [])
                 pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
                 exceptions = judge_result.get("exceptions_or_conditions", "")
+                pred_issues_breakdown = judge_result.get("issues_breakdown", case_res[0].get("issues_breakdown", []))
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
@@ -647,6 +648,7 @@ def run_evaluation(
                 "ground_truth": ground_truth,
                 "expected_pairs": expected_pairs,
                 "predicted_laws": pred_laws,
+                "issues_breakdown": pred_issues_breakdown,
                 "is_section_hit": is_section_hit,
                 "is_document_hit": is_document_hit,
                 "is_both_hit": is_both_hit,

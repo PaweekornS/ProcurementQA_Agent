@@ -156,12 +156,21 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
         parsed["applicable_laws"] = []
         parsed["law_article"] = []
         parsed["exceptions_or_conditions"] = ""
+        parsed["issues_breakdown"] = [{
+            "issue_id": "Q1",
+            "topic": "ประเด็นข้อหารือ",
+            "status": "NO_LAW_FOUND",
+            "answer": FALLBACK_NO_LAW_ANSWER,
+            "missing_aspect": "ไม่พบข้อกฎหมายที่ตรงกับประเด็นข้อหารือ"
+        }]
         parsed.pop("legal_reasoning", None)
         return parsed
 
-    # Normalize state for compliant/violation cases
-    if raw_status in ["COMPLIANT", "VIOLATION"]:
+    # Normalize state for compliant/violation/partially_resolved cases
+    if raw_status in ["COMPLIANT", "VIOLATION", "PARTIALLY_RESOLVED"]:
         parsed["status"] = raw_status
+    elif "PARTIAL" in raw_status or "บางส่วน" in raw_status:
+        parsed["status"] = "PARTIALLY_RESOLVED"
     elif "VIOLATION" in raw_status or "ฝ่าฝืน" in raw_status or "ผิด" in raw_status:
         parsed["status"] = "VIOLATION"
     else:
@@ -201,6 +210,36 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
 
     if "exceptions_or_conditions" not in parsed:
         parsed["exceptions_or_conditions"] = ""
+
+    # Normalize issues_breakdown for Multi-Agent Super-Orchestrator
+    raw_breakdown = parsed.get("issues_breakdown", [])
+    issues_breakdown = []
+    if isinstance(raw_breakdown, list):
+        for idx, item in enumerate(raw_breakdown, start=1):
+            if isinstance(item, dict):
+                iid = item.get("issue_id") or f"Q{idx}"
+                topic = str(item.get("topic", "")).strip() or f"ประเด็นที่ {idx}"
+                sub_status = str(item.get("status", "RESOLVED")).strip().upper()
+                ans = str(item.get("answer", "")).strip()
+                missing = str(item.get("missing_aspect", "")).strip()
+                issues_breakdown.append({
+                    "issue_id": str(iid),
+                    "topic": topic,
+                    "status": sub_status,
+                    "answer": ans,
+                    "missing_aspect": missing
+                })
+
+    if not issues_breakdown:
+        issues_breakdown = [{
+            "issue_id": "Q1",
+            "topic": "ประเด็นข้อหารือหลัก",
+            "status": "RESOLVED" if parsed["status"] in ["COMPLIANT", "VIOLATION"] else parsed["status"],
+            "answer": parsed.get("direct_answer", ""),
+            "missing_aspect": "" if parsed["status"] in ["COMPLIANT", "VIOLATION"] else "ข้อกฎหมายที่ตรงกับประเด็นข้อหารือ"
+        }]
+
+    parsed["issues_breakdown"] = issues_breakdown
 
     # Map backwards for legacy consumers
     parsed["law_article"] = parsed["applicable_laws"]
