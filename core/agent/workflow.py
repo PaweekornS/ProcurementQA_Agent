@@ -20,7 +20,6 @@ from core.utils.agent_logger import AgentTraceLogger
 from core.crag.classifier import IssueDecomposer
 from core.crag.synthesizer import LegalSynthesizer
 from core.crag.refiner import QueryRefiner
-from core.crag.jev_filter import JevChunkFilter
 from core.graph_construct.feature_graph import query_similar_nodes
 from core.utils.util import concat_feature_descriptions
 
@@ -58,7 +57,6 @@ class ProcurementAgenticWorkflow:
         self.classifier = IssueDecomposer(model)
         self.synthesizer = LegalSynthesizer(model)
         self.refiner = QueryRefiner(model)
-        self.jev_filter = JevChunkFilter()
         self.logger = AgentTraceLogger.get_instance()
         self.app = self._build_graph()
 
@@ -68,7 +66,6 @@ class ProcurementAgenticWorkflow:
         # Add Nodes
         workflow.add_node("analyze_query", self._node_analyze_query)
         workflow.add_node("retrieve_and_rerank", self._node_retrieve_and_rerank)
-        workflow.add_node("jev_gatekeeper", self._node_jev_gatekeeper)
         workflow.add_node("rewrite_query", self._node_rewrite_query)
         workflow.add_node("generate_answer", self._node_generate_answer)
         workflow.add_node("guardrail", self._node_guardrail)
@@ -76,12 +73,11 @@ class ProcurementAgenticWorkflow:
         # Add Edges
         workflow.add_edge(START, "analyze_query")
         workflow.add_edge("analyze_query", "retrieve_and_rerank")
-        workflow.add_edge("retrieve_and_rerank", "jev_gatekeeper")
 
-        # Conditional Edge after Jev Gatekeeper
+        # Route after retrieval: if no candidates found, trigger rewrite
         workflow.add_conditional_edges(
-            "jev_gatekeeper",
-            self._should_rewrite,
+            "retrieve_and_rerank",
+            self._after_retrieval_route,
             {
                 "rewrite": "rewrite_query",
                 "generate": "generate_answer"
@@ -102,9 +98,9 @@ class ProcurementAgenticWorkflow:
 
         return workflow.compile()
 
-    def _should_rewrite(self, state: AgenticRAGState) -> str:
-        """Route to rewrite_query if no chunks passed gatekeeper and retries remain."""
-        if state.get("needs_rewrite", False) and state.get("retry_count", 0) < state.get("max_retries", self.max_retries):
+    def _after_retrieval_route(self, state: AgenticRAGState) -> str:
+        """Route to rewrite_query if no candidates were found and retries remain."""
+        if not state.get("retrieved_candidates") and state.get("retry_count", 0) < state.get("max_retries", self.max_retries):
             return "rewrite"
         return "generate"
 
@@ -141,10 +137,15 @@ class ProcurementAgenticWorkflow:
             "features": features
         }
 
+        tools = list(state.get("tools_used", []))
+        if "Decomposer" not in tools:
+            tools.append("Decomposer")
+
         return {
             "features": features,
             "issues": issues,
             "current_query": raw_query,
+            "tools_used": tools,
             "trace_events": state.get("trace_events", []) + [trace_event]
         }
 
@@ -227,58 +228,18 @@ class ProcurementAgenticWorkflow:
             "top_candidates": [c.get("entry", "") for c in all_candidates[:5]]
         }
 
+        tools = list(state.get("tools_used", []))
+        if "Hybrid" not in tools:
+            tools.append("Hybrid")
+        if graph_results and "Graph" not in tools:
+            tools.append("Graph")
+
         return {
             "retrieved_candidates": all_candidates,
+            "tools_used": tools,
             "trace_events": state.get("trace_events", []) + [trace_event]
         }
 
-    def _node_jev_gatekeeper(self, state: AgenticRAGState) -> Dict[str, Any]:
-        case_id = state.get("case_id", 0)
-        raw_query = state.get("raw_query", "")
-        candidates = state.get("retrieved_candidates", [])
-
-        use_jev = os.getenv("USE_JEV_FILTER", "false").lower() in ("true", "1", "yes")
-
-        if use_jev and self.jev_filter.enabled and candidates:
-            passed = self.jev_filter.filter_chunks(
-                question=raw_query,
-                candidate_laws=candidates,
-                max_keep=10,
-                min_keep=0  # Allow 0 to trigger self-reflective rewrite
-            )
-            passed_ids = {p.get("id") or p.get("entry") for p in passed}
-            dropped = [c for c in candidates if (c.get("id") or c.get("entry")) not in passed_ids]
-        else:
-            passed = candidates[:10]
-            dropped = candidates[10:]
-
-        needs_rewrite = (len(passed) == 0)
-
-        self.logger.log_step(
-            case_id=case_id,
-            step_num=3,
-            step_name="Jev Gatekeeper Relevance Evaluation",
-            message=f"{len(passed)} chunks kept, {len(dropped)} dropped",
-            details={
-                "Decision": "Rewrite Query (Insufficient Context)" if needs_rewrite else "Proceed to Generation",
-                "Threshold": self.jev_filter.threshold
-            },
-            emoji="⚖️"
-        )
-
-        trace_event = {
-            "step": "jev_gatekeeper",
-            "passed_count": len(passed),
-            "dropped_count": len(dropped),
-            "decision": "rewrite" if needs_rewrite else "generate"
-        }
-
-        return {
-            "passed_chunks": passed,
-            "dropped_chunks": dropped,
-            "needs_rewrite": needs_rewrite,
-            "trace_events": state.get("trace_events", []) + [trace_event]
-        }
 
     def _node_rewrite_query(self, state: AgenticRAGState) -> Dict[str, Any]:
         case_id = state.get("case_id", 0)
@@ -328,21 +289,21 @@ class ProcurementAgenticWorkflow:
             "new_query": new_query
         }
 
+        tools = list(state.get("tools_used", []))
+        tools.append("Rewriter")
+
         return {
             "current_query": new_query,
             "retry_count": retry_count,
             "needs_rewrite": False,
+            "tools_used": tools,
             "trace_events": state.get("trace_events", []) + [trace_event]
         }
 
     def _node_generate_answer(self, state: AgenticRAGState) -> Dict[str, Any]:
         case_id = state.get("case_id", 0)
         raw_query = state.get("raw_query", "")
-        passed_chunks = state.get("passed_chunks", [])
-        candidates = state.get("retrieved_candidates", [])
-
-        # Fallback to candidate laws if passed chunks is empty after all retries
-        effective_laws = passed_chunks if passed_chunks else candidates[:10]
+        effective_laws = state.get("retrieved_candidates", [])
 
         if not effective_laws:
             synth_res = {
@@ -374,6 +335,10 @@ class ProcurementAgenticWorkflow:
             "applicable_laws": synth_res.get("applicable_laws", [])
         }
 
+        tools = list(state.get("tools_used", []))
+        if "Synthesizer" not in tools:
+            tools.append("Synthesizer")
+
         return {
             "synthesized_answer": synth_res.get("direct_answer", ""),
             "direct_answer": synth_res.get("direct_answer", ""),
@@ -381,15 +346,17 @@ class ProcurementAgenticWorkflow:
             "applicable_laws": synth_res.get("applicable_laws", []),
             "exceptions": synth_res.get("exceptions_or_conditions", ""),
             "status": synth_res.get("status", "COMPLIANT"),
+            "issues_breakdown": synth_res.get("issues_breakdown", []),
+            "tools_used": tools,
             "trace_events": state.get("trace_events", []) + [trace_event]
         }
 
     def _node_guardrail(self, state: AgenticRAGState) -> Dict[str, Any]:
         case_id = state.get("case_id", 0)
         direct_answer = state.get("direct_answer", "")
-        passed_chunks = state.get("passed_chunks", []) or state.get("retrieved_candidates", [])
+        candidates = state.get("retrieved_candidates", [])
 
-        verdict = GroundingGuardrail.audit(direct_answer, passed_chunks)
+        verdict = GroundingGuardrail.audit(direct_answer, candidates)
         cited_sections = verdict.get("cited_sections", [])
 
         self.logger.log_step(
@@ -412,13 +379,19 @@ class ProcurementAgenticWorkflow:
         }
         self.logger.append_trace(trace_record)
 
+        tools = list(state.get("tools_used", []))
+        if "Guardrail" not in tools:
+            tools.append("Guardrail")
+
         return {
             "guardrail_verdict": verdict,
+            "tools_used": tools,
             "trace_events": state.get("trace_events", []) + [{"step": "guardrail", "verdict": verdict}]
         }
 
     def invoke(self, case: Dict[str, Any]) -> Dict[str, Any]:
         """Entrypoint for executing the LangGraph Agentic Workflow on a case item."""
+        start_time = time.time()
         raw_fact = case.get("fact") or case.get("description") or case.get("question", "")
         name = case.get("name", ["ผู้สอบถาม"])
         if isinstance(name, list) and len(name) > 0:
@@ -444,10 +417,25 @@ class ProcurementAgenticWorkflow:
             "exceptions": "",
             "status": "COMPLIANT",
             "guardrail_verdict": {},
+            "issues_breakdown": [],
+            "tools_used": [],
             "trace_events": []
         }
 
         final_state = self.app.invoke(initial_state)
+        elapsed = time.time() - start_time
+        retrieved_laws = final_state.get("retrieved_candidates", [])
+
+        self.logger.log_summary(
+            case_id=case.get("id", 0),
+            status=final_state.get("status", "COMPLIANT"),
+            retries=final_state.get("retry_count", 0),
+            chunks_count=len(retrieved_laws),
+            tools_used=final_state.get("tools_used", []),
+            duration=elapsed
+        )
+
+        issues_breakdown = final_state.get("issues_breakdown", [])
 
         return {
             "name": name,
@@ -460,11 +448,13 @@ class ProcurementAgenticWorkflow:
                 "applicable_laws": final_state.get("applicable_laws", []),
                 "law_article": final_state.get("applicable_laws", []),
                 "exceptions_or_conditions": final_state.get("exceptions", ""),
+                "issues_breakdown": issues_breakdown,
                 "guardrail_verdict": final_state.get("guardrail_verdict", {})
             },
-            "retrieved_laws": final_state.get("passed_chunks", []) or final_state.get("retrieved_candidates", []),
+            "issues_breakdown": issues_breakdown,
+            "retrieved_laws": retrieved_laws,
             "retrieved_facts": [],
-            "used_laws": final_state.get("passed_chunks", []) or final_state.get("retrieved_candidates", []),
+            "used_laws": retrieved_laws,
             "used_facts": [],
             "crag_meta": {
                 "issues": final_state.get("issues", []),

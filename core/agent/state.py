@@ -67,5 +67,7 @@ class AgenticRAGState(TypedDict):
     exceptions: str
     status: str
     guardrail_verdict: Dict[str, Any]
+    issues_breakdown: List[Dict[str, Any]]
+    tools_used: List[str]
     trace_events: List[Dict[str, Any]]
 

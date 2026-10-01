@@ -975,12 +975,17 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
     laws = []
     seen_law_ids = set()
     seen_case_ids = set()
-    legal_relations = ['CITES', 'EMPOWERS', 'CITED_BY', 'EMPOWERED_BY', 'PREV_SECTION', 'NEXT_SECTION', 'RELATED_TO']
+    hierarchical_relations = ['EMPOWERS', 'CITED_BY', 'CITES', 'EMPOWERED_BY', 'PREV_SECTION', 'NEXT_SECTION', 'RELATED_TO']
 
     for cand in top_candidates:
         node_id = cand.get('id')
         node_type = cand.get('type')
         data = cand.get('data', {})
+        entry_text = str(data.get('entry', ''))
+
+        # Strictly exclude repealed legacy regulations prior to 2560 (e.g. 2535)
+        if "2535" in str(node_id) or "2535" in entry_text:
+            continue
 
         if node_type == 'Laws':
             if node_id not in seen_law_ids and len(laws) < top_k:
@@ -996,15 +1001,18 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                 })
                 seen_law_ids.add(node_id)
 
-            # Traverse to related Laws connected in Graph (CITES, EMPOWERS, PREV/NEXT SECTION)
-            if len(laws) < top_k + 4:
+            # Traverse to related Laws connected in Graph (prioritize EMPOWERS / CITED_BY for threshold & subordinate regulations)
+            if len(laws) < top_k + 10:
                 connected_law_ids = []
-                for rel in legal_relations:
-                    connected_law_ids.extend(db.get_neighbors(node_id, rel))
-                for n_id in connected_law_ids[:2]:
+                for rel in hierarchical_relations:
+                    for neighbor_id in db.get_neighbors(node_id, rel):
+                        if neighbor_id not in connected_law_ids and "2535" not in str(neighbor_id):
+                            connected_law_ids.append(neighbor_id)
+
+                for n_id in connected_law_ids[:3]:
                     if n_id not in seen_law_ids and db.nodes_data.get(n_id, {}).get('type') == 'Laws':
                         n_data = db.get_node(n_id)
-                        if n_data:
+                        if n_data and "2535" not in str(n_data.get('entry', '')):
                             laws.append({
                                 'id': n_id,
                                 'entry': n_data.get('entry'),
@@ -1013,7 +1021,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                                 'judge_dep': n_data.get('judge_dep'),
                                 'related_laws': n_data.get('related_laws'),
                                 'insights': n_data.get('insights', ''),
-                                'rerank_score': cand.get('rerank_score', 0.5) * 0.9
+                                'rerank_score': cand.get('rerank_score', 0.5) * 0.95
                             })
                             seen_law_ids.add(n_id)
 
@@ -1030,9 +1038,9 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             # Traverse from Case to Laws via RELATES_TO_LAW
             law_neighbors = db.get_neighbors(node_id, 'RELATES_TO_LAW')
             for law_id in law_neighbors:
-                if law_id not in seen_law_ids and len(laws) < top_k + 4:
+                if law_id not in seen_law_ids and len(laws) < top_k + 4 and "2535" not in str(law_id):
                     law_data = db.get_node(law_id)
-                    if law_data:
+                    if law_data and "2535" not in str(law_data.get('entry', '')):
                         laws.append({
                             'id': law_id,
                             'entry': law_data.get('entry'),
