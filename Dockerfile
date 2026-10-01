@@ -37,10 +37,11 @@ RUN useradd -u 10001 -m -d /app appuser \
 
 # Copy application source code
 COPY core/ ./core/
+COPY api/ ./api/
 COPY scripts/ ./scripts/
 COPY evaluation/ ./evaluation/
 COPY datas/ ./datas/
-COPY run.py mcp_server.py ./
+COPY run.py server.py ./
 
 USER appuser
 
@@ -58,4 +59,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f -s http://localhost:${MCP_PORT}/ready || exit 1
 
-CMD ["python", "mcp_server.py"]
+CMD ["python", "server.py"]

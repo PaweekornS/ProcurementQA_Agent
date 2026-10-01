@@ -1,4 +1,4 @@
-"""Issue Decomposer & Intent Classifier Agent for LegalGraphRAG CRAG"""
+"""Issue Decomposer & Intent Classifier Agent for LegalGraphRAG Agentic Workflow"""
 import json
 import re
 from typing import Dict, Any, List
@@ -6,7 +6,7 @@ from core.prompt import get_prompt
 
 
 class IssueDecomposer:
-    """Agent 1: Decomposes complex procurement inquiries into atomic legal issues/sub-queries."""
+    """Decomposes complex procurement inquiries into atomic legal issues/sub-queries."""
 
     def __init__(self, model):
         self.model = model
@@ -59,44 +59,27 @@ class IssueDecomposer:
             if not isinstance(item, dict):
                 continue
             iid = item.get("issue_id") or f"Q{idx}"
-            sub_q = item.get("sub_query") or fact
-            topic = item.get("topic") or sub_q[:60]
-            kw = item.get("search_keywords", [])
-            if isinstance(kw, str):
-                kw = [kw]
-            elif not isinstance(kw, list):
-                kw = []
+            topic = item.get("topic") or fact[:60]
+            sq = item.get("sub_query") or fact
+            kws = item.get("search_keywords")
+            if not isinstance(kws, list) or len(kws) == 0:
+                kws = [sq[:50]]
             valid_issues.append({
                 "issue_id": str(iid),
-                "topic": str(topic).strip(),
-                "sub_query": str(sub_q).strip(),
-                "search_keywords": [str(k).strip() for k in kw if str(k).strip()]
+                "topic": str(topic),
+                "sub_query": str(sq),
+                "search_keywords": [str(k) for k in kws]
             })
 
         if not valid_issues:
-            valid_issues = [
-                {
-                    "issue_id": "Q1",
-                    "topic": fact[:80] if fact else "ประเด็นการจัดซื้อจัดจ้าง",
-                    "sub_query": fact,
-                    "search_keywords": [fact[:60]] if fact else ["การจัดซื้อจัดจ้าง"]
-                }
-            ]
-
-        # Extract features for graph traversal compatibility
-        feat = parsed.get("procurement_features", {})
-        if not isinstance(feat, dict):
-            feat = {}
-        if "defendant_info" not in feat or not feat["defendant_info"]:
-            feat["defendant_info"] = [name if name else "หน่วยงานของรัฐ / ผู้สอบถาม"]
-        if "criminal_acts" not in feat or not feat["criminal_acts"]:
-            feat["criminal_acts"] = [issue["topic"] for issue in valid_issues]
-        if "victim_property_details" not in feat or not feat["victim_property_details"]:
-            feat["victim_property_details"] = ["พัสดุ / ขอบเขตงาน (TOR) / สัญญา"]
-        if "intent_remorse" not in feat:
-            feat["intent_remorse"] = []
+            valid_issues = [{
+                "issue_id": "Q1",
+                "topic": fact[:80] if fact else "ประเด็นการจัดซื้อจัดจ้าง",
+                "sub_query": fact,
+                "search_keywords": [fact[:60]] if fact else ["การจัดซื้อจัดจ้าง"]
+            }]
 
         return {
             "issues": valid_issues,
-            "procurement_features": feat
+            "procurement_features": parsed.get("procurement_features", {})
         }

@@ -11,6 +11,9 @@ from .tools import LEGAL_TOOLS
 from .guardrail import GroundingGuardrail
 from .graph import AgenticLegalGraphRAG
 from .workflow import ProcurementAgenticWorkflow
+from .decomposer import IssueDecomposer
+from .refiner import QueryRefiner
+from .synthesizer import LegalSynthesizer
 
 __all__ = [
     "LegalAgentState",
@@ -19,5 +22,8 @@ __all__ = [
     "GroundingGuardrail",
     "AgenticLegalGraphRAG",
     "ProcurementAgenticWorkflow",
+    "IssueDecomposer",
+    "QueryRefiner",
+    "LegalSynthesizer",
 ]
 

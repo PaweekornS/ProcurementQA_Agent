@@ -3,7 +3,7 @@
 """
 test_rest_api.py
 
-Smoke-tests the dual-protocol REST API endpoints of mcp_server.py:
+Smoke-tests the dual-protocol REST API endpoints of server.py (FastAPI):
   - GET  /healthz
   - GET  /ready
   - POST /api/v1/verify

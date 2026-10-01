@@ -1,4 +1,4 @@
-"""Legal Synthesizer & Adjudicator Agent for LegalGraphRAG CRAG"""
+"""Legal Synthesizer & Adjudicator Agent for LegalGraphRAG Agentic Workflow"""
 import json
 import re
 from typing import Dict, Any, List, Optional
@@ -6,7 +6,7 @@ from core.judge.judge_crime import judge_crime_all, FALLBACK_NO_LAW_ANSWER
 
 
 class LegalSynthesizer:
-    """Agent 2: Synthesizes legal answers from retrieved statutory context and maps answers to sub-issues."""
+    """Synthesizes legal answers from retrieved statutory context and maps answers to sub-issues."""
 
     def __init__(self, model):
         self.model = model
@@ -58,7 +58,6 @@ class LegalSynthesizer:
             cleaned_direct = re.sub(r"\(?\s*(?:ตาม)?(?:มาตรา|ระเบียบข้อ|ข้อ|พ\.ร\.บ\.)\s*\d+[^\)]*?\)?", "", cleaned_direct).strip()
             # Clean leading/trailing punctuation left behind
             cleaned_direct = re.sub(r"^[\s,.-]+", "", cleaned_direct).strip()
-            if cleaned_direct:
-                result["direct_answer"] = cleaned_direct
+            result["direct_answer"] = cleaned_direct
 
         return result
