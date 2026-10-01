@@ -52,6 +52,7 @@ class AgenticRAGState(TypedDict):
     raw_query: str
     current_query: str
     name: str
+    org_id: str
     features: Dict[str, Any]
     issues: List[Dict[str, Any]]
     retrieved_candidates: List[Dict[str, Any]]

@@ -912,7 +912,12 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
     bm25_query = expand_numeric_query(query_text)
     sparse_raw = bm25_idx.search(bm25_query, top_k=bm25_top_k)
     sparse_results = []
+    active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
     for doc, score in sparse_raw:
+        doc_data = doc.get('data', {}) or {}
+        doc_org = doc_data.get('org_id', 'PUBLIC')
+        if doc_org not in ('PUBLIC', active_org):
+            continue
         sparse_results.append(({
             'id': doc['id'],
             'type': doc['type'],
@@ -922,7 +927,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
 
     # 2. Dense Search (Embedding Cosine Similarity) on Laws and Cases
     dense_results = []
-    law_records = db.find_similar_nodes(query_embedding, 'Laws', top_k=dense_top_k)
+    law_records = db.find_similar_nodes(query_embedding, 'Laws', top_k=dense_top_k, org_id=active_org)
     for rec in law_records:
         dense_results.append(({
             'id': rec['id'],
@@ -931,7 +936,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             'data': rec
         }, rec.get('similarity', 0.0)))
 
-    case_records = db.find_similar_nodes(query_embedding, 'Cases', top_k=dense_top_k)
+    case_records = db.find_similar_nodes(query_embedding, 'Cases', top_k=dense_top_k, org_id=active_org)
     for rec in case_records:
         dense_results.append(({
             'id': rec['id'],
@@ -1083,20 +1088,20 @@ def query_similar_nodes_naive(model, query_text, top_k=3):
     return neighbors
 
 
-def query_similar_nodes(model, query_text, retrieve_config):
+def query_similar_nodes(model, query_text, retrieve_config, org_id=None):
     query_embedding = get_embedding(query_text)
     if query_embedding is None:
         return {}, [], []
 
-    # 调用两个查询函数
+    active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
     if retrieve_config["top_retrieve"]:
         top_result_clusters, top_result_cases, top_result_laws = search_similar_nodes_top(
-            model, query_embedding, query_text, top_k=retrieve_config["top_retrieve_top_k"])
+            model, query_embedding, query_text, top_k=retrieve_config["top_retrieve_top_k"], org_id=active_org)
     else:
         top_result_clusters, top_result_cases, top_result_laws = [], [], []
     if retrieve_config["direct_retrieve"]:
         direct_result_cases, direct_result_laws = search_similar_nodes_direct(
-            model, query_embedding, query_text, top_k=retrieve_config["direct_retrieve_top_k"])
+            model, query_embedding, query_text, top_k=retrieve_config["direct_retrieve_top_k"], org_id=active_org)
     else:
         direct_result_cases, direct_result_laws = [], []
 

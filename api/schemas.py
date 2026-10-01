@@ -47,11 +47,6 @@ class LegalQARequest(BaseModel):
         description="Legal inquiry or case fact in Thai",
         example="หน่วยงานของรัฐสามารถจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจงในวงเงินไม่เกินเท่าใด และต้องขออนุมัติใครบ้าง"
     )
-    mode: str = Field(
-        "deep",
-        description="Reasoning mode: 'fast' (0 retries, direct answer) or 'deep' (iterative multi-turn validation)",
-        example="deep"
-    )
     full: bool = Field(
         False,
         description="If True, return all internal LangGraph debug state and candidate chunks"
@@ -66,7 +61,6 @@ class LegalQARequest(BaseModel):
 class LegalQAResponse(BaseModel):
     """Streamlined response schema designed for Super-Orchestrator and frontend clients."""
     status: str = Field(..., description="Overall compliance status (e.g. COMPLIANT, OUT_OF_SCOPE, NO_LAW_FOUND)")
-    mode: str = Field(..., description="Executed workflow mode ('fast' or 'deep')")
     direct_answer: str = Field(..., description="Concise, direct answer synthesizing the legal conclusion")
     applicable_laws: List[str] = Field(default_factory=list, description="List of primary laws cited (e.g. ['มาตรา 56', 'ข้อ 25'])")
     decisive_quotes: List[DecisiveQuote] = Field(default_factory=list, description="Decisive verbatim citations supporting the conclusion")

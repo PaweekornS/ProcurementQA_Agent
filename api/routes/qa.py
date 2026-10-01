@@ -48,7 +48,6 @@ def ask_procurement_qa(
     try:
         raw_result = service.ask_procurement_law(
             question=payload.question,
-            mode=payload.mode,
             org_id=resolved_org_id
         )
 
@@ -81,7 +80,6 @@ def ask_procurement_qa(
 
         return LegalQAResponse(
             status=raw_result.get("status", "COMPLIANT"),
-            mode=raw_result.get("mode", payload.mode),
             direct_answer=raw_result.get("direct_answer", ""),
             applicable_laws=raw_result.get("applicable_laws", []),
             decisive_quotes=quotes,
