@@ -211,7 +211,7 @@ class LegalGraphRAGConfig:
         )
 
         # RAG mode configuration
-        rag_mode = os.getenv("RAG_MODE", "crag").lower()
+        rag_mode = os.getenv("RAG_MODE", "agentic").lower()
         agentic_max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", 2))
         
         return cls(
@@ -240,7 +240,7 @@ class LegalGraphRAGConfig:
         retrieve_config = RetrieveConfig(**config_dict.get("retrieve", {}))
         graph_config = GraphConfig(**config_dict.get("graph", {}))
         crag_config = CRAGConfig(**config_dict.get("crag", {}))
-        rag_mode = config_dict.get("rag_mode", "crag")
+        rag_mode = config_dict.get("rag_mode", "agentic")
         agentic_max_retries = int(config_dict.get("agentic_max_retries", 2))
         
         return cls(
@@ -639,13 +639,17 @@ class LegalGraphRAG:
             print("Graph construction completed (not saved, graph_db_path not specified)")
     
     def __del__(self):
-        """Destructor, auto-save graph database"""
-        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
-            return
-        if hasattr(self, 'config') and self.config.graph.auto_save and self.config.graph.graph_db_path:
-            try:
+        """Destructor, auto-save graph database safely if interpreter is not tearing down."""
+        try:
+            import os
+            import builtins
+            if not hasattr(builtins, "open") or builtins.open is None:
+                return
+            if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+                return
+            if hasattr(self, 'config') and getattr(self.config.graph, 'auto_save', False) and getattr(self.config.graph, 'graph_db_path', None):
                 db = GraphDBManager.get_db()
-                if len(db.nodes_data) > 0:
+                if db is not None and getattr(db, 'nodes_data', None) and len(db.nodes_data) > 0:
                     self.save_graph_db()
-            except Exception as e:
-                print(f"Failed to auto-save graph database: {e}")
+        except Exception:
+            pass

@@ -196,7 +196,7 @@ def verify_procurement_threshold(
         proposed_method: Method name (e.g. "เฉพาะเจาะจง", "e-bidding", "คัดเลือก").
         justification_reason: Optional reason (e.g. "จำเป็นเร่งด่วน", "วงเงินไม่เกิน 500,000 บาท").
     """
-    from core.mcp_service import ProcurementService
+    from core.service import ProcurementService
     service = ProcurementService.get_instance()
     verdict = service.verify_compliance(
         procurement_item=procurement_item,

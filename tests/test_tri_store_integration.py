@@ -22,7 +22,7 @@ load_dotenv(override=True)
 os.environ["USE_TRI_STORE"] = "true"
 
 from core.database import StorageManager
-from core.mcp_service import ProcurementService
+from core.service import ProcurementService
 
 
 class TestTriStoreIntegration(unittest.TestCase):

@@ -17,9 +17,9 @@ from langgraph.graph import StateGraph, START, END
 from core.agent.state import AgenticRAGState
 from core.agent.guardrail import GroundingGuardrail
 from core.utils.agent_logger import AgentTraceLogger
-from core.crag.classifier import IssueDecomposer
-from core.crag.synthesizer import LegalSynthesizer
-from core.crag.refiner import QueryRefiner
+from core.agent.decomposer import IssueDecomposer
+from core.agent.synthesizer import LegalSynthesizer
+from core.agent.refiner import QueryRefiner
 from core.graph_construct.feature_graph import query_similar_nodes
 from core.utils.util import concat_feature_descriptions
 
