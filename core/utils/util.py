@@ -3,7 +3,6 @@ from core.preprocess.case_seg import segment_case_text_withname
 
 from core.graph_construct.feature_graph import query_similar_nodes, query_similar_laws, query_similar_laws_naive, query_similar_nodes_naive, update_insights_in_graph
 
-from core.judge.judge_law import judge_law
 from core.judge.judge_crime import judge_crime, judge_crime_all
 
 import json
