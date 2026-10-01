@@ -48,26 +48,26 @@ def search_procurement_clauses(
         return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
 
-@mcp.tool()
-def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
-    """Search historical consultation rulings and Comptroller General FAQs."""
-    try:
-        service = get_service()
-        results = service.search_faqs(query=query, top_k=top_k)
-        return {"query": query, "count": len(results), "results": results}
-    except Exception as e:
-        return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
+if _expose_internal:
+    @mcp.tool()
+    def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
+        """Search historical consultation rulings and Comptroller General FAQs."""
+        try:
+            service = get_service()
+            results = service.search_faqs(query=query, top_k=top_k)
+            return {"query": query, "count": len(results), "results": results}
+        except Exception as e:
+            return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
-
-@mcp.tool()
-def get_related_regulations(article_name: str, max_hops: int = 1) -> Dict[str, Any]:
-    """Traverse the statutory knowledge graph to find implementing regulations and related circulars."""
-    try:
-        service = get_service()
-        results = service.get_related_clauses(article_name=article_name, max_hops=max_hops)
-        return {"article": article_name, "count": len(results), "results": results}
-    except Exception as e:
-        return {"article": article_name, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
+    @mcp.tool()
+    def get_related_regulations(article_name: str, max_hops: int = 1) -> Dict[str, Any]:
+        """Traverse the statutory knowledge graph to find implementing regulations and related circulars."""
+        try:
+            service = get_service()
+            results = service.get_related_clauses(article_name=article_name, max_hops=max_hops)
+            return {"article": article_name, "count": len(results), "results": results}
+        except Exception as e:
+            return {"article": article_name, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
 
 
 # ==============================================================================
@@ -77,7 +77,6 @@ def get_related_regulations(article_name: str, max_hops: int = 1) -> Dict[str, A
 @mcp.tool()
 def ask_procurement_law(
     question: str,
-    mode: str = "deep",
     org_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -86,10 +85,9 @@ def ask_procurement_law(
     """
     try:
         service = get_service()
-        result = service.ask_procurement_law(question=question, mode=mode, org_id=org_id)
+        result = service.ask_procurement_law(question=question, org_id=org_id)
         return {
             "status": result.get("status", "COMPLIANT"),
-            "mode": result.get("mode", mode),
             "direct_answer": result.get("direct_answer", ""),
             "applicable_laws": result.get("applicable_laws", []),
             "decisive_quotes": result.get("decisive_quotes", []),
@@ -100,7 +98,6 @@ def ask_procurement_law(
     except Exception as e:
         return {
             "status": "ERROR",
-            "mode": mode,
             "direct_answer": "",
             "applicable_laws": [],
             "decisive_quotes": [],
@@ -129,20 +126,21 @@ def check_procurement_threshold(
         return {"status": "ERROR", "is_compliant": False, "error": f"{type(e).__name__}: {e}"}
 
 
-@mcp.tool()
-def healthcheck() -> Dict[str, Any]:
-    """Report whether the LegalGraphRAG pipeline and services are loaded and ready."""
-    try:
-        service = get_service()
-        rag = service.rag
-        return {
-            "ready": True,
-            "graph_db_path": rag.config.graph.graph_db_path,
-            "model": rag.config.model.model_name,
-            "indexed_sections_count": len(service._section_index)
-        }
-    except Exception as e:
-        return {"ready": False, "error": f"{type(e).__name__}: {e}"}
+if _expose_internal:
+    @mcp.tool()
+    def healthcheck() -> Dict[str, Any]:
+        """Report whether the LegalGraphRAG pipeline and services are loaded and ready."""
+        try:
+            service = get_service()
+            rag = service.rag
+            return {
+                "ready": True,
+                "graph_db_path": rag.config.graph.graph_db_path,
+                "model": rag.config.model.model_name,
+                "indexed_sections_count": len(service._section_index)
+            }
+        except Exception as e:
+            return {"ready": False, "error": f"{type(e).__name__}: {e}"}
 
 
 # ==============================================================================

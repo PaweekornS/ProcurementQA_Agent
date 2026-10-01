@@ -154,10 +154,11 @@ class ProcurementAgenticWorkflow:
         features = state.get("features", {})
         issues = state.get("issues", [])
         raw_query = state.get("current_query") or state.get("raw_query", "")
+        org_id = state.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA")
 
         retrieved_batches = []
         feature_query = concat_feature_descriptions(features, raw_text=raw_query)
-        _, _, init_laws = query_similar_nodes(self.model, feature_query, self.retrieve_config)
+        _, _, init_laws = query_similar_nodes(self.model, feature_query, self.retrieve_config, org_id=org_id)
         if init_laws:
             retrieved_batches.append(init_laws)
 
@@ -168,7 +169,7 @@ class ProcurementAgenticWorkflow:
                 kws = " ".join(iss.get("search_keywords", []))
                 q_text = f"{sub_q} {kws}".strip()
                 if len(q_text) > 5:
-                    _, _, sub_laws = query_similar_nodes(self.model, q_text, self.retrieve_config)
+                    _, _, sub_laws = query_similar_nodes(self.model, q_text, self.retrieve_config, org_id=org_id)
                     if sub_laws:
                         retrieved_batches.append(sub_laws)
 
@@ -176,7 +177,7 @@ class ProcurementAgenticWorkflow:
         current_q = state.get("current_query", "")
         orig_q = state.get("raw_query", "")
         if current_q and current_q != orig_q:
-            _, _, refined_laws = query_similar_nodes(self.model, current_q, self.retrieve_config)
+            _, _, refined_laws = query_similar_nodes(self.model, current_q, self.retrieve_config, org_id=org_id)
             if refined_laws:
                 retrieved_batches.append(refined_laws)
 
@@ -397,11 +398,13 @@ class ProcurementAgenticWorkflow:
         if isinstance(name, list) and len(name) > 0:
             name = name[0]
 
+        active_org = str(case.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA"))
         initial_state: AgenticRAGState = {
             "case_id": case.get("id", 0),
             "raw_query": raw_fact,
             "current_query": raw_fact,
             "name": str(name),
+            "org_id": active_org,
             "features": {},
             "issues": [],
             "retrieved_candidates": [],

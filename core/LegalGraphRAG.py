@@ -192,8 +192,9 @@ class LegalGraphRAGConfig:
         )
         
         # Graph configuration
+        default_graph_db = "./outputs/graph_db.pkl" if os.path.exists("./outputs/graph_db.pkl") else None
         graph_config = GraphConfig(
-            graph_db_path=os.getenv("graph_db_path"),
+            graph_db_path=os.getenv("graph_db_path", default_graph_db),
             embedding_provider=os.getenv("embedding_provider", "local").lower(),
             embedding_api_url=os.getenv("embedding_api_url", "http://localhost:11434/api/embed"),
             embedding_model=os.getenv("embedding_model", "unsloth/embeddinggemma-300m"),

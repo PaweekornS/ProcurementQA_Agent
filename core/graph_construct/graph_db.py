@@ -118,19 +118,30 @@ class InMemoryGraphDB:
                 results.append(result)
         return results
     
-    def get_neighbors(self, node_id: str, relation_type: Optional[str] = None) -> List[str]:
-        """Get neighbor node ID list"""
+    def get_neighbors(self, node_id: str, relation_type: Optional[str] = None, org_id: Optional[str] = None) -> List[str]:
+        """Get neighbor node ID list with tenant isolation."""
+        targets = []
         if relation_type:
-            neighbors = []
             for target in self.graph.successors(node_id):
                 for edge_data in self.graph[node_id][target].values():
                     if edge_data.get('relation_type') == relation_type:
-                        neighbors.append(target)
+                        targets.append(target)
                         break
-            return neighbors
         else:
-            return list(self.graph.successors(node_id))
-    
+            targets = list(self.graph.successors(node_id))
+
+        if not org_id:
+            return targets
+
+        # Filter out nodes from other tenants (only permit 'PUBLIC' or matching org_id)
+        filtered_targets = []
+        for tgt in targets:
+            node_data = self.get_node(tgt)
+            node_org = node_data.get('org_id', 'PUBLIC') if node_data else 'PUBLIC'
+            if node_org in ('PUBLIC', org_id):
+                filtered_targets.append(tgt)
+        return filtered_targets
+
     def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """Calculate cosine similarity"""
         if vec1 is None or vec2 is None:
@@ -141,28 +152,34 @@ class InMemoryGraphDB:
             return 0.0
         # Use 1 - cosine distance to get similarity
         return 1 - cosine(vec1.flatten(), vec2.flatten())
-    
-    def find_similar_nodes(self, query_embedding: np.ndarray, node_type: str, top_k: int = 5) -> List[Dict]:
-        """Find most similar nodes based on vector similarity"""
+
+    def find_similar_nodes(self, query_embedding: np.ndarray, node_type: str, top_k: int = 5, org_id: Optional[str] = None) -> List[Dict]:
+        """Find most similar nodes based on vector similarity with tenant org_id isolation."""
         if node_type not in self._vector_indexes:
             return []
-        
+
         index_data = self._vector_indexes[node_type]
         if len(index_data['vectors']) == 0:
             return []
-        
+
         query_vec = np.array(query_embedding).flatten()
         vectors = index_data['vectors']
-        
-        # Calculate all similarities
+
+        # Calculate similarities with tenant filtering
         similarities = []
         for i, vec in enumerate(vectors):
+            node_id = index_data['ids'][i]
+            if org_id:
+                node_data = self.get_node(node_id)
+                node_org = node_data.get('org_id', 'PUBLIC') if node_data else 'PUBLIC'
+                if node_org not in ('PUBLIC', org_id):
+                    continue
             sim = self.cosine_similarity(query_vec, vec)
-            similarities.append((index_data['ids'][i], sim))
-        
+            similarities.append((node_id, sim))
+
         # Sort and return top_k
         similarities.sort(key=lambda x: x[1], reverse=True)
-        
+
         results = []
         for node_id, similarity in similarities[:top_k]:
             node_data = self.get_node(node_id)
@@ -170,7 +187,7 @@ class InMemoryGraphDB:
                 result = {'id': node_id, 'similarity': similarity}
                 result.update(node_data)
                 results.append(result)
-        
+
         return results
     
     def compute_pagerank(self) -> Dict[str, float]:

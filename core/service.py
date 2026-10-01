@@ -223,12 +223,15 @@ class ProcurementService:
         target_num = num_match.group(1)
         thai_num = to_thai_digits(target_num)
 
+        # Remove leading bracket header if present: [พระราชบัญญัติ... | มาตรา ๕๖]
+        cleaned = re.sub(r"^\[[^\]]+\]\s*", "", macro_text.strip())
+
         # Pattern matching 'มาตรา 56' or 'มาตรา ๕๖' or 'ข้อ 79' or 'ข้อ ๗๙'
-        pattern = rf"(?:มาตรา|ข้อ)\s*(?:{target_num}|{thai_num})\b[\s\S]*?(?=(?:มาตรา|ข้อ)\s*(?:\d+|[๐-๙]+)\b|#|\Z)"
-        match = re.search(pattern, macro_text)
-        if match:
+        pattern = rf"(?:^|\n)\s*(?:มาตรา|ข้อ)\s*(?:{target_num}|{thai_num})[\s\S]*?(?=(?:\n\s*(?:มาตรา|ข้อ)\s*(?:\d+|[๐-๙]+))|#|\Z)"
+        match = re.search(pattern, cleaned)
+        if match and len(match.group(0).strip()) > 10:
             return match.group(0).strip()
-        return None
+        return cleaned if len(cleaned) > 10 else macro_text
 
     def search_clauses(self, query: str, top_k: int = 5, doc_filter: Optional[str] = None, org_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -267,6 +270,7 @@ class ProcurementService:
                 "entry": entry,
                 "topics": topics,
                 "content": desc[:800],
+                "description": desc[:800],
                 "score": round(float(law.get("rerank_score", law.get("similarity", 0.0))), 4)
             })
 
@@ -421,6 +425,14 @@ class ProcurementService:
             "associated_topics": cross_laws
         }
 
+    def get_related_clauses(self, section_reference: str, org_id: Optional[str] = None, max_hops: int = 1) -> List[Dict[str, Any]]:
+        """
+        Convenience wrapper returning the list of related nodes discovered through
+        Knowledge Graph traversal for a given statute section or ministerial rule.
+        """
+        res = self.traverse_regulations(section_reference=section_reference, org_id=org_id)
+        return res.get("related_nodes", [])
+
     # --------------------------------------------------------------------------
     # Tier 3: Compliance Engine & CRAG Pipeline
     # --------------------------------------------------------------------------
@@ -515,12 +527,10 @@ class ProcurementService:
             "potential_risks": risks
         }
 
-    def ask_procurement_law(self, question: str, mode: str = "deep", org_id: Optional[str] = None) -> Dict[str, Any]:
+    def ask_procurement_law(self, question: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute LangGraph Agentic RAG legal analysis workflow.
-        mode="deep": full Agentic RAG with Adaptive Query Rewriting & Guardrail (max_retries=2).
-        mode="fast": single-pass Agentic RAG without retry loops (max_retries=0).
-        Filtered by tenant org_id.
+        Scoped to tenant org_id.
         """
         if not question or not question.strip():
             return {
@@ -534,14 +544,15 @@ class ProcurementService:
             }
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org, "mode": mode}
+        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org}
 
         from core.agent import ProcurementAgenticWorkflow
         retrieve_config = self.rag.config.retrieve.to_dict()
+        max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", "2"))
         workflow = ProcurementAgenticWorkflow(
             self.rag.model,
             retrieve_config=retrieve_config,
-            max_retries=0 if mode == "fast" else 2
+            max_retries=max_retries
         )
         agent_res = workflow.invoke(case)
         judge = agent_res.get("judge_result", {})
@@ -552,7 +563,6 @@ class ProcurementService:
 
         return {
             "status": judge.get("status", "COMPLIANT"),
-            "mode": mode,
             "direct_answer": judge.get("direct_answer", ""),
             "decisive_quotes": enriched_quotes,
             "applicable_laws": judge.get("applicable_laws", []),

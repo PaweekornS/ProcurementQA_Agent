@@ -43,12 +43,21 @@ class Neo4jRepository:
     def connect(self):
         """Establish connection pool to Neo4j."""
         if self.driver is None:
+            driver_kwargs = {
+                "auth": (self.user, self.password),
+                "max_connection_lifetime": 3600,
+                "max_connection_pool_size": 50,
+                "connection_acquisition_timeout": 30.0,
+            }
+            try:
+                from neo4j import NotificationMinimumSeverity
+                driver_kwargs["notifications_min_severity"] = NotificationMinimumSeverity.OFF
+            except (ImportError, AttributeError):
+                pass
+
             self.driver = GraphDatabase.driver(
                 self.uri,
-                auth=(self.user, self.password),
-                max_connection_lifetime=3600,
-                max_connection_pool_size=50,
-                connection_acquisition_timeout=30.0,
+                **driver_kwargs
             )
             # Verify connectivity
             self.driver.verify_connectivity()
@@ -61,7 +70,7 @@ class Neo4jRepository:
             self.driver = None
 
     def init_schema(self):
-        """Idempotently create uniqueness constraints and search indexes, including tenant indexes."""
+        """Idempotently create uniqueness constraints, indexes, and register relationship types."""
         self.connect()
         constraints = [
             "CREATE CONSTRAINT unique_doc_id IF NOT EXISTS FOR (d:LegalDocument) REQUIRE d.doc_id IS UNIQUE",
@@ -77,6 +86,18 @@ class Neo4jRepository:
         with self.driver.session() as session:
             for stmt in constraints:
                 session.run(stmt)
+
+            # Register relationship types to prevent Neo4j 5.x 01N51 schema warnings
+            session.run("""
+            MERGE (a:_SchemaInit {id: 1})
+            MERGE (b:_SchemaInit {id: 2})
+            MERGE (a)-[:RELATES_TO_LAW]->(b)
+            MERGE (a)-[:ADJACENT_SECTION]->(b)
+            MERGE (a)-[:CITES_CLAUSE]->(b)
+            WITH a, b
+            MATCH (a)-[r]-(b)
+            DELETE r, a, b
+            """)
         logger.info("Neo4j constraints and indexes successfully initialized.")
 
     def sync_documents(self, documents: List[Dict[str, Any]], org_id: str = "PUBLIC"):
