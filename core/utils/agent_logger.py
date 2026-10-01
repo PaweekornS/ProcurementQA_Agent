@@ -24,6 +24,8 @@ class AgentTraceLogger:
         self.log_path = os.path.join(log_dir, log_file)
         os.makedirs(self.log_dir, exist_ok=True)
         self._write_lock = threading.Lock()
+        self._console_lock = threading.Lock()
+        self.verbose = os.getenv("VERBOSE_AGENT_LOG", "0").lower() in ("1", "true", "yes")
 
     @classmethod
     def get_instance(cls, log_dir: str = "./outputs/THAI") -> "AgentTraceLogger":
@@ -41,14 +43,37 @@ class AgentTraceLogger:
         details: Optional[Dict[str, Any]] = None,
         emoji: str = "📌"
     ):
-        """Prints a structured, user-friendly step message to console."""
+        """Prints a structured, user-friendly step message only when VERBOSE_AGENT_LOG=1."""
+        if not self.verbose:
+            return
+
         prefix = f"[Agentic-RAG] [Q#{case_id}] {emoji} Step {step_num}: {step_name}"
-        print(f"{prefix}")
-        if details:
-            for k, v in details.items():
-                print(f"              ├─ {k}: {v}")
-        if message:
-            print(f"              └─ {message}")
+        with self._console_lock:
+            print(f"{prefix}")
+            if details:
+                for k, v in details.items():
+                    print(f"              ├─ {k}: {v}")
+            if message:
+                print(f"              └─ {message}")
+
+    def log_summary(
+        self,
+        case_id: Any,
+        status: str,
+        retries: int,
+        chunks_count: int,
+        tools_used: List[str],
+        duration: Optional[float] = None
+    ):
+        """Prints a concise single-line summary for the query execution."""
+        tools_str = ", ".join(tools_used) if tools_used else "None"
+        time_str = f" ({duration:.2f}s)" if duration is not None else ""
+        summary_line = (
+            f"[Agentic-RAG] [Q#{case_id}] {status} | Chunks: {chunks_count} | "
+            f"Retries: {retries} | Tools: [{tools_str}]{time_str}"
+        )
+        with self._console_lock:
+            print(summary_line)
 
     def append_trace(self, trace_record: Dict[str, Any]):
         """Persists a single case execution trace to the JSONL trace log file."""

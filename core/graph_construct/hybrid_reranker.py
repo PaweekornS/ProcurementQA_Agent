@@ -539,6 +539,10 @@ def compute_dynamic_boost(
     if doc_year is None:
         doc_year = extract_document_year(text[:400])
 
+    # Explicit exclusion for repealed regulations prior to 2560 (e.g. 2535, 2549)
+    if "2535" in did or "2535" in entry:
+        return 0.0
+
     hierarchy_mult = get_legal_hierarchy_multiplier(did, entry, text)
 
     # Dynamic Recency Multiplier
@@ -549,9 +553,9 @@ def compute_dynamic_boost(
             year_diff = max(0, max_corpus_year - doc_year)
             recency_mult = max(1.05, 1.30 - (year_diff * 0.02))
         else:
-            # Older deprecated regulations (e.g. 2535 prior to 2560 reform)
-            # Penalize slightly so modern provisions take precedence
-            recency_mult = 0.70
+            # Older repealed regulations prior to 2560 reform (e.g. 2535, 2549)
+            # Section 3 of 2560 Act strictly repealed these; exclude completely from active QA
+            return 0.0
     else:
         recency_mult = 1.0
 
@@ -588,6 +592,8 @@ def weighted_rrf(
         if not doc_id:
             continue
         boost = compute_dynamic_boost(doc, max_corpus_year=max_year)
+        if boost <= 0.0:
+            continue
         scores[doc_id] = scores.get(doc_id, 0.0) + (dense_weight * boost / (rrf_k + rank + 1))
         if doc_id not in doc_map:
             doc_map[doc_id] = doc
@@ -598,6 +604,8 @@ def weighted_rrf(
         if not doc_id:
             continue
         boost = compute_dynamic_boost(doc, max_corpus_year=max_year)
+        if boost <= 0.0:
+            continue
         scores[doc_id] = scores.get(doc_id, 0.0) + (sparse_weight * boost / (rrf_k + rank + 1))
         if doc_id not in doc_map:
             doc_map[doc_id] = doc
