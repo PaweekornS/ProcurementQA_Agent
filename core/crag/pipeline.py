@@ -7,6 +7,7 @@ from core.crag.classifier import IssueDecomposer
 from core.crag.synthesizer import LegalSynthesizer
 from core.crag.auditor import CompletenessAuditor
 from core.crag.refiner import QueryRefiner
+from core.crag.jev_filter import JevChunkFilter
 
 from core.graph_construct.feature_graph import query_similar_nodes
 from core.graph_construct.graph_db import GraphDBManager
@@ -38,9 +39,10 @@ class CRAGPipeline:
     Coordinates the Multi-Agent Corrective RAG (CRAG) lifecycle:
     1. Issue Decomposition & Feature Extraction
     2. Multi-Aspect Hybrid Retrieval & Graph Traversal
-    3. Legal Synthesis
-    4. Completeness & Grounding Auditing
-    5. Query Refinement Loop (max_retry=1)
+    3. Corrective Retrieval Gatekeeper (Jev 1.13 Filter)
+    4. Legal Synthesis
+    5. Completeness & Grounding Auditing
+    6. Query Refinement Loop (max_retry=1)
     """
 
     def __init__(self, model, retrieve_config: Optional[Dict[str, Any]] = None, max_retry: int = 1):
@@ -58,6 +60,7 @@ class CRAGPipeline:
         self.synthesizer = LegalSynthesizer(model)
         self.auditor = CompletenessAuditor(model)
         self.refiner = QueryRefiner(model)
+        self.jev_filter = JevChunkFilter()
 
     def process_case_item(
         self,
@@ -108,6 +111,7 @@ class CRAGPipeline:
                         all_retrieved_facts.extend(sub_facts)
 
         candidate_laws = merge_and_dedup_laws(retrieved_law_batches)
+        raw_retrieved_laws = list(candidate_laws)
 
         # Handle NO_LAW_FOUND if initial retrieval is completely blank
         if not candidate_laws and not all_retrieved_facts:
@@ -126,8 +130,19 @@ class CRAGPipeline:
             item["crag_meta"] = {"issues": issues, "retries": 0, "complete": False}
             return item
 
-        # Ensure at least 10 candidate laws for synthesis to cover multi-part questions
-        max_laws = max(10, int(self.retrieve_config.get("direct_retrieve_top_k", 8)))
+        # -------------------------------------------------------------
+        # Step 2.5: Corrective Gatekeeper (Filter Irrelevant Chunks via Jev 1.13)
+        # -------------------------------------------------------------
+        if self.jev_filter.enabled:
+            candidate_laws = self.jev_filter.filter_chunks(
+                question=raw_fact,
+                candidate_laws=candidate_laws,
+                max_keep=6,
+                min_keep=2
+            )
+
+        # Ensure candidate laws for synthesis
+        max_laws = max(6, int(self.retrieve_config.get("direct_retrieve_top_k", 6)))
         law_used = candidate_laws[:max_laws]
         fact_used = filter_facts(law_used, all_retrieved_facts) if all_retrieved_facts else []
 
@@ -236,6 +251,7 @@ class CRAGPipeline:
 
             if new_law_batches:
                 candidate_laws = merge_and_dedup_laws([candidate_laws] + new_law_batches)
+                raw_retrieved_laws = merge_and_dedup_laws([raw_retrieved_laws] + new_law_batches)
                 # Filter coarse multi-page raw chunk bundles (_p...) to protect context token budget
                 clean_candidates = [
                     l for l in candidate_laws
@@ -243,6 +259,13 @@ class CRAGPipeline:
                 ]
                 if clean_candidates:
                     candidate_laws = clean_candidates
+                if self.jev_filter.enabled:
+                    candidate_laws = self.jev_filter.filter_chunks(
+                        question=raw_fact,
+                        candidate_laws=candidate_laws,
+                        max_keep=6,
+                        min_keep=2
+                    )
                 law_used = candidate_laws[:max_laws]
                 fact_used = filter_facts(law_used, all_retrieved_facts) if all_retrieved_facts else []
 
@@ -290,7 +313,8 @@ class CRAGPipeline:
             draft_answer.pop("legal_reasoning", None)
 
         item["judge_result"] = draft_answer
-        item["retrieved_laws"] = candidate_laws
+        item["retrieved_laws"] = raw_retrieved_laws
+        item["filtered_laws"] = candidate_laws
         item["retrieved_facts"] = all_retrieved_facts
         item["used_laws"] = law_used
         item["used_facts"] = fact_used
