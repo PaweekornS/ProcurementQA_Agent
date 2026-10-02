@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from core.models import BaseModel
 from core.graph_construct.graph_db import GraphDBManager
+from core.utils.settings import env
 
 
 @dataclass
@@ -26,18 +27,16 @@ class ModelConfig:
     
     def __post_init__(self):
         """Validate model name"""
-        valid_models = [
-            "openrouter", "qwen3", "qwen2_5", "gemma3", "internlm3", 
-            "glm4", "deepseek_v3", "gpt4o_mini"
-        ]
+        # Every model is served through an OpenAI-compatible endpoint (OpenRouter by default):
+        # "openrouter" (model taken from LLM_MODEL), "provider/model" or "openrouter:provider/model".
         if (
-            self.model_name not in valid_models
+            self.model_name != "openrouter"
             and "/" not in self.model_name
             and not self.model_name.startswith("openrouter:")
         ):
             raise ValueError(
                 f"Invalid model_name: {self.model_name}. "
-                f"Must be one of {valid_models} or an OpenRouter model string (e.g. 'google/gemma-3-4b-it')"
+                "Use 'openrouter' or an OpenRouter model string (e.g. 'qwen/qwen3.5-9b')"
             )
         valid_prompt_languages = ["en", "zh", "cn", "chinese", "english", "th", "thai", "default"]
         if self.prompt_language.lower() not in valid_prompt_languages:
@@ -136,45 +135,41 @@ class LegalGraphRAGConfig:
         load_dotenv(dotenv_path=dotenv_path, override=False)
         
         # If API key is not present, check workspace root .env
-        if not (os.getenv("api_key") or os.getenv("OPENROUTER_API_KEY") or os.getenv("\ufeffOPENROUTER_API_KEY")):
+        if not env("OPENROUTER_API_KEY"):
             for candidate in ["../.env", "../../.env", ".env"]:
                 cand_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(dotenv_path)), candidate))
                 if os.path.exists(cand_path):
                     load_dotenv(dotenv_path=cand_path, override=False)
-                    if os.getenv("OPENROUTER_API_KEY") or os.getenv("\ufeffOPENROUTER_API_KEY") or os.getenv("api_key"):
+                    if env("OPENROUTER_API_KEY"):
                         break
 
         # Model configuration
-        env_model_name = os.getenv("model_name") or os.getenv("LLM_MODEL") or "openrouter"
+        env_model_name = env("MODEL_NAME") or os.getenv("LLM_MODEL") or "openrouter"
         env_api_key = (
-            os.getenv("api_key")
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("\ufeffOPENROUTER_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
+            env("OPENROUTER_API_KEY")
         )
         env_base_url = (
-            os.getenv("base_url")
-            or os.getenv("OPENROUTER_BASE_URL")
-            or ("https://openrouter.ai/api/v1" if (os.getenv("OPENROUTER_API_KEY") or env_model_name == "openrouter" or "/" in env_model_name) else None)
+            env("LLM_BASE_URL")
+            or ("https://openrouter.ai/api/v1" if (env("OPENROUTER_API_KEY") or env_model_name == "openrouter" or "/" in env_model_name) else None)
         )
         model_config = ModelConfig(
             model_name=env_model_name,
-            device=os.getenv("device", "cpu"),
-            prompt_language=os.getenv("prompt_language", "th"),
+            device=env("DEVICE", "cpu"),
+            prompt_language=env("PROMPT_LANGUAGE", "th"),
             api_key=env_api_key,
             base_url=env_base_url,
-            max_length=int(os.getenv("max_length", 4096)),
-            temperature=float(os.getenv("temperature", 0.1))
+            max_length=int(env("LLM_MAX_TOKENS", 4096)),
+            temperature=float(env("LLM_TEMPERATURE", 0.1))
         )
         
         # Data configuration
         default_case_db = "./datas/cases_with_feature.json"
         default_law_to_crime = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
         data_config = DataConfig(
-            case_db_path=os.getenv("case_db_path", default_case_db),
-            law_to_crime_path=os.getenv("law_to_crime_path", default_law_to_crime),
-            datasets_path=os.getenv("datasets_path", "./datasets"),
-            output_dir=os.getenv("output_dir", "./outputs")
+            case_db_path=env("CASE_DB_PATH", default_case_db),
+            law_to_crime_path=env("LAW_TO_CRIME_PATH", default_law_to_crime),
+            datasets_path=env("DATASETS_PATH", "./datasets"),
+            output_dir=env("OUTPUT_DIR", "./outputs")
         )
         
         # Retrieval configuration
@@ -184,31 +179,31 @@ class LegalGraphRAGConfig:
             return str(val).strip().lower() in ("true", "1", "yes")
 
         retrieve_config = RetrieveConfig(
-            top_retrieve=_parse_bool(os.getenv("top_retrieve"), False),
-            direct_retrieve=_parse_bool(os.getenv("direct_retrieve"), True),
-            augment_retrieve=_parse_bool(os.getenv("augment_retrieve"), True),
-            top_retrieve_top_k=int(os.getenv("top_retrieve_top_k", 3)),
-            direct_retrieve_top_k=int(os.getenv("direct_retrieve_top_k", 10))
+            top_retrieve=_parse_bool(env("TOP_RETRIEVE"), False),
+            direct_retrieve=_parse_bool(env("DIRECT_RETRIEVE"), True),
+            augment_retrieve=_parse_bool(env("AUGMENT_RETRIEVE"), True),
+            top_retrieve_top_k=int(env("TOP_RETRIEVE_TOP_K", 3)),
+            direct_retrieve_top_k=int(env("DIRECT_RETRIEVE_TOP_K", 10))
         )
         
         # Graph configuration
         default_graph_db = "./outputs/graph_db.pkl" if os.path.exists("./outputs/graph_db.pkl") else None
         graph_config = GraphConfig(
-            graph_db_path=os.getenv("graph_db_path", default_graph_db),
-            embedding_provider=os.getenv("embedding_provider", "local").lower(),
-            embedding_api_url=os.getenv("embedding_api_url", "http://localhost:11434/api/embed"),
-            embedding_model=os.getenv("embedding_model", "unsloth/embeddinggemma-300m"),
-            tokenmind_api_key=os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key"),
-            tokenmind_base_url=os.getenv("TOKENMIND_BASE_URL") or os.getenv("tokenmind_base_url", "https://tokenmind.abdul.in.th/v1"),
-            tokenmind_embedding_model=os.getenv("TOKENMIND_EMBEDDING_MODEL") or os.getenv("tokenmind_embedding_model", "BAAI/bge-m3"),
-            auto_save=_parse_bool(os.getenv("auto_save"), True),
-            auto_build=_parse_bool(os.getenv("auto_build"), True)
+            graph_db_path=env("GRAPH_DB_PATH", default_graph_db),
+            embedding_provider=env("EMBEDDING_PROVIDER", "local").lower(),
+            embedding_api_url=env("EMBEDDING_API_URL", "http://localhost:11434/api/embed"),
+            embedding_model=env("EMBEDDING_MODEL", "unsloth/embeddinggemma-300m"),
+            tokenmind_api_key=env("TOKENMIND_API_KEY"),
+            tokenmind_base_url=env("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1"),
+            tokenmind_embedding_model=env("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3"),
+            auto_save=_parse_bool(env("AUTO_SAVE"), True),
+            auto_build=_parse_bool(env("AUTO_BUILD"), True)
         )
         
         # CRAG configuration
         crag_config = CRAGConfig(
-            enabled=os.getenv("crag_enabled", "True").lower() in ("true", "1", "yes"),
-            max_retry=int(os.getenv("crag_max_retry", 1))
+            enabled=env("CRAG_ENABLED", "True").lower() in ("true", "1", "yes"),
+            max_retry=int(env("CRAG_MAX_RETRY", 1))
         )
 
         # RAG mode configuration
@@ -360,51 +355,21 @@ class LegalGraphRAG:
                 print("Warning: graph_db_path not configured. Graph will not be persisted.")
     
     def _init_model(self) -> BaseModel:
-        """Initialize model"""
-        from core.models import DeepSeekChatbot, GPT4OMiniChatbot, OpenRouterChatbot
-        
-        # Check if OpenRouter model
-        is_openrouter = (
-            self.config.model.model_name == "openrouter"
-            or "/" in self.config.model.model_name
-            or self.config.model.model_name.startswith("openrouter:")
-            or (self.config.model.base_url and "openrouter" in self.config.model.base_url)
-        ) and self.config.model.model_name not in ["deepseek_v3", "gpt4o_mini"]
+        """Initialize the OpenAI-compatible chat model (OpenRouter by default)."""
+        from core.models import OpenRouterChatbot
 
-        if is_openrouter or self.config.model.model_name == "openrouter":
-            actual_model = self.config.model.model_name
-            if actual_model == "openrouter":
-                actual_model = os.getenv("LLM_MODEL", "google/gemma-3-4b-it")
-            elif actual_model.startswith("openrouter:"):
-                actual_model = actual_model.split(":", 1)[1]
-            return OpenRouterChatbot(
-                model_name=actual_model,
-                device=self.config.model.device,
-                api_key=self.config.model.api_key,
-                base_url=self.config.model.base_url
-            )
+        actual_model = self.config.model.model_name
+        if actual_model == "openrouter":
+            actual_model = os.getenv("LLM_MODEL", "google/gemma-3-4b-it")
+        elif actual_model.startswith("openrouter:"):
+            actual_model = actual_model.split(":", 1)[1]
+        return OpenRouterChatbot(
+            model_name=actual_model,
+            device=self.config.model.device,
+            api_key=self.config.model.api_key,
+            base_url=self.config.model.base_url
+        )
 
-        model_map = {
-            "openrouter": OpenRouterChatbot,
-            "deepseek_v3": DeepSeekChatbot,
-            "gpt4o_mini": GPT4OMiniChatbot,
-        }
-        
-        model_class = model_map.get(self.config.model.model_name, OpenRouterChatbot)
-        
-        # OpenAI-type models need special handling
-        if self.config.model.model_name in ["openrouter", "deepseek_v3", "gpt4o_mini"]:
-            init_kwargs = {
-                "device": self.config.model.device,
-            }
-            if self.config.model.api_key:
-                init_kwargs["api_key"] = self.config.model.api_key
-            if self.config.model.base_url:
-                init_kwargs["base_url"] = self.config.model.base_url
-            return model_class(**init_kwargs)
-        else:
-            return model_class(device=self.config.model.device)
-    
     def _load_cases_db(self) -> List[Dict[str, Any]]:
         """Load case database"""
         if not os.path.exists(self.config.data.case_db_path):

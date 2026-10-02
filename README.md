@@ -18,7 +18,7 @@
   - Takes `query` + `org_id`; returns `answer`, `citations` (law, verbatim quote, source file and page), `unresolved_issues` for delegation and a `grounded` flag.
 - ✅ **Dual-Protocol Serving (`api/` + `server.py`)**:
   - **FastAPI REST API**: Interactive Swagger UI at `http://localhost:8000/docs`
-  - **FastMCP Protocol**: Mounted on `/mcp` (Streamable-HTTP) and `/sse` (Server-Sent Events)
+  - **FastMCP Protocol**: Streamable HTTP on `/mcp`
 - ✅ **Validated Benchmark Metrics (40 Held-Out Thai QA Cases)**:
   - **Strict Hit Rate:** **97.5% (39/40)**
   - **Section Recall@k (k=20):** **88.33%**
@@ -41,7 +41,7 @@ ProcurementQA_Agent/
 │   │   ├── search.py               # POST /api/v1/search (Statutory Hybrid Search)
 │   │   ├── verify.py               # POST /api/v1/verify (Compliance Threshold Check)
 │   │   └── health.py               # GET /healthz (Liveness) & GET /ready (Readiness)
-│   └── mcp/                        # FastMCP Tools & Prompts Adapter (Mounted on /mcp, /sse)
+│   └── mcp/                        # FastMCP Tools & Prompts Adapter (Streamable HTTP on /mcp)
 │
 ├── core/                           # Pure Domain Engine
 │   ├── agent/                      # LangGraph Pure Agentic RAG Workflow

@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import requests
 import numpy as np
 from pythainlp.tokenize import word_tokenize
+from core.utils.settings import env
 
 try:
     from rank_bm25 import BM25Okapi
@@ -367,7 +368,7 @@ _bm25_init_lock = threading.Lock()
 
 def is_reranker_enabled() -> bool:
     """Check if cross-encoder reranker is enabled via environment variables."""
-    val = os.getenv("enable_reranker", os.getenv("reranker_enabled", "true")).strip().lower()
+    val = env("RERANKER_ENABLED", "true").strip().lower()
     return val in ("true", "1", "yes")
 
 
@@ -382,13 +383,13 @@ def get_reranker(
     if _global_reranker is None:
         with _reranker_init_lock:
             if _global_reranker is None:
-                provider = os.getenv("reranker_provider", "").strip().lower()
+                provider = env("RERANKER_PROVIDER", "").strip().lower()
                 opper_key = os.getenv("OPPER_API_KEY", "").strip()
 
                 # Default to Opper API if OPPER_API_KEY is present or reranker_provider is 'opper' / 'api'
                 if provider in ("opper", "api") or (not provider and opper_key):
                     resolved_model = os.getenv("OPPER_RERANKER_MODEL") or model_name or "berget/bge-reranker-v2-m3"
-                    thresh = float(os.getenv("reranker_threshold", threshold if threshold is not None else 0.20))
+                    thresh = float(env("RERANKER_THRESHOLD", threshold if threshold is not None else 0.20))
                     endpoint = os.getenv("OPPER_RERANK_URL", "https://api.opper.ai/v3/rerank")
                     _global_reranker = OpperAPIReranker(
                         api_key=opper_key,
@@ -397,9 +398,9 @@ def get_reranker(
                         threshold=thresh
                     )
                 else:
-                    resolved_model = model_name or os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-                    thresh = float(os.getenv("reranker_threshold", threshold if threshold is not None else 0.20))
-                    dev = os.getenv("reranker_device", device)
+                    resolved_model = model_name or env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+                    thresh = float(env("RERANKER_THRESHOLD", threshold if threshold is not None else 0.20))
+                    dev = env("RERANKER_DEVICE", device)
                     _global_reranker = GPUReranker(
                         model_name=resolved_model,
                         device=dev,

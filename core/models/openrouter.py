@@ -3,10 +3,15 @@ import os
 import time
 from typing import Optional
 from .openai_base import OpenAIBaseModel
+from core.utils.settings import env
 
 
 class OpenRouterChatbot(OpenAIBaseModel):
     """OpenRouter chatbot model"""
+
+    # generate_response() has its own retry/backoff loop
+    sdk_max_retries = 0
+
 
     def __init__(
         self,
@@ -33,14 +38,12 @@ class OpenRouterChatbot(OpenAIBaseModel):
 
         resolved_api_key = (
             api_key
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("\ufeffOPENROUTER_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
+            or env("OPENROUTER_API_KEY")
         )
 
         resolved_base_url = (
             base_url
-            or os.getenv("OPENROUTER_BASE_URL")
+            or env("LLM_BASE_URL")
             or "https://openrouter.ai/api/v1"
         )
 
@@ -67,7 +70,7 @@ class OpenRouterChatbot(OpenAIBaseModel):
         last_exception = None
         if temperature is None:
             try:
-                temperature = float(os.getenv("temperature", "0.0"))
+                temperature = float(env("LLM_TEMPERATURE", "0.0"))
             except ValueError:
                 temperature = 0.0
 

@@ -19,12 +19,13 @@ ENV PIP_DEFAULT_TIMEOUT=1000 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/app/.cache/huggingface
 
-COPY requirements.txt ./
+COPY requirements.txt requirements.lock ./
 # Install torch from TORCH_INDEX_URL first: with only --extra-index-url, pip may resolve the
 # much larger CUDA build from PyPI instead of the CPU wheel.
+# requirements.lock pins every (transitive) package to the versions the test suite passed with.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --index-url ${TORCH_INDEX_URL} "torch>=2.6.0" \
-    && pip install -r requirements.txt
+    pip install --index-url ${TORCH_INDEX_URL} -c requirements.lock torch \
+    && pip install -r requirements.txt -c requirements.lock
 
 # Pre-download default Cross-Encoder reranker into image cache during build time
 # RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \

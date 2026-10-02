@@ -123,6 +123,13 @@ class PostgresRepository:
             END IF;
         END $$;
 
+        -- Audit trail columns added after the initial schema (idempotent for existing databases)
+        ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS status VARCHAR(64);
+        ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS citations JSONB;
+        ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS grounded BOOLEAN;
+        ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS error TEXT;
+        CREATE INDEX IF NOT EXISTS idx_audit_org_created ON query_audit_logs(org_id, created_at DESC);
+
         CREATE INDEX IF NOT EXISTS idx_doc_org_id ON legal_documents(org_id);
         CREATE INDEX IF NOT EXISTS idx_statute_org_id ON statute_clauses(org_id);
         CREATE INDEX IF NOT EXISTS idx_faq_org_id ON faq_cases(org_id);
@@ -310,6 +317,24 @@ class PostgresRepository:
         with self.engine.connect() as conn:
             rows = conn.execute(query, {"kw": kw, "cls": clause_num, "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
+
+    def insert_audit_log(self, record: Dict[str, Any]):
+        """Persist one QA audit record (who asked what, what was answered, how it was grounded)."""
+        query = text("""
+            INSERT INTO query_audit_logs (
+                query_id, org_id, user_query, status, decomposed_issues, retrieved_clause_ids,
+                citations, synthesized_answer, grounded, grounding_score, latency_ms, error
+            )
+            VALUES (
+                :query_id, :org_id, :user_query, :status, :decomposed_issues, :retrieved_clause_ids,
+                :citations, :synthesized_answer, :grounded, :grounding_score, :latency_ms, :error
+            )
+        """)
+        params = dict(record)
+        for key in ("decomposed_issues", "retrieved_clause_ids", "citations"):
+            params[key] = json.dumps(params.get(key) or [], ensure_ascii=False)
+        with self.engine.begin() as conn:
+            conn.execute(query, params)
 
     def count_stats(self) -> Dict[str, int]:
         """Return counts of all tables."""

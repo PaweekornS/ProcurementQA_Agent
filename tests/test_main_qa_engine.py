@@ -38,8 +38,9 @@ class TestMainQAEngine(unittest.TestCase):
 
         self.assertEqual(
             set(data),
-            {"status", "answer", "conditions", "citations", "unresolved_issues", "grounded", "org_id"},
+            {"status", "answer", "conditions", "citations", "unresolved_issues", "grounded", "org_id", "query_id"},
         )
+        self._assert_audited(data["query_id"], "ORG_01_DGA")
         self.assertEqual(data["org_id"], "ORG_01_DGA")
         self.assertTrue(data["answer"].strip(), "answer is empty")
         for citation in data["citations"]:
@@ -49,6 +50,24 @@ class TestMainQAEngine(unittest.TestCase):
                         "at least one citation should resolve to a source document page")
         for issue in data["unresolved_issues"]:
             self.assertNotEqual(issue["status"], "RESOLVED")
+
+    def _assert_audited(self, query_id, org_id):
+        """Every answered query leaves a query_audit_logs row with its outcome."""
+        if os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
+            self.skipTest("audit log requires the tri-store")
+        from sqlalchemy import text
+        from core.database import StorageManager
+        with StorageManager.get_instance().pg.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT org_id, status, synthesized_answer, latency_ms, error "
+                     "FROM query_audit_logs WHERE query_id = :qid"),
+                {"qid": query_id},
+            ).mappings().first()
+        self.assertIsNotNone(row, f"no audit row for query_id={query_id}")
+        self.assertEqual(row["org_id"], org_id)
+        self.assertTrue(row["synthesized_answer"])
+        self.assertGreater(row["latency_ms"], 0)
+        self.assertIsNone(row["error"])
 
     def test_02_empty_query_validation(self):
         """Whitespace-only queries are rejected with HTTP 400."""

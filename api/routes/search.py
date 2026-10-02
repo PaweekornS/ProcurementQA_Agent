@@ -6,6 +6,7 @@ Direct statutory retrieval endpoint using Dense Vector + Thai BM25 + Cross-Encod
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from api.errors import internal_error
 from api.dependencies import get_service, get_tenant_org_id
 from api.schemas import StatutorySearchRequest, StatutorySearchResponse
 from core.service import ProcurementService
@@ -45,11 +46,8 @@ def search_statutory_clauses(
         return StatutorySearchResponse(
             query=payload.query,
             count=len(results),
-            organization_id=resolved_org_id,
+            org_id=resolved_org_id,
             results=results
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Hybrid search failed: {type(exc).__name__}: {str(exc)}"
-        )
+        raise internal_error(exc, "Hybrid search")

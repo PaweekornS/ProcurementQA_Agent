@@ -8,8 +8,9 @@ Main Q&A endpoint exposing the agentic RAG workflow to the Super-Orchestrator.
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.dependencies import get_service, get_tenant_org_id
+from api.errors import internal_error, service_busy
 from api.schemas import QARequest, QAResponse
-from core.service import ProcurementService
+from core.service import ProcurementService, ServiceBusyError
 
 router = APIRouter(prefix="/api/v1", tags=["Agentic Legal Q&A"])
 
@@ -31,6 +32,7 @@ def ask_procurement_qa(
     - `status` and `unresolved_issues` tell the orchestrator what still needs another agent.
     - `grounded` is false when the answer cites a section missing from the retrieved evidence.
     - Tenant: `org_id` in the body, else the `X-Organization-Id` header, else `DEFAULT_ORG_ID`.
+    - 503 + Retry-After when all QA slots (QA_MAX_CONCURRENCY) are busy.
     """
     if not payload.query.strip():
         raise HTTPException(
@@ -42,9 +44,8 @@ def ask_procurement_qa(
 
     try:
         raw_result = service.ask_procurement_law(question=payload.query, org_id=resolved_org_id)
+    except ServiceBusyError as exc:
+        raise service_busy(exc)
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Agentic RAG execution failed: {type(exc).__name__}: {str(exc)}"
-        )
+        raise internal_error(exc, "Agentic RAG execution")
     return QAResponse.from_service(raw_result, resolved_org_id)
