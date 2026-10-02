@@ -1,46 +1,81 @@
+# Startup order on `docker compose up`:
+#   postgres / qdrant / neo4j (healthy)  ->  migrate (seeds Tri-Store, exits 0)  ->  procurement-qa
+# Credentials are interpolated from the project .env so the DB containers and the app always agree.
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    # Default to CPU torch wheel for fast builds and lightweight footprint.
+    TORCH_INDEX_URL: "https://download.pytorch.org/whl/cpu"
+
+x-app-env: &app-env
+  DOTENV_PATH: .env
+  PYTHONPATH: /app
+  HF_HOME: /app/.cache/huggingface
+  # Container-network endpoints. These take precedence over the localhost values in .env
+  # because every load_dotenv() call in the app uses override=False.
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  QDRANT_HOST: qdrant
+  QDRANT_PORT: 6333
+  QDRANT_GRPC_PORT: 6334
+  NEO4J_URI: bolt://neo4j:7687
+  USE_TRI_STORE: "true"
+
 services:
+  # One-shot ETL: idempotent, skips itself when all three stores are already seeded and in parity.
+  migrate:
+    build: *app-build
+    image: procurement-qa:latest
+    container_name: procurement-migrate
+    command: ["python", "scripts/migrate_to_tri_store.py", "--skip-if-seeded"]
+    env_file:
+      - .env
+    environment: *app-env
+    volumes:
+      # Embedding cache lives here so re-seeding an empty Qdrant does not re-call the embedding API
+      - ./outputs:/app/outputs
+      - ./datas:/app/datas:ro
+      - ./.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: "no"
+
   procurement-qa:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        # Default to CPU torch wheel for fast builds and lightweight footprint.
-        TORCH_INDEX_URL: "https://download.pytorch.org/whl/cpu"
+    build: *app-build
+    image: procurement-qa:latest
     container_name: procurement-mcp
     env_file:
       - .env
     environment:
+      <<: *app-env
       MCP_TRANSPORT: streamable-http
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
-      DOTENV_PATH: .env
-      PYTHONPATH: /app
-      HF_HOME: /app/.cache/huggingface
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      QDRANT_HOST: qdrant
-      QDRANT_PORT: 6333
-      NEO4J_URI: bolt://neo4j:7687
-      USE_TRI_STORE: "true"
     ports:
       - "8000:8000"
     volumes:
-      # Generated corpus/index artifacts mounted read-write
       - ./outputs:/app/outputs
       - ./datasets:/app/datasets
       - ./logs:/app/logs
       # Persistent HuggingFace model cache (rerankers / tokenizers)
       - hf_cache:/app/.cache/huggingface
       # Source data & env mounted read-only
-      - ./datas:/app/datas
-      - ./procurement_data:/app/procurement_data:ro
+      - ./datas:/app/datas:ro
       - ./.env:/app/.env:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "-s", "http://localhost:8000/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # First boot downloads the local cross-encoder reranker (~2 GB) before the server binds
+      start_period: 300s
     # Uncomment to use the GPU cross-encoder reranker (requires NVIDIA Container Toolkit on host):
     # deploy:
     #   resources:
@@ -50,34 +85,37 @@ services:
     #           count: 1
     #           capabilities: [gpu]
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       qdrant:
         condition: service_healthy
       neo4j:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
     container_name: procurement-postgres
     environment:
-      POSTGRES_DB: procurement_rag
-      POSTGRES_USER: procurement_user
-      POSTGRES_PASSWORD: procurement_secret123
+      POSTGRES_DB: ${POSTGRES_DB:-procurement_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-procurement_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-procurement_secret123}
     ports:
       - "5435:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U procurement_user -d procurement_rag"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
   qdrant:
-    image: qdrant/qdrant:latest
+    # Keep the minor version in lockstep with qdrant-client in requirements.txt
+    image: qdrant/qdrant:v1.19.1
     container_name: procurement-qdrant
     ports:
       - "6333:6333"   # REST API
@@ -95,14 +133,21 @@ services:
     image: neo4j:5.26-community
     container_name: procurement-neo4j
     environment:
-      - NEO4J_AUTH=neo4j/procurement_secret123
-      - NEO4J_PLUGINS=["apoc"]
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-procurement_secret123}
+      NEO4J_PLUGINS: '["apoc"]'
     ports:
       - "7474:7474"   # Neo4j Browser UI
       - "7687:7687"   # Bolt protocol
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
+    healthcheck:
+      # Bolt must accept authenticated queries, not merely have the process up
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
 volumes:

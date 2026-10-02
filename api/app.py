@@ -32,7 +32,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"[api.app] WARNING: Startup pre-warming failed: {exc}", file=sys.stderr)
 
-    yield
+    # The streamable-HTTP transport needs its session manager task group running for the app's
+    # lifetime; without it every /mcp request fails with "Task group is not initialized".
+    async with mcp.session_manager.run():
+        yield
 
     print("[api.app] Shutting down ProcurementQA_Agent Backend Service...", file=sys.stderr)
 
@@ -68,12 +71,11 @@ app.include_router(qa_router)
 app.include_router(search_router)
 app.include_router(verify_router)
 
-# Mount Dual-Protocol FastMCP Streamable-HTTP and SSE Apps
-try:
-    app.mount("/mcp", mcp.streamable_http_app())
-    app.mount("/sse", mcp.sse_app())
-except Exception as exc:
-    print(f"[api.app] Warning: Could not mount FastMCP sub-apps: {exc}", file=sys.stderr)
+# FastMCP sub-apps already carry their own paths (/mcp, /sse, /messages/). Register their routes on
+# the root app instead of mounting, which would nest them under /mcp/mcp and /sse/sse.
+# streamable_http_app() must be built before the lifespan starts: it creates mcp.session_manager.
+app.router.routes.extend(mcp.streamable_http_app().routes)
+app.router.routes.extend(mcp.sse_app().routes)
 
 
 @app.get("/", include_in_schema=False)

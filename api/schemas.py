@@ -107,4 +107,5 @@ class ReadinessStatus(BaseModel):
     status: str
     model: Optional[str] = None
     sections_indexed: Optional[int] = None
+    tri_store: Optional[Dict[str, Any]] = None
     error: Optional[str] = None

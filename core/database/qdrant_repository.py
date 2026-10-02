@@ -341,10 +341,11 @@ class QdrantRepository:
             except Exception as e:
                 logger.warning(f"Qdrant RRF fusion query failed, falling back to dense-only: {e}")
 
-        # Fallback to pure dense search
-        response = self.client.search(
+        # Fallback to pure dense search (client.search() was removed in qdrant-client 1.16)
+        response = self.client.query_points(
             collection_name=self.STATUTES_COLLECTION,
-            query_vector=("dense_bge_m3", query_dense),
+            query=query_dense,
+            using="dense_bge_m3",
             query_filter=query_filter,
             limit=top_k,
             with_payload=True,
@@ -355,7 +356,7 @@ class QdrantRepository:
                 "score": pt.score,
                 "payload": pt.payload,
             }
-            for pt in response
+            for pt in response.points
         ]
 
     def hybrid_search_cases(
@@ -404,16 +405,18 @@ class QdrantRepository:
             except Exception:
                 pass
 
-        response = self.client.search(
+        # Dense-only fallback (client.search() was removed in qdrant-client 1.16)
+        response = self.client.query_points(
             collection_name=self.CASES_COLLECTION,
-            query_vector=("dense_bge_m3", query_dense),
+            query=query_dense,
+            using="dense_bge_m3",
             query_filter=tenant_filter,
             limit=top_k,
             with_payload=True,
         )
         return [
             {"case_id": pt.payload.get("case_id"), "score": pt.score, "payload": pt.payload}
-            for pt in response
+            for pt in response.points
         ]
 
     def count_stats(self) -> Dict[str, int]:
