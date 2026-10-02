@@ -214,7 +214,7 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
 
     audit_summary = []
     per_query_chunks = []
-    tokenmind_api_key = os.getenv("TOKENMIND_API_KEY", "***REMOVED***")
+    tokenmind_api_key = os.getenv("TOKENMIND_API_KEY", "")
     tokenmind_base_url = os.getenv("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1")
     tokenmind_model = os.getenv("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3")
 
