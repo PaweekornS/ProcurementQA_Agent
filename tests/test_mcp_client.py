@@ -108,10 +108,11 @@ async def main(url: str, org: str, run_qa: bool, question: str) -> None:
 
             if run_qa:
                 print(f"\n--- 5. ask_procurement_law ---\nQuestion: {question}")
-                qa = _extract(await session.call_tool("ask_procurement_law", {"question": question}))
-                print(f"  status={qa.get('status')} laws={qa.get('applicable_laws')}")
-                check(qa.get("status") != "ERROR" and bool(qa.get("direct_answer")), "agentic answer returned")
-                check(qa.get("organization_id") == org, "QA scoped to header tenant")
+                qa = _extract(await session.call_tool("ask_procurement_law", {"query": question}))
+                print(f"  status={qa.get('status')} grounded={qa.get('grounded')} citations={[c.get('law') for c in qa.get('citations', [])]}")
+                check(qa.get("status") != "ERROR" and bool(qa.get("answer")), "agentic answer returned")
+                check(qa.get("org_id") == org, "QA scoped to header tenant")
+                check(any(c.get("filename") and c.get("page") for c in qa.get("citations", [])), "citations carry source file and page")
             else:
                 print("\n[Tip] Pass --run-qa to exercise the full agentic answer (~1-2 min).")
 

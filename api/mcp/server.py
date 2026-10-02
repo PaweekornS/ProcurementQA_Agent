@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from api.dependencies import get_service
+from api.schemas import QAResponse
 
 
 def _transport_security() -> TransportSecuritySettings:
@@ -154,7 +155,7 @@ if _expose_internal:
 
 @mcp.tool()
 def ask_procurement_law(
-    question: str,
+    query: str,
     org_id: Optional[str] = None,
     ctx: Context = None,
 ) -> Dict[str, Any]:
@@ -164,33 +165,26 @@ def ask_procurement_law(
     only statutory text is needed.
 
     Args:
-        question: The procurement question or case facts, in Thai.
+        query: The procurement question or case facts, in Thai.
         org_id: Tenant fallback when the X-Organization-Id header is not sent.
 
-    Returns status, direct_answer, applicable_laws, decisive_quotes, issues_breakdown,
-    exceptions_or_conditions and organization_id.
+    Returns the same contract as REST /api/v1/qa: status, answer, conditions, citations
+    [{law, quote}], unresolved_issues (only sub-questions still needing another agent),
+    grounded and org_id.
     """
     resolved_org = _resolve_org_id(ctx, org_id)
     try:
         service = get_service()
-        result = service.ask_procurement_law(question=question, org_id=resolved_org)
-        return {
-            "status": result.get("status", "COMPLIANT"),
-            "direct_answer": result.get("direct_answer", ""),
-            "applicable_laws": result.get("applicable_laws", []),
-            "decisive_quotes": result.get("decisive_quotes", []),
-            "issues_breakdown": result.get("issues_breakdown", []),
-            "exceptions_or_conditions": result.get("exceptions_or_conditions", ""),
-            "organization_id": resolved_org,
-        }
+        result = service.ask_procurement_law(question=query, org_id=resolved_org)
+        return QAResponse.from_service(result, resolved_org).model_dump()
     except Exception as e:
         return {
             "status": "ERROR",
-            "direct_answer": "",
-            "applicable_laws": [],
-            "decisive_quotes": [],
-            "issues_breakdown": [],
-            "organization_id": resolved_org,
+            "answer": "",
+            "citations": [],
+            "unresolved_issues": [],
+            "grounded": None,
+            "org_id": resolved_org,
             "error": f"{type(e).__name__}: {e}"
         }
 

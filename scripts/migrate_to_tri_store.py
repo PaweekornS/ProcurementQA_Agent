@@ -34,6 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.database import StorageManager
+from core.preprocess.page_locator import load_ocr_documents
 from core.graph_construct.citation_linker import (
     ACT_TITLE,
     extract_legal_edges,
@@ -41,9 +42,10 @@ from core.graph_construct.citation_linker import (
     resolve_case_citations,
 )
 
-# Bump whenever relationship-extraction rules change: a seeded store whose Neo4j graph carries
-# an older version gets its relationships rebuilt on the next `--skip-if-seeded` run.
-GRAPH_LINKER_VERSION = 3
+# Bump whenever relationship-extraction rules or derived chunk metadata (e.g. page ranges) change:
+# a seeded store whose Neo4j graph carries an older version is re-upserted into PostgreSQL and
+# relinked on the next `--skip-if-seeded` run (Qdrant is skipped while in parity).
+GRAPH_LINKER_VERSION = 4
 
 # Shared linker relations -> Neo4j relationship types queried by Neo4jRepository
 NEO4J_REL_TYPES = {
@@ -207,6 +209,7 @@ def run_migration(
     skip_embed: bool = False,
     skip_if_seeded: bool = False,
     force_embed: bool = False,
+    ocr_dir: str = "datas/typhoon_ocr",
 ):
     print("=" * 65)
     print("LEGAL-GRAPH-RAG: TRI-STORE DATABASE MIGRATION PIPELINE")
@@ -242,6 +245,12 @@ def run_migration(
         raw_laws = raw_laws[:limit]
         print(f"Limiting ingestion to first {limit} records as requested.")
 
+    # Page ranges are recovered from the OCR markdown the chunks were cut from
+    ocr_docs = load_ocr_documents(ocr_dir)
+    ocr_search_pos: Dict[str, int] = {}
+    if not ocr_docs:
+        print(f"Warning: no OCR markdown under '{ocr_dir}'; page_start/page_end will be empty.")
+
     doc_map: Dict[str, Dict[str, Any]] = {}
     clauses: List[Dict[str, Any]] = []
     # Inputs for the shared citation linker (core/graph_construct/citation_linker.py)
@@ -269,18 +278,23 @@ def run_migration(
             doc_title = normalize_doc_name(entry_id.split("|")[0])
 
         doc_id = slugify_doc_id(doc_title)
+        ocr_key = str(raw.get("doc_name") or doc_title).strip()
+        ocr_doc = ocr_docs.get(ocr_key)
         if doc_id not in doc_map:
             doc_map[doc_id] = {
                 "doc_id": doc_id,
                 "title": doc_title,
                 "doc_type": classify_doc_type(doc_title),
                 "year_be": extract_year_be(doc_title),
-                "source_file": doc_title + ".md",
-                "total_pages": None,
+                # Path relative to the OCR root, so clients can open the exact source document
+                "source_file": ocr_doc.rel_path if ocr_doc else doc_title + ".md",
+                "total_pages": ocr_doc.total_pages if ocr_doc else None,
                 "metadata": {"source": "typhoon_ocr"}
             }
 
         p_start, p_end = extract_pages(entry_id)
+        if ocr_doc and p_start is None:
+            p_start, p_end, ocr_search_pos[ocr_key] = ocr_doc.locate(text_content, ocr_search_pos.get(ocr_key, 0))
         # Numbers come from the chunk's own label ('มาตรา ๕๖', 'ข้อ ๗๙ (ตอนที่ 2)'), never from body
         # text: a regulation clause saying 'ตามมาตรา 56' is not section 56.
         # The entry id keeps the '(ตอนที่ N)' part suffix that the 'section' field drops.
@@ -308,6 +322,8 @@ def run_migration(
         })
 
     documents = list(doc_map.values())
+    located = sum(1 for c in clauses if c["page_start"] is not None)
+    print(f"Page ranges recovered for {located}/{len(clauses)} clauses from {len(ocr_docs)} OCR documents.")
     print(f"Extracted {len(documents)} distinct Legal Documents and {len(clauses)} Statutory Clauses.")
 
     # ---------------------------------------------------------
@@ -509,6 +525,7 @@ if __name__ == "__main__":
     parser.add_argument("--cache-dir", default="outputs/migration_cache", help="Cache directory for embeddings")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of chunks to ingest (for testing)")
     parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation and Qdrant ingestion")
+    parser.add_argument("--ocr-dir", default="datas/typhoon_ocr", help="Typhoon OCR markdown root used to recover page numbers")
     parser.add_argument("--force-embed", action="store_true", help="Re-embed and re-index Qdrant even if it is already in parity")
     parser.add_argument("--skip-if-seeded", action="store_true", help="Exit early if all three stores are already populated and in parity")
 
@@ -521,4 +538,5 @@ if __name__ == "__main__":
         skip_embed=args.skip_embed,
         skip_if_seeded=args.skip_if_seeded,
         force_embed=args.force_embed,
+        ocr_dir=args.ocr_dir,
     )
