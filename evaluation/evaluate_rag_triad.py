@@ -363,9 +363,9 @@ class GenerationEvaluator:
 
         # 2. LLM-as-a-Judge Metrics
         llm_metrics = {
-            "faithfulness": 1.0,
-            "completeness": 0.8,
-            "answer_relevancy": 1.0,
+            "faithfulness": None,
+            "completeness": None,
+            "answer_relevancy": None,
             "rationale": "Deterministic mode only (LLM Judge skipped)"
         }
 
@@ -500,9 +500,10 @@ def run_rag_triad_evaluation(
             ground_truth_sections=gt_sections,
             k=top_k
         )
+        eval_cutoffs = sorted({5, 10, 15, 20, top_k})
         ret_metrics["by_k"] = {
             str(k): compute_retrieval_metrics(ranked_context, expected_pairs, gt_sections, k=k)
-            for k in sorted({5, 10, top_k})
+            for k in eval_cutoffs
         }
         # Context recall: share of ground-truth sections present anywhere in the generator's context
         ret_metrics["context_size"] = len(ranked_context)
@@ -618,12 +619,16 @@ def run_rag_triad_evaluation(
         f"mean_recall_at_{top_k}": safe_avg(total_recall_k),
         "evaluated_k": top_k
     }
-    for k_str in sorted({str(k) for s in valid_samples for k in s["retrieval"].get("by_k", {})}, key=int):
+    k_benchmarks = [5, 10, 15, 20]
+    for k_val in k_benchmarks:
+        k_str = str(k_val)
         rows = [s["retrieval"]["by_k"][k_str] for s in valid_samples if k_str in s["retrieval"].get("by_k", {})]
         retrieval_summary[f"at_{k_str}"] = {
             "hit": safe_avg([r["hit_at_k"] for r in rows]),
             "mrr": safe_avg([r["mrr_at_k"] for r in rows]),
             "recall": safe_avg([r["recall_at_k"] for r in rows]),
+            "adjusted_precision": safe_avg([r["adjusted_precision_at_k"] for r in rows]),
+            "precision": safe_avg([r["precision_at_k"] for r in rows]),
         }
     retrieval_summary["mean_context_recall"] = safe_avg([s["retrieval"].get("context_recall", 0.0) for s in valid_samples])
     retrieval_summary["mean_context_size"] = safe_avg([s["retrieval"].get("context_size", 0) for s in valid_samples])
@@ -648,22 +653,29 @@ def run_rag_triad_evaluation(
             json.dump(summary_report, f, ensure_ascii=False, indent=2)
         print(f"[+] Evaluation Report saved to: {output_report_file}")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 66)
     print("🎯 RAG TRIAD & LEGAL EVALUATION SUMMARY REPORT")
-    print("=" * 60)
+    print("=" * 66)
     print(f"📊 Evaluated: {len(valid_samples)}/{total_count} cases | Skipped (NO_LAW_FOUND): {skipped_count}")
-    print("-" * 60)
-    print(f"1. RETRIEVAL LAYER (Top-{top_k} Evidence Chunks):")
-    print(f"   - Strict Hit@{top_k} (Success Rate):       {summary_report['retrieval_layer'][f'mean_hit_at_{top_k}'] * 100:.2f}%")
-    print(f"   - MRR@{top_k} (Mean Reciprocal Rank):     {summary_report['retrieval_layer'][f'mean_mrr_at_{top_k}'] * 100:.2f}%")
-    print(f"   - Adjusted Precision@{top_k} (vs GT size): {summary_report['retrieval_layer'][f'mean_adjusted_precision_at_{top_k}'] * 100:.2f}%")
-    print(f"   - Fixed Precision@{top_k} (Raw / K={top_k}):     {summary_report['retrieval_layer'][f'mean_precision_at_{top_k}'] * 100:.2f}%")
-    print(f"   - Ground Truth Recall@{top_k}:             {summary_report['retrieval_layer'][f'mean_recall_at_{top_k}'] * 100:.2f}%")
-    print(f"2. GENERATION LAYER:")
-    print(f"   - Faithfulness (Grounding):           {summary_report['generation_layer']['mean_faithfulness'] * 100:.2f}%")
-    print(f"   - Completeness:                      {summary_report['generation_layer']['mean_completeness'] * 100:.2f}%")
-    print(f"   - Answer Relevancy:                  {summary_report['generation_layer']['mean_answer_relevancy'] * 100:.2f}%")
-    print("=" * 60)
+    print("-" * 66)
+    print("1. RETRIEVAL LAYER (Multi-Cutoff Benchmark: K = 5, 10, 15, 20):")
+    print(f"   {'Cutoff':<8} | {'MRR@K':<10} | {'Recall@K':<12} | {'Adj Precision@K':<18}")
+    print("   " + "-" * 60)
+    for k_val in k_benchmarks:
+        k_str = str(k_val)
+        if f"at_{k_str}" in retrieval_summary:
+            m = retrieval_summary[f"at_{k_str}"]
+            print(f"   K={k_val:<5} | {m['mrr']*100:>8.2f}% | {m['recall']*100:>10.2f}% | {m['adjusted_precision']*100:>16.2f}%")
+    print(f"   * Mean Context Recall: {retrieval_summary['mean_context_recall']*100:.2f}% (Average context pool: {retrieval_summary['mean_context_size']:.1f} chunks)")
+    print("-" * 66)
+    print("2. GENERATION LAYER:")
+    if use_llm_judge and total_faithfulness:
+        print(f"   - Faithfulness (Grounding):           {summary_report['generation_layer']['mean_faithfulness'] * 100:.2f}%")
+        print(f"   - Completeness:                      {summary_report['generation_layer']['mean_completeness'] * 100:.2f}%")
+        print(f"   - Answer Relevancy:                  {summary_report['generation_layer']['mean_answer_relevancy'] * 100:.2f}%")
+    else:
+        print("   - LLM Judge:                         [Skipped with --no-llm-judge]")
+    print("=" * 66)
 
     return summary_report
 
