@@ -70,6 +70,24 @@ class TestMultiTenancyIsolation(unittest.TestCase):
         cls.storage.neo4j.sync_faq_cases([cls.dga_case], org_id="DGA")
         cls.storage.neo4j.sync_faq_cases([cls.mof_case], org_id="MOF")
 
+    @classmethod
+    def tearDownClass(cls):
+        """Remove the tenant fixtures so the shared stores stay in parity with the real corpus."""
+        from qdrant_client.http import models
+        from sqlalchemy import text
+
+        case_ids = [cls.dga_case["case_id"], cls.mof_case["case_id"]]
+        with cls.storage.pg.engine.begin() as conn:
+            conn.execute(text("DELETE FROM faq_cases WHERE case_id IN :ids"), {"ids": tuple(case_ids)})
+        cls.storage.qdrant.client.delete(
+            collection_name=cls.storage.qdrant.CASES_COLLECTION,
+            points_selector=models.FilterSelector(filter=models.Filter(must=[
+                models.FieldCondition(key="case_id", match=models.MatchAny(any=case_ids))
+            ])),
+        )
+        with cls.storage.neo4j.driver.session() as session:
+            session.run("MATCH (f:FAQCase) WHERE f.case_id IN $ids DETACH DELETE f", ids=case_ids)
+
     def test_01_postgres_isolation(self):
         """Postgres queries must filter out records belonging to other tenants."""
         # Querying as DGA

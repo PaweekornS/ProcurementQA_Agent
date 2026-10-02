@@ -18,3 +18,7 @@ htmlcov/
 logs/
 outputs/
 .cache
+
+# Raw source data stays out of the image too (page metadata is embedded in law_to_crime.json)
+datas/typhoon_ocr/
+datas/*.xlsx

@@ -34,6 +34,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.database import StorageManager
+from core.preprocess.page_locator import load_ocr_documents
+from core.utils.settings import env
 from core.graph_construct.citation_linker import (
     ACT_TITLE,
     extract_legal_edges,
@@ -41,9 +43,10 @@ from core.graph_construct.citation_linker import (
     resolve_case_citations,
 )
 
-# Bump whenever relationship-extraction rules change: a seeded store whose Neo4j graph carries
-# an older version gets its relationships rebuilt on the next `--skip-if-seeded` run.
-GRAPH_LINKER_VERSION = 3
+# Bump whenever relationship-extraction rules or derived chunk metadata (e.g. page ranges) change:
+# a seeded store whose Neo4j graph carries an older version is re-upserted into PostgreSQL and
+# relinked on the next `--skip-if-seeded` run (Qdrant is skipped while in parity).
+GRAPH_LINKER_VERSION = 4
 
 # Shared linker relations -> Neo4j relationship types queried by Neo4jRepository
 NEO4J_REL_TYPES = {
@@ -207,6 +210,7 @@ def run_migration(
     skip_embed: bool = False,
     skip_if_seeded: bool = False,
     force_embed: bool = False,
+    ocr_dir: str = "datas/typhoon_ocr",
 ):
     print("=" * 65)
     print("LEGAL-GRAPH-RAG: TRI-STORE DATABASE MIGRATION PIPELINE")
@@ -223,9 +227,9 @@ def run_migration(
         print("Tri-Store already seeded (PostgreSQL/Qdrant/Neo4j clause counts in parity). Skipping.")
         return
 
-    tokenmind_api_key = os.getenv("TOKENMIND_API_KEY", "").strip()
-    tokenmind_base_url = os.getenv("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1").rstrip("/")
-    tokenmind_model = os.getenv("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3")
+    tokenmind_api_key = env("TOKENMIND_API_KEY", "").strip()
+    tokenmind_base_url = env("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1").rstrip("/")
+    tokenmind_model = env("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3")
     os.makedirs(cache_dir, exist_ok=True)
 
     # ---------------------------------------------------------
@@ -241,6 +245,13 @@ def run_migration(
     if limit and limit > 0:
         raw_laws = raw_laws[:limit]
         print(f"Limiting ingestion to first {limit} records as requested.")
+
+    # Page ranges are recovered from the OCR markdown the chunks were cut from
+    ocr_docs = load_ocr_documents(ocr_dir)
+    ocr_search_pos: Dict[str, int] = {}
+    if not ocr_docs and not any("page_start" in r for r in raw_laws):
+        print(f"Warning: corpus has no page metadata and no OCR markdown under '{ocr_dir}'; "
+              "run scripts/annotate_corpus_pages.py where the OCR files are available.")
 
     doc_map: Dict[str, Dict[str, Any]] = {}
     clauses: List[Dict[str, Any]] = []
@@ -269,18 +280,27 @@ def run_migration(
             doc_title = normalize_doc_name(entry_id.split("|")[0])
 
         doc_id = slugify_doc_id(doc_title)
+        ocr_key = str(raw.get("doc_name") or doc_title).strip()
+        ocr_doc = ocr_docs.get(ocr_key)
         if doc_id not in doc_map:
             doc_map[doc_id] = {
                 "doc_id": doc_id,
                 "title": doc_title,
                 "doc_type": classify_doc_type(doc_title),
                 "year_be": extract_year_be(doc_title),
-                "source_file": doc_title + ".md",
-                "total_pages": None,
+                # Path relative to the OCR root, so clients can open the exact source document.
+                # Prefer metadata embedded in the corpus (scripts/annotate_corpus_pages.py) so
+                # deployments work without the raw OCR files; fall back to live OCR lookup.
+                "source_file": raw.get("source_file") or (ocr_doc.rel_path if ocr_doc else doc_title + ".md"),
+                "total_pages": raw.get("total_pages") or (ocr_doc.total_pages if ocr_doc else None),
                 "metadata": {"source": "typhoon_ocr"}
             }
 
-        p_start, p_end = extract_pages(entry_id)
+        p_start, p_end = raw.get("page_start"), raw.get("page_end")
+        if p_start is None:
+            p_start, p_end = extract_pages(entry_id)
+        if ocr_doc and p_start is None and "page_start" not in raw:
+            p_start, p_end, ocr_search_pos[ocr_key] = ocr_doc.locate(text_content, ocr_search_pos.get(ocr_key, 0))
         # Numbers come from the chunk's own label ('มาตรา ๕๖', 'ข้อ ๗๙ (ตอนที่ 2)'), never from body
         # text: a regulation clause saying 'ตามมาตรา 56' is not section 56.
         # The entry id keeps the '(ตอนที่ N)' part suffix that the 'section' field drops.
@@ -308,6 +328,8 @@ def run_migration(
         })
 
     documents = list(doc_map.values())
+    located = sum(1 for c in clauses if c["page_start"] is not None)
+    print(f"Page ranges available for {located}/{len(clauses)} clauses.")
     print(f"Extracted {len(documents)} distinct Legal Documents and {len(clauses)} Statutory Clauses.")
 
     # ---------------------------------------------------------
@@ -504,11 +526,12 @@ def run_migration(
 if __name__ == "__main__":
     load_dotenv(override=False)
     parser = argparse.ArgumentParser(description="Migrate Thai Procurement QA corpus to Tri-Store")
-    parser.add_argument("--laws-path", default=os.getenv("law_to_crime_path", "datas/law_to_crime.json"), help="Path to law_to_crime.json")
-    parser.add_argument("--cases-path", default=os.getenv("case_db_path", "datas/cases_with_feature.json"), help="Path to cases_with_feature.json")
+    parser.add_argument("--laws-path", default=env("LAW_TO_CRIME_PATH", "datas/law_to_crime.json"), help="Path to law_to_crime.json")
+    parser.add_argument("--cases-path", default=env("CASE_DB_PATH", "datas/cases_with_feature.json"), help="Path to cases_with_feature.json")
     parser.add_argument("--cache-dir", default="outputs/migration_cache", help="Cache directory for embeddings")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of chunks to ingest (for testing)")
     parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation and Qdrant ingestion")
+    parser.add_argument("--ocr-dir", default="datas/typhoon_ocr", help="Typhoon OCR markdown root used to recover page numbers")
     parser.add_argument("--force-embed", action="store_true", help="Re-embed and re-index Qdrant even if it is already in parity")
     parser.add_argument("--skip-if-seeded", action="store_true", help="Exit early if all three stores are already populated and in parity")
 
@@ -521,4 +544,5 @@ if __name__ == "__main__":
         skip_embed=args.skip_embed,
         skip_if_seeded=args.skip_if_seeded,
         force_embed=args.force_embed,
+        ocr_dir=args.ocr_dir,
     )

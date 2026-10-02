@@ -5,9 +5,10 @@ api/app.py
 Main FastAPI Application for LegalGraphRAG Thai Procurement Law.
 Provides dual-protocol serving:
   1. Standard REST API (/api/v1/qa, /api/v1/search, /api/v1/verify, /healthz, /ready)
-  2. Mounted FastMCP Protocol (/mcp for streamable-http, /sse for Server-Sent Events)
+  2. FastMCP Protocol over Streamable HTTP (/mcp)
 """
 
+import os
 import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -48,7 +49,7 @@ app = FastAPI(
         "- **Agentic Q&A (/api/v1/qa)**: Pure LangGraph workflow returning direct answers, decisive quotes, and sub-issue breakdown.\n"
         "- **Hybrid Search (/api/v1/search)**: Dense vector + Thai BM25 statutory retrieval.\n"
         "- **Compliance Check (/api/v1/verify)**: Rule-based monetary thresholds & procurement method verification.\n"
-        "- **MCP Protocol (/mcp, /sse)**: Model Context Protocol endpoints for client agents."
+        "- **MCP Protocol (/mcp)**: Model Context Protocol endpoint (Streamable HTTP) for client agents."
     ),
     version="1.0.0",
     docs_url="/docs",
@@ -56,12 +57,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS Middleware for web orchestrator clients
+# CORS: list the frontend origins in CORS_ALLOW_ORIGINS (comma-separated). Without it any origin
+# may call the API, but without credentials: browsers reject wildcard origins with credentials,
+# and pairing them would let any website make cookie-authenticated calls.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=bool(_cors_origins),
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -71,11 +75,11 @@ app.include_router(qa_router)
 app.include_router(search_router)
 app.include_router(verify_router)
 
-# FastMCP sub-apps already carry their own paths (/mcp, /sse, /messages/). Register their routes on
-# the root app instead of mounting, which would nest them under /mcp/mcp and /sse/sse.
+# The FastMCP sub-app already carries its own path (/mcp). Register its routes on the root app
+# instead of mounting, which would nest it under /mcp/mcp. The legacy SSE transport is not served:
+# it is deprecated in the MCP spec and Streamable HTTP covers every client.
 # streamable_http_app() must be built before the lifespan starts: it creates mcp.session_manager.
 app.router.routes.extend(mcp.streamable_http_app().routes)
-app.router.routes.extend(mcp.sse_app().routes)
 
 
 @app.get("/", include_in_schema=False)

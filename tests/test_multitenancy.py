@@ -55,7 +55,7 @@ class TestMultiTenancy(unittest.TestCase):
         response = self.client.post("/api/v1/search", json=payload)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data.get("organization_id"), "ORG_05_MOPH")
+        self.assertEqual(data.get("org_id"), "ORG_05_MOPH")
 
     def test_03_api_header_org_id_resolution(self):
         """Verifies that X-Organization-Id header resolves tenant when omitted from body."""
@@ -67,7 +67,7 @@ class TestMultiTenancy(unittest.TestCase):
         response = self.client.post("/api/v1/search", json=payload, headers=headers)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data.get("organization_id"), "ORG_02_DEPA")
+        self.assertEqual(data.get("org_id"), "ORG_02_DEPA")
 
     def test_04_default_tenant_fallback(self):
         """Verifies that missing org_id falls back cleanly to DEFAULT_ORG_ID (e.g. DGA)."""
@@ -76,7 +76,7 @@ class TestMultiTenancy(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         expected_default = os.getenv("DEFAULT_ORG_ID", "DGA")
-        self.assertEqual(data.get("organization_id"), expected_default)
+        self.assertEqual(data.get("org_id"), expected_default)
 
 
 if __name__ == "__main__":

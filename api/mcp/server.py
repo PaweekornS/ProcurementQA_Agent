@@ -7,12 +7,21 @@ Exposes specialized tools, resources, and prompt templates for MCP clients
 (e.g., Claude Desktop, Cursor, Super-Orchestrator MCP clients).
 """
 
+import functools
 import json
+import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional
+import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from api.dependencies import get_service
+from api.schemas import QAResponse
+from core.service import ServiceBusyError
+from core.utils.settings import env
+
+logger = logging.getLogger("api.mcp")
 
 
 def _transport_security() -> TransportSecuritySettings:
@@ -42,7 +51,7 @@ mcp = FastMCP(
     transport_security=_transport_security(),
 )
 
-_expose_internal = os.getenv("expose_internal_tools", "false").strip().lower() in ("true", "1", "yes")
+_expose_internal = env("EXPOSE_INTERNAL_TOOLS", "false").strip().lower() in ("true", "1", "yes")
 
 
 def _resolve_org_id(ctx: Optional[Context], org_id: Optional[str]) -> str:
@@ -61,12 +70,28 @@ def _resolve_org_id(ctx: Optional[Context], org_id: Optional[str]) -> str:
     return os.getenv("DEFAULT_ORG_ID", "DGA").strip()
 
 
+async def _run(fn, *args, **kwargs):
+    """
+    Run blocking service code in a worker thread. FastMCP calls sync tools directly on the
+    event loop, so a 1-2 min QA call would otherwise freeze every request (REST, /ready) in
+    the process.
+    """
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+
+def _error_ref(exc: BaseException) -> str:
+    """Log the exception server-side and return only a correlation id to the MCP client."""
+    error_id = uuid.uuid4().hex[:12]
+    logger.error("MCP tool call failed [error_id=%s]", error_id, exc_info=exc)
+    return f"Internal error. Reference error_id={error_id} when reporting this issue."
+
+
 # ==============================================================================
 # TIER 1 & 2: ATOMIC RETRIEVAL & GRAPH TRAVERSAL TOOLS
 # ==============================================================================
 
 @mcp.tool()
-def get_statute_section(
+async def get_statute_section(
     section: str,
     doc_title: Optional[str] = None,
     org_id: Optional[str] = None,
@@ -83,14 +108,14 @@ def get_statute_section(
         org_id: Tenant fallback when the X-Organization-Id header is not sent.
     """
     try:
-        service = get_service()
-        return service.lookup_section(section=section, doc_title=doc_title, org_id=_resolve_org_id(ctx, org_id))
+        service = await _run(get_service)
+        return await _run(service.lookup_section, section=section, doc_title=doc_title, org_id=_resolve_org_id(ctx, org_id))
     except Exception as e:
-        return {"found": False, "error": f"{type(e).__name__}: {e}"}
+        return {"found": False, "error": _error_ref(e)}
 
 
 @mcp.tool()
-def search_procurement_clauses(
+async def search_procurement_clauses(
     query: str,
     top_k: int = 5,
     doc_filter: Optional[str] = None,
@@ -110,26 +135,26 @@ def search_procurement_clauses(
     """
     resolved_org = _resolve_org_id(ctx, org_id)
     try:
-        service = get_service()
-        results = service.search_clauses(query=query, top_k=top_k, doc_filter=doc_filter, org_id=resolved_org)
-        return {"query": query, "count": len(results), "organization_id": resolved_org, "results": results}
+        service = await _run(get_service)
+        results = await _run(service.search_clauses, query=query, top_k=top_k, doc_filter=doc_filter, org_id=resolved_org)
+        return {"query": query, "count": len(results), "org_id": resolved_org, "results": results}
     except Exception as e:
-        return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
+        return {"query": query, "count": 0, "results": [], "error": _error_ref(e)}
 
 
 if _expose_internal:
     @mcp.tool()
-    def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
+    async def search_procurement_faqs(query: str, top_k: int = 3) -> Dict[str, Any]:
         """Search historical consultation rulings and Comptroller General FAQs."""
         try:
-            service = get_service()
-            results = service.search_faqs(query=query, top_k=top_k)
+            service = await _run(get_service)
+            results = await _run(service.search_faqs, query=query, top_k=top_k)
             return {"query": query, "count": len(results), "results": results}
         except Exception as e:
-            return {"query": query, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
+            return {"query": query, "count": 0, "results": [], "error": _error_ref(e)}
 
     @mcp.tool()
-    def get_related_regulations(
+    async def get_related_regulations(
         article_name: str,
         max_hops: int = 1,
         org_id: Optional[str] = None,
@@ -137,15 +162,16 @@ if _expose_internal:
     ) -> Dict[str, Any]:
         """Traverse the statutory knowledge graph to find implementing regulations and related circulars."""
         try:
-            service = get_service()
-            results = service.get_related_clauses(
+            service = await _run(get_service)
+            results = await _run(
+                service.get_related_clauses,
                 section_reference=article_name,
                 org_id=_resolve_org_id(ctx, org_id),
                 max_hops=max_hops,
             )
             return {"article": article_name, "count": len(results), "results": results}
         except Exception as e:
-            return {"article": article_name, "count": 0, "results": [], "error": f"{type(e).__name__}: {e}"}
+            return {"article": article_name, "count": 0, "results": [], "error": _error_ref(e)}
 
 
 # ==============================================================================
@@ -153,8 +179,8 @@ if _expose_internal:
 # ==============================================================================
 
 @mcp.tool()
-def ask_procurement_law(
-    question: str,
+async def ask_procurement_law(
+    query: str,
     org_id: Optional[str] = None,
     ctx: Context = None,
 ) -> Dict[str, Any]:
@@ -164,71 +190,77 @@ def ask_procurement_law(
     only statutory text is needed.
 
     Args:
-        question: The procurement question or case facts, in Thai.
+        query: The procurement question or case facts, in Thai.
         org_id: Tenant fallback when the X-Organization-Id header is not sent.
 
-    Returns status, direct_answer, applicable_laws, decisive_quotes, issues_breakdown,
-    exceptions_or_conditions and organization_id.
+    Returns the same contract as REST /api/v1/qa: status, answer, conditions, citations
+    [{law, quote}], unresolved_issues (only sub-questions still needing another agent),
+    grounded and org_id.
     """
     resolved_org = _resolve_org_id(ctx, org_id)
     try:
-        service = get_service()
-        result = service.ask_procurement_law(question=question, org_id=resolved_org)
+        service = await _run(get_service)
+        result = await _run(service.ask_procurement_law, question=query, org_id=resolved_org)
+        return QAResponse.from_service(result, resolved_org).model_dump()
+    except ServiceBusyError as e:
         return {
-            "status": result.get("status", "COMPLIANT"),
-            "direct_answer": result.get("direct_answer", ""),
-            "applicable_laws": result.get("applicable_laws", []),
-            "decisive_quotes": result.get("decisive_quotes", []),
-            "issues_breakdown": result.get("issues_breakdown", []),
-            "exceptions_or_conditions": result.get("exceptions_or_conditions", ""),
-            "organization_id": resolved_org,
+            "status": "BUSY",
+            "answer": "",
+            "citations": [],
+            "unresolved_issues": [],
+            "grounded": None,
+            "org_id": resolved_org,
+            "error": f"{e} Retry in ~30 s.",
         }
     except Exception as e:
         return {
             "status": "ERROR",
-            "direct_answer": "",
-            "applicable_laws": [],
-            "decisive_quotes": [],
-            "issues_breakdown": [],
-            "organization_id": resolved_org,
-            "error": f"{type(e).__name__}: {e}"
+            "answer": "",
+            "citations": [],
+            "unresolved_issues": [],
+            "grounded": None,
+            "org_id": resolved_org,
+            "error": _error_ref(e)
         }
 
 
 @mcp.tool()
-def check_procurement_threshold(
-    item: str,
-    budget: float,
-    method: str,
-    justification: str = ""
+async def check_procurement_threshold(
+    procurement_item: str,
+    estimated_budget: float,
+    proposed_method: str,
+    justification_reason: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Deterministic check of a procurement method against statutory budget thresholds (~2 ms, no LLM).
 
     Args:
-        item: What is being procured, e.g. "เครื่องคอมพิวเตอร์".
-        budget: Estimated budget in THB.
-        method: Proposed method, e.g. "เฉพาะเจาะจง", "คัดเลือก", "e-bidding".
-        justification: Optional legal ground, e.g. "จำเป็นเร่งด่วน".
+        procurement_item: What is being procured, e.g. "เครื่องคอมพิวเตอร์".
+        estimated_budget: Estimated budget in THB.
+        proposed_method: Proposed method, e.g. "เฉพาะเจาะจง", "คัดเลือก", "e-bidding".
+        justification_reason: Optional legal ground, e.g. "จำเป็นเร่งด่วน".
+
+    Same fields as REST POST /api/v1/verify.
     """
     try:
-        service = get_service()
-        return service.verify_compliance(
-            procurement_item=item,
-            estimated_budget=budget,
-            proposed_method=method,
-            justification_reason=justification
+        service = await _run(get_service)
+        return await _run(
+            service.verify_compliance,
+            procurement_item=procurement_item,
+            estimated_budget=estimated_budget,
+            proposed_method=proposed_method,
+            justification_reason=justification_reason
         )
     except Exception as e:
-        return {"status": "ERROR", "is_compliant": False, "error": f"{type(e).__name__}: {e}"}
+        return {"status": "ERROR", "is_compliant": False, "error": _error_ref(e)}
 
 
 if _expose_internal:
     @mcp.tool()
-    def healthcheck() -> Dict[str, Any]:
+    async def healthcheck() -> Dict[str, Any]:
         """Report whether the LegalGraphRAG pipeline and services are loaded and ready."""
         try:
-            service = get_service()
+            service = await _run(get_service)
             rag = service.rag
             return {
                 "ready": True,
@@ -237,7 +269,7 @@ if _expose_internal:
                 "indexed_sections_count": len(service._section_index)
             }
         except Exception as e:
-            return {"ready": False, "error": f"{type(e).__name__}: {e}"}
+            return {"ready": False, "error": _error_ref(e)}
 
 
 # ==============================================================================
