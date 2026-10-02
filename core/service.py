@@ -16,11 +16,15 @@ import os
 import sys
 import re
 import json
+import threading
+import time
+import uuid
 from typing import Dict, Any, List, Optional, Tuple
 
 from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
 from core.graph_construct.graph_db import GraphDBManager
 from core.preprocess.page_locator import format_page_range
+from core.utils.settings import env
 
 
 # Thai to Arabic digits mapping and vice versa
@@ -42,6 +46,17 @@ def to_thai_digits(text: str) -> str:
     return str(text).translate(ARABIC_TO_THAI)
 
 
+# Each agentic QA run holds an LLM conversation and CPU reranker work for ~1-2 minutes. Bounding
+# concurrency protects the CPU, memory and the LLM provider's rate limit; excess callers queue
+# briefly and then get ServiceBusyError (HTTP 503) instead of degrading everyone's latency.
+_QA_MAX_CONCURRENCY = int(os.getenv("QA_MAX_CONCURRENCY", "4"))
+_QA_SLOTS = threading.BoundedSemaphore(_QA_MAX_CONCURRENCY)
+
+
+class ServiceBusyError(RuntimeError):
+    """Raised when no QA slot frees up within QA_QUEUE_TIMEOUT_SECONDS."""
+
+
 class ProcurementService:
     """
     Singleton service managing LegalGraphRAG components, cached statutory lookups,
@@ -61,8 +76,8 @@ class ProcurementService:
         # Explicit override
         if auto_build is not None:
             self.config.graph.auto_build = auto_build
-        elif os.getenv("AUTO_BUILD") is not None:
-            self.config.graph.auto_build = os.getenv("AUTO_BUILD", "True").lower() in ("true", "1", "yes")
+        elif env("AUTO_BUILD") is not None:
+            self.config.graph.auto_build = env("AUTO_BUILD", "True").lower() in ("true", "1", "yes")
         elif os.getenv("DISABLE_AUTO_BUILD") == "1":
             self.config.graph.auto_build = False
             
@@ -78,9 +93,9 @@ class ProcurementService:
 
             if is_reranker_enabled():
                 import torch
-                reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-                reranker_device = os.getenv("reranker_device", "cuda:0" if (torch and torch.cuda.is_available()) else "cpu")
-                reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+                reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+                reranker_device = env("RERANKER_DEVICE", "cuda:0" if (torch and torch.cuda.is_available()) else "cpu")
+                reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
 
                 print(f"[ProcurementService] Pre-warming CrossEncoder '{reranker_model}' on '{reranker_device}'...")
                 reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
@@ -586,8 +601,11 @@ class ProcurementService:
 
     def ask_procurement_law(self, question: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Execute LangGraph Agentic RAG legal analysis workflow.
-        Scoped to tenant org_id.
+        Execute LangGraph Agentic RAG legal analysis workflow, scoped to tenant org_id.
+
+        At most QA_MAX_CONCURRENCY workflows run at once (shared by REST and MCP); a caller that
+        cannot get a slot within QA_QUEUE_TIMEOUT_SECONDS gets ServiceBusyError. Every attempt,
+        including failures, is recorded in query_audit_logs and the result carries its query_id.
         """
         if not question or not question.strip():
             return {
@@ -601,7 +619,27 @@ class ProcurementService:
             }
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org}
+        if not _QA_SLOTS.acquire(timeout=float(os.getenv("QA_QUEUE_TIMEOUT_SECONDS", "30"))):
+            raise ServiceBusyError(f"All {_QA_MAX_CONCURRENCY} QA slots are busy; retry later.")
+
+        query_id = str(uuid.uuid4())
+        started = time.monotonic()
+        result: Optional[Dict[str, Any]] = None
+        error: Optional[str] = None
+        try:
+            result = self._run_qa(question.strip(), active_org)
+            result["query_id"] = query_id
+            return result
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            _QA_SLOTS.release()
+            self._write_audit_log(query_id, active_org, question.strip(), result, error,
+                                  int((time.monotonic() - started) * 1000))
+
+    def _run_qa(self, question: str, active_org: str) -> Dict[str, Any]:
+        case = {"fact": question, "name": "ผู้สอบถาม", "org_id": active_org}
 
         from core.agent import ProcurementAgenticWorkflow
         retrieve_config = self.rag.config.retrieve.to_dict()
@@ -632,10 +670,46 @@ class ProcurementService:
                 }
                 for law in used_laws
             ],
+            "retrieved_clause_ids": [
+                law.get("clause_id") or law.get("id") for law in used_laws if law.get("clause_id") or law.get("id")
+            ],
             "crag_meta": agent_res.get("crag_meta", {}),
             "guardrail_verdict": judge.get("guardrail_verdict", {}),
-            "organization_id": active_org
+            "org_id": active_org
         }
+
+    def _write_audit_log(
+        self,
+        query_id: str,
+        org_id: str,
+        question: str,
+        result: Optional[Dict[str, Any]],
+        error: Optional[str],
+        latency_ms: int,
+    ) -> None:
+        """Best-effort audit record; an audit failure must never fail the user's request."""
+        if os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
+            return
+        try:
+            from core.database import StorageManager
+            result = result or {}
+            verdict = result.get("guardrail_verdict") or {}
+            StorageManager.get_instance().pg.insert_audit_log({
+                "query_id": query_id,
+                "org_id": org_id,
+                "user_query": question,
+                "status": result.get("status") or ("ERROR" if error else None),
+                "decomposed_issues": result.get("issues_breakdown") or [],
+                "retrieved_clause_ids": result.get("retrieved_clause_ids") or [],
+                "citations": result.get("applicable_laws") or [],
+                "synthesized_answer": result.get("direct_answer"),
+                "grounded": verdict.get("passed"),
+                "grounding_score": verdict.get("grounding_score"),
+                "latency_ms": latency_ms,
+                "error": error,
+            })
+        except Exception as exc:
+            print(f"[ProcurementService] WARNING: audit log write failed for {query_id}: {exc}", file=sys.stderr)
 
     def _clause_source_record(self, clause_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Authoritative clause row (with source_file / page range) from PostgreSQL in tri-store mode."""

@@ -7,6 +7,7 @@ Statutory compliance verification endpoint for threshold checking and method val
 
 from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, status
+from api.errors import internal_error
 from api.dependencies import get_service
 from api.schemas import VerifyComplianceRequest
 from core.service import ProcurementService
@@ -41,7 +42,4 @@ def verify_procurement_compliance(
             justification_reason=payload.justification_reason
         )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Compliance verification failed: {type(exc).__name__}: {str(exc)}"
-        )
+        raise internal_error(exc, "Compliance verification")

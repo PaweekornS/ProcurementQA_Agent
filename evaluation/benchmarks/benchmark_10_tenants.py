@@ -21,7 +21,7 @@ import psutil
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 if hasattr(sys.stdout, "reconfigure"):
     try:

@@ -79,3 +79,7 @@ dmypy.json
 # Raw source data (OCR markdown, FAQ spreadsheet): kept out of git, provided locally / on the server
 datas/typhoon_ocr/
 datas/*.xlsx
+
+# Run outputs; only the RAG-triad baseline is versioned for regression comparison
+logs/*
+!logs/agentic_triad_report.json

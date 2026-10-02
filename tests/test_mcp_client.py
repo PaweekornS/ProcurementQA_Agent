@@ -81,10 +81,10 @@ async def main(url: str, org: str, run_qa: bool, question: str) -> None:
 
             print("\n--- 2. check_procurement_threshold (450,000 THB, เฉพาะเจาะจง) ---")
             comp = _extract(await session.call_tool("check_procurement_threshold", {
-                "item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
-                "budget": 450000.0,
-                "method": "เฉพาะเจาะจง",
-                "justification": "วงเงินไม่เกิน 500,000 บาท",
+                "procurement_item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
+                "estimated_budget": 450000.0,
+                "proposed_method": "เฉพาะเจาะจง",
+                "justification_reason": "วงเงินไม่เกิน 500,000 บาท",
             }))
             check(comp.get("is_compliant") is True, f"compliant verdict (status={comp.get('compliance_status')})")
 
@@ -100,11 +100,11 @@ async def main(url: str, org: str, run_qa: bool, question: str) -> None:
                 "query": "วิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท", "top_k": 3,
             }))
             check(search.get("count", 0) > 0, f"{search.get('count')} clauses returned")
-            check(search.get("organization_id") == org, f"tenant taken from header (got {search.get('organization_id')})")
+            check(search.get("org_id") == org, f"tenant taken from header (got {search.get('org_id')})")
             spoofed = _extract(await session.call_tool("search_procurement_clauses", {
                 "query": "วิธีคัดเลือก", "top_k": 1, "org_id": "SOME_OTHER_ORG",
             }))
-            check(spoofed.get("organization_id") == org, "header wins over an LLM-supplied org_id argument")
+            check(spoofed.get("org_id") == org, "header wins over an LLM-supplied org_id argument")
 
             if run_qa:
                 print(f"\n--- 5. ask_procurement_law ---\nQuestion: {question}")

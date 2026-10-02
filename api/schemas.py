@@ -64,6 +64,7 @@ class QAResponse(BaseModel):
         None, description="True when every cited section appears in the retrieved evidence; null if not evaluated"
     )
     org_id: str = Field(..., description="Tenant the answer was scoped to")
+    query_id: Optional[str] = Field(None, description="Audit log id (query_audit_logs) for tracing this answer")
 
     @classmethod
     def from_service(cls, raw: Dict[str, Any], org_id: str) -> "QAResponse":
@@ -114,6 +115,7 @@ class QAResponse(BaseModel):
             unresolved_issues=unresolved,
             grounded=verdict.get("passed") if "passed" in verdict else None,
             org_id=org_id,
+            query_id=raw.get("query_id"),
         )
 
 
@@ -133,7 +135,7 @@ class StatutorySearchResponse(BaseModel):
     """Response payload for statutory clause hybrid search."""
     query: str
     count: int
-    organization_id: str
+    org_id: str
     results: List[Dict[str, Any]] = Field(default_factory=list)
 
 

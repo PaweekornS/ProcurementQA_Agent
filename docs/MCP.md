@@ -24,7 +24,7 @@ flowchart TD
         direction TB
         SWAGGER["/docs\nOpenAPI Interactive UI"]
         ENDPOINT_REST["/api/v1/*\nFastAPI REST Routers"]
-        ENDPOINT_MCP["/mcp & /sse\nMounted FastMCP Sub-apps"]
+        ENDPOINT_MCP["/mcp\nFastMCP Streamable HTTP"]
 
         subgraph T1["Tier 1: Atomic Retrieval & Lookup (Low Latency / 0-LLM)"]
             T1_1["get_statute_section\nExact article lookup"]
@@ -52,7 +52,7 @@ flowchart TD
     ORCH -->|REST POST /api/v1/qa| ENDPOINT_REST
     ORCH -->|MCP streamable-http| ENDPOINT_MCP
     WEB --> ENDPOINT_REST
-    DESK -->|MCP stdio / sse| ENDPOINT_MCP
+    DESK -->|MCP stdio / streamable-http| ENDPOINT_MCP
 
     ENDPOINT_REST --> T1 & T3
     ENDPOINT_MCP --> T1 & T2 & T3 & T4
