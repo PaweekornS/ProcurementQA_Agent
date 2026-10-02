@@ -41,6 +41,8 @@ def merge_and_dedup_laws(law_lists: List[List[Dict[str, Any]]]) -> List[Dict[str
     return merged
 
 
+
+
 class ProcurementAgenticWorkflow:
     """Compiled LangGraph Agentic RAG Workflow with Adaptive Query Rewriting and Grounding Guardrail."""
 
@@ -163,6 +165,7 @@ class ProcurementAgenticWorkflow:
             retrieved_batches.append(init_laws)
 
         # Multi-aspect sub-query retrieval
+        sub_batches = []
         if len(issues) > 1:
             for iss in issues:
                 sub_q = iss.get("sub_query", "")
@@ -172,6 +175,7 @@ class ProcurementAgenticWorkflow:
                     _, _, sub_laws = query_similar_nodes(self.model, q_text, self.retrieve_config, org_id=org_id)
                     if sub_laws:
                         retrieved_batches.append(sub_laws)
+                        sub_batches.append(sub_laws)
 
         # If rewritten in previous retry, retrieve using the refined query directly
         current_q = state.get("current_query", "")
@@ -187,6 +191,7 @@ class ProcurementAgenticWorkflow:
         # 1. Deterministic statutory entity resolution
         # 2. Multi-hop statutory citation traversal (EMPOWERS, CITED_BY, CITES, NEXT_SECTION)
         # 3. Topic & Crime graph topology expansion
+        graph_results = []
         try:
             from core.graph_construct.citation_linker import LegalCitationLinker
             from core.graph_construct.graph_db import GraphDBManager
@@ -215,10 +220,34 @@ class ProcurementAgenticWorkflow:
         existing_cands = state.get("retrieved_candidates", [])
         all_candidates = merge_and_dedup_laws([existing_cands, candidate_laws])
 
+        # Cross-encoder late-stage rerank over all merged candidates against raw_query
+        try:
+            from core.graph_construct.hybrid_reranker import get_reranker, is_reranker_enabled
+            if is_reranker_enabled() and all_candidates:
+                reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+                reranker_device = os.getenv("RERANKER_DEVICE", "cuda:0")
+                reranker = get_reranker(model_name=reranker_model, device=reranker_device)
+                if reranker and reranker.model is not None:
+                    for cand in all_candidates:
+                        if not cand.get("text"):
+                            entry = cand.get("entry", "")
+                            desc = cand.get("description", "")
+                            cand["text"] = f"[{entry}]\n{desc}".strip() if entry else desc
+                    reranked_pool = reranker.rerank(
+                        query=raw_query,
+                        candidates=all_candidates,
+                        top_k=len(all_candidates),
+                        threshold=-999.0
+                    )
+                    if reranked_pool:
+                        all_candidates = reranked_pool
+        except Exception as e:
+            pass
+
         self.logger.log_step(
             case_id=case_id,
             step_num=2,
-            step_name="Hybrid Retrieval & Opper Reranker",
+            step_name="Hybrid Retrieval & Late Reranker",
             message=f"Retrieved and reranked {len(candidate_laws)} candidate chunks (Total accumulated: {len(all_candidates)})",
             emoji="🔍"
         )
@@ -304,7 +333,9 @@ class ProcurementAgenticWorkflow:
     def _node_generate_answer(self, state: AgenticRAGState) -> Dict[str, Any]:
         case_id = state.get("case_id", 0)
         raw_query = state.get("raw_query", "")
-        effective_laws = state.get("retrieved_candidates", [])
+
+        # gate only top 15 chunks after hybrid-retrieval
+        effective_laws = state.get("retrieved_candidates", [])[:15]
 
         if not effective_laws:
             synth_res = {
