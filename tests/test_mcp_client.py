@@ -3,15 +3,14 @@
 """
 test_mcp_client.py
 
-Comprehensive test client for the LegalGraphRAG 4-Tier MCP Server.
-Connects over streamable-http (default: http://localhost:8000/mcp),
-inspects tools, resources, and prompts, and exercises atomic lookups,
-compliance checks, and Q&A.
+End-to-end smoke test of the MCP surface exactly as a Super-Orchestrator sees it:
+connects over streamable-http, sends the tenant in the X-Organization-Id header, lists
+tools/resources/prompts, and calls every public tool. Exits non-zero on any failed check.
 
 Usage:
-    python scripts/test_mcp_client.py
-    python scripts/test_mcp_client.py --url http://localhost:8000/mcp
-    python scripts/test_mcp_client.py --run-qa
+    python tests/test_mcp_client.py
+    python tests/test_mcp_client.py --url http://localhost:8000/mcp --org DGA
+    python tests/test_mcp_client.py --run-qa
 """
 
 import argparse
@@ -21,6 +20,21 @@ import sys
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+EXPECTED_TOOLS = {
+    "get_statute_section",
+    "search_procurement_clauses",
+    "ask_procurement_law",
+    "check_procurement_threshold",
+}
+
+failures = []
+
+
+def check(cond: bool, label: str) -> None:
+    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+    if not cond:
+        failures.append(label)
 
 
 def _extract(result) -> dict:
@@ -41,92 +55,77 @@ def _extract(result) -> dict:
     return data
 
 
-async def main(url: str, run_qa: bool, question: str) -> None:
-    print(f"=== Connecting to MCP server at: {url} ===")
-    async with streamablehttp_client(url) as (read_stream, write_stream, _):
+async def main(url: str, org: str, run_qa: bool, question: str) -> None:
+    print(f"=== Connecting to MCP server at: {url} (X-Organization-Id: {org}) ===")
+    async with streamablehttp_client(url, headers={"X-Organization-Id": org}) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            print(" Connected successfully!\n")
+            init = await session.initialize()
+            print(f"Connected: {init.serverInfo.name}\n")
 
-            # 1. Tools
+            print("--- 1. Discovery ---")
             tools = await session.list_tools()
-            print(f"--- 1. Available Tools ({len(tools.tools)}) ---")
+            tool_names = {t.name for t in tools.tools}
             for t in tools.tools:
-                desc = t.description.splitlines()[0] if t.description else ""
-                print(f"  [Tool] {t.name:<32} : {desc}")
-
-            # 2. Resources
-            try:
-                resources = await session.list_resources()
-                print(f"\n--- 2. Available Resources ({len(resources.resources)}) ---")
-                for r in resources.resources:
-                    print(f"  [Resource] {str(r.uri):<32} : {r.name or ''}")
-
-                # Read thresholds resource
-                print("\n  Reading resource 'procurement://rules/thresholds' snippet:")
-                res_content = await session.read_resource("procurement://rules/thresholds")
-                if res_content and res_content.contents:
-                    sample = res_content.contents[0].text[:180].replace('\n', ' ')
-                    print(f"  > Content preview: {sample}...")
-            except Exception as e:
-                print(f"\n--- 2. Resources check: {e} ---")
-
-            # 3. Prompts
-            try:
-                prompts = await session.list_prompts()
-                print(f"\n--- 3. Available Prompts ({len(prompts.prompts)}) ---")
-                for p in prompts.prompts:
-                    print(f"  [Prompt] {p.name:<32} : {p.description or ''}")
-            except Exception as e:
-                print(f"\n--- 3. Prompts check: {e} ---")
-
-            # 4. Tool Call: healthcheck
-            print("\n--- 4. Testing healthcheck() ---")
-            health = await session.call_tool("healthcheck", {})
-            print(json.dumps(_extract(health), ensure_ascii=False, indent=2))
-
-            # 5. Tool Call: check_procurement_threshold (Primary High-Level Tool)
-            print("\n--- 5. Testing check_procurement_threshold (Budget: 450,000 THB, Specific Method) ---")
-            comp_res = await session.call_tool(
-                "check_procurement_threshold",
-                {
-                    "procurement_item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
-                    "estimated_budget": 450000.0,
-                    "proposed_method": "เฉพาะเจาะจง",
-                    "justification_reason": "วงเงินไม่เกิน 500,000 บาท"
-                }
+                print(f"  [Tool] {t.name:<30} params={list(t.inputSchema.get('properties', {}))}")
+            check(EXPECTED_TOOLS <= tool_names, f"public tools exposed: {sorted(EXPECTED_TOOLS)}")
+            check(
+                all("ctx" not in t.inputSchema.get("properties", {}) for t in tools.tools),
+                "request context is not leaked into tool schemas",
             )
-            print(json.dumps(_extract(comp_res), ensure_ascii=False, indent=2))
+            resources = await session.list_resources()
+            check(len(resources.resources) >= 2, f"{len(resources.resources)} resources listed")
+            thresholds = await session.read_resource("procurement://rules/thresholds")
+            check(bool(thresholds.contents and thresholds.contents[0].text.strip()), "thresholds resource readable")
+            prompts = await session.list_prompts()
+            check(len(prompts.prompts) >= 2, f"{len(prompts.prompts)} prompts listed")
 
-            # 6. Check for Low-Level Tools (if expose_internal_tools=true)
-            tool_names = [t.name for t in tools.tools]
-            if "get_statute_section" in tool_names:
-                print("\n--- 6. Testing internal tool get_statute_section(section='มาตรา 56') ---")
-                sec_res = await session.call_tool("get_statute_section", {"section": "มาตรา 56"})
-                extracted_sec = _extract(sec_res)
-                print(f"Found: {extracted_sec.get('found')}")
-                print(f"Source: {extracted_sec.get('source_id')}")
-                print(f"Snippet: {extracted_sec.get('focused_content', '')[:250]}...\n")
-            else:
-                print("\n--- 6. Low-level internal tools hidden (expose_internal_tools=false) ---")
+            print("\n--- 2. check_procurement_threshold (450,000 THB, เฉพาะเจาะจง) ---")
+            comp = _extract(await session.call_tool("check_procurement_threshold", {
+                "item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
+                "budget": 450000.0,
+                "method": "เฉพาะเจาะจง",
+                "justification": "วงเงินไม่เกิน 500,000 บาท",
+            }))
+            check(comp.get("is_compliant") is True, f"compliant verdict (status={comp.get('compliance_status')})")
 
-            # 7. Full Procurement QA (Primary High-Level Agent Tool)
+            print("\n--- 3. get_statute_section ---")
+            sec = _extract(await session.call_tool("get_statute_section", {"section": "มาตรา 56"}))
+            check(sec.get("found") is True, "มาตรา 56 found")
+            check(str(sec.get("doc_title", "")).startswith("พระราชบัญญัติ"), f"resolved to the Act: {sec.get('doc_title')}")
+            clause = _extract(await session.call_tool("get_statute_section", {"section": "ข้อ 2"}))
+            check(clause.get("ambiguous") is True, f"bare 'ข้อ 2' flagged ambiguous ({len(clause.get('other_documents_with_same_number', []))} other docs)")
+
+            print("\n--- 4. search_procurement_clauses ---")
+            search = _extract(await session.call_tool("search_procurement_clauses", {
+                "query": "วิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท", "top_k": 3,
+            }))
+            check(search.get("count", 0) > 0, f"{search.get('count')} clauses returned")
+            check(search.get("organization_id") == org, f"tenant taken from header (got {search.get('organization_id')})")
+            spoofed = _extract(await session.call_tool("search_procurement_clauses", {
+                "query": "วิธีคัดเลือก", "top_k": 1, "org_id": "SOME_OTHER_ORG",
+            }))
+            check(spoofed.get("organization_id") == org, "header wins over an LLM-supplied org_id argument")
+
             if run_qa:
-                qa_tool_name = "procurement_qa" if "procurement_qa" in tool_names else "ask_procurement_law"
-                print(f"\n--- 7. Testing {qa_tool_name} (mode='fast') ---")
-                print(f"Question: {question}")
-                qa_res = await session.call_tool(qa_tool_name, {"question": question, "mode": "fast"})
-                print(json.dumps(_extract(qa_res), ensure_ascii=False, indent=2))
+                print(f"\n--- 5. ask_procurement_law ---\nQuestion: {question}")
+                qa = _extract(await session.call_tool("ask_procurement_law", {"question": question}))
+                print(f"  status={qa.get('status')} laws={qa.get('applicable_laws')}")
+                check(qa.get("status") != "ERROR" and bool(qa.get("direct_answer")), "agentic answer returned")
+                check(qa.get("organization_id") == org, "QA scoped to header tenant")
             else:
-                print("\n[Tip] Pass --run-qa to test generative procurement_qa inference.")
+                print("\n[Tip] Pass --run-qa to exercise the full agentic answer (~1-2 min).")
+
+    print(f"\n=== {'ALL CHECKS PASSED' if not failures else f'{len(failures)} CHECK(S) FAILED'} ===")
+    if failures:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test client for LegalGraphRAG 4-Tier MCP Server")
+    parser = argparse.ArgumentParser(description="MCP smoke test from the Super-Orchestrator's point of view")
     parser.add_argument("--url", default="http://localhost:8000/mcp", help="FastMCP streamable-http URL")
-    parser.add_argument("--run-qa", action="store_true", help="Run full generative procurement_qa call")
+    parser.add_argument("--org", default="DGA", help="Tenant sent in the X-Organization-Id header")
+    parser.add_argument("--run-qa", action="store_true", help="Also run the full ask_procurement_law call")
     parser.add_argument("--question", default="หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงเนื่องจากเป็นพัสดุที่มีวงเงินเล็กน้อยตาม พ.ร.บ. ได้ไม่เกินวงเงินเท่าใด และต้องขอความเห็นชอบรายงานขอซื้อขอจ้างจากใครก่อนจัดซื้อ", help="Test question")
     args = parser.parse_args()
 
-    asyncio.run(main(args.url, args.run_qa, args.question))
-
+    asyncio.run(main(args.url, args.org, args.run_qa, args.question))

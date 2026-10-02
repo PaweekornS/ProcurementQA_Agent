@@ -143,16 +143,20 @@ class ProcurementService:
                                 self._section_index.setdefault(f"ข้อ {num}", []).append(node_entry)
                                 self._section_index.setdefault(f"rule_{num}", []).append(node_entry)
 
-    def lookup_section(self, section: str, doc_title: Optional[str] = None) -> Dict[str, Any]:
+    def lookup_section(self, section: str, doc_title: Optional[str] = None, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Exact statutory section lookup without generative overhead.
-        
+
         Args:
             section: Section string e.g. "มาตรา 56", "56", "ข้อ 79", "มาตรา ๕๖ (๒) (ข)"
             doc_title: Optional filter by document title (e.g. "พระราชบัญญัติ", "ระเบียบ")
+            org_id: Tenant scope (tri-store mode); PUBLIC records are always visible
         """
         if not section or not section.strip():
             return {"found": False, "error": "section parameter is required"}
+
+        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+            return self._lookup_section_tri_store(section, doc_title, org_id)
 
         sec_norm = normalize_digits(section.strip()).lower()
         candidates = self._section_index.get(sec_norm, [])
@@ -213,6 +217,56 @@ class ProcurementService:
             "focused_content": focused_text or full_text[:1500],
             "full_macro_chunk": full_text
         }
+
+    def _lookup_section_tri_store(self, section: str, doc_title: Optional[str], org_id: Optional[str]) -> Dict[str, Any]:
+        """PostgreSQL-backed lookup with the same response contract as the in-memory index."""
+        from core.database import StorageManager
+
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        sec_norm = normalize_digits(section.strip())
+        num_m = re.search(r"(\d+)", sec_norm)
+        if not num_m:
+            return {"found": False, "section": section, "message": f"No section/clause number in: {section}"}
+
+        pg = StorageManager.get_instance().pg
+        num = int(num_m.group(1))
+        if "ข้อ" in sec_norm:
+            records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
+        else:
+            # 'มาตรา N' or a bare number: Act sections first, then regulation clauses
+            records = pg.lookup_section(doc_title or "", num, org_id=active_org)
+            if not records and "มาตรา" not in sec_norm:
+                records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
+
+        if not records:
+            return {
+                "found": False,
+                "section": section,
+                "message": f"No statutory clause found matching section: {section}"
+            }
+
+        top = records[0]
+        full_text = top.get("content_thai", "")
+        result = {
+            "found": True,
+            "section": section,
+            "source_id": top.get("entry", ""),
+            "clause_id": top.get("clause_id"),
+            "doc_title": top.get("doc_title"),
+            "topics": top.get("topics", []),
+            "related_laws": top.get("related_laws", []),
+            "judge_dep": top.get("judge_dep", []),
+            "focused_content": self._extract_focused_section_text(full_text, section) or full_text[:1500],
+            "full_macro_chunk": full_text,
+        }
+        # The same number exists in many documents; tell the caller instead of silently picking one
+        other_docs = list(dict.fromkeys(
+            r.get("doc_title") for r in records[1:] if r.get("doc_title") and r.get("doc_title") != top.get("doc_title")
+        ))
+        if other_docs and not doc_title:
+            result["ambiguous"] = True
+            result["other_documents_with_same_number"] = other_docs[:5]
+        return result
 
     def _extract_focused_section_text(self, macro_text: str, section: str) -> Optional[str]:
         """Extract only the lines relevant to the requested section."""

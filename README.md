@@ -9,7 +9,7 @@
 
 - ✅ **Pure LangGraph Agentic Workflow**:
   1. **Issue Decomposer (`core/agent/decomposer.py`)**: Decomposes complex, multi-faceted inquiries into atomic sub-questions (`Q1`, `Q2`), preventing dominant topics from masking secondary issues during search.
-  2. **Multi-Aspect Hybrid Retrieval (`core/agent/tools.py`)**: Concurrently queries Dense Vector Embeddings (BGE-M3), Tokenized Thai BM25 (PyThaiNLP), and Cross-Encoder Reranker (`BAAI/bge-reranker-v2-m3`) with Reciprocal Rank Fusion.
+  2. **Multi-Aspect Hybrid Retrieval (`core/graph_construct/feature_graph.py`)**: Concurrently queries Dense Vector Embeddings (BGE-M3), Tokenized Thai BM25 (PyThaiNLP), and Cross-Encoder Reranker (`BAAI/bge-reranker-v2-m3`) with Reciprocal Rank Fusion.
   3. **Knowledge Graph Traversal (`core/database/neo4j_repository.py`)**: Traverses statutory hierarchies, cross-citations (`CITES_CLAUSE`), sequential sections (`ADJACENT_SECTION`), and FAQ precedents (`RELATES_TO_LAW`).
   4. **Iterative Self-Reflection & Query Refiner (`core/agent/refiner.py`)**: Automatically detects retrieval gaps across sub-issues and triggers sharpened follow-up queries before synthesizing the final answer.
   5. **Grounding Guardrail (`core/agent/guardrail.py`)**: Extracts verbatim statutory quotes (`decisive_quotes`) and validates conclusions against hallucination.
@@ -50,7 +50,6 @@ ProcurementQA_Agent/
 │   │   ├── decomposer.py           # Sub-issue Decomposition Agent
 │   │   ├── refiner.py              # Query Refiner & Targeted Search Agent
 │   │   ├── synthesizer.py          # Legal Synthesizer & Adjudicator
-│   │   ├── tools.py                # Retrieval Tools (Hybrid, Graph, Verbatim Lookup)
 │   │   └── guardrail.py            # Grounding Guardrail & Decisive Quotes Extraction
 │   ├── database/                   # Tri-Store Multi-Tenant Engine (PostgreSQL, Qdrant, Neo4j)
 │   ├── judge/                      # LLM-as-a-Judge & Legal Synthesizer Implementation

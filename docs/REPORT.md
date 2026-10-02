@@ -15,7 +15,7 @@ flowchart TD
     Q["User Inquiry / Super-Orchestrator Request"] --> START([START])
     START --> DEC["Issue Decomposer\n(decomposer.py)\nExtracts atomic sub-queries & procurement features"]
     
-    DEC --> RET["Hybrid Statutory Retrieval\n(tools.py + feature_graph.py)\nDense Vector (BGE-M3) + Thai BM25\n+ Cross-Encoder Reranker (bge-reranker-v2-m3)\n+ Reciprocal Rank Fusion"]
+    DEC --> RET["Hybrid Statutory Retrieval\n(feature_graph.py + core/database)\nDense Vector (BGE-M3) + Thai BM25\n+ Cross-Encoder Reranker (bge-reranker-v2-m3)\n+ Reciprocal Rank Fusion"]
     
     RET --> TRAV["Knowledge Graph Traversal\n(neo4j_repository.py / StorageManager)\nFetches CITES_CLAUSE & ADJACENT_SECTION"]
     
@@ -38,7 +38,7 @@ flowchart TD
 ### 1) Issue Decomposer (`core/agent/decomposer.py`)
 Decomposes complex, multi-faceted inquiries into atomic sub-questions (`Q1`, `Q2`, etc.) to prevent dominant legal topics from overshadowing secondary topics during retrieval.
 
-### 2) Hybrid Multi-Aspect Retrieval (`core/agent/tools.py`)
+### 2) Hybrid Multi-Aspect Retrieval (`core/graph_construct/feature_graph.py`)
 Combines:
 - **Dense Semantic Embeddings:** Tokenmind BGE-M3 (1024-dim)
 - **Sparse Lexical Search:** Tokenized Thai BM25 (PyThaiNLP newmm)

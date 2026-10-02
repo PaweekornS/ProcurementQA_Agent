@@ -92,8 +92,10 @@ class Neo4jRepository:
             MERGE (a:_SchemaInit {id: 1})
             MERGE (b:_SchemaInit {id: 2})
             MERGE (a)-[:RELATES_TO_LAW]->(b)
+            MERGE (a)-[:REFERENCES_DOCUMENT]->(b)
             MERGE (a)-[:ADJACENT_SECTION]->(b)
             MERGE (a)-[:CITES_CLAUSE]->(b)
+            MERGE (a)-[:EMPOWERED_BY]->(b)
             WITH a, b
             MATCH (a)-[r]-(b)
             DELETE r, a, b
@@ -180,6 +182,54 @@ class Neo4jRepository:
                     session.run(query, batch=chunk)
             logger.info(f"Synced {len(edge_list)} relationships of type ':{rel_type}' to Neo4j.")
 
+    def clear_derived_relationships(self, rel_types: List[str], batch_size: int = 10000) -> int:
+        """
+        Delete corpus-derived relationships of the given types between PUBLIC nodes so a re-link
+        starts clean. Tenant-private edges (either endpoint non-PUBLIC) are left untouched.
+        """
+        self.connect()
+        removed = 0
+        for rel_type in rel_types:
+            query = f"""
+            MATCH (a)-[r:{rel_type}]->(b)
+            WHERE coalesce(a.org_id, 'PUBLIC') = 'PUBLIC' AND coalesce(b.org_id, 'PUBLIC') = 'PUBLIC'
+            WITH r LIMIT $limit
+            DELETE r
+            RETURN count(*) AS n
+            """
+            with self.driver.session() as session:
+                while True:
+                    n = session.run(query, limit=batch_size).single()["n"]
+                    removed += n
+                    if n < batch_size:
+                        break
+        return removed
+
+    def get_graph_meta(self, key: str) -> Any:
+        """Read a build-metadata value (e.g. linker_version) stored on the :_GraphMeta node."""
+        self.connect()
+        with self.driver.session() as session:
+            rec = session.run("MATCH (m:_GraphMeta {id: 'corpus'}) RETURN m[$key] AS v", key=key).single()
+            return rec["v"] if rec else None
+
+    def set_graph_meta(self, key: str, value: Any):
+        """Persist a build-metadata value on the :_GraphMeta node."""
+        self.connect()
+        with self.driver.session() as session:
+            session.run("MERGE (m:_GraphMeta {id: 'corpus'}) SET m[$key] = $value", key=key, value=value)
+
+    def link_case_to_documents(self, links: List[Dict[str, str]]):
+        """Links :FAQCase to the :LegalDocument it is answered under via :REFERENCES_DOCUMENT."""
+        self.connect()
+        query = """
+        UNWIND $batch AS link
+        MATCH (f:FAQCase {case_id: link.case_id})
+        MATCH (d:LegalDocument {doc_id: link.doc_id})
+        MERGE (f)-[:REFERENCES_DOCUMENT]->(d)
+        """
+        with self.driver.session() as session:
+            session.run(query, batch=links)
+
     def link_case_to_laws(self, links: List[Dict[str, str]]):
         """Links :FAQCase to :StatuteClause via :RELATES_TO_LAW."""
         self.connect()
@@ -209,17 +259,17 @@ class Neo4jRepository:
         query = f"""
         MATCH (c:StatuteClause {{clause_id: $cid}}){rel_pattern}(adj:StatuteClause)
         WHERE coalesce(adj.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        RETURN adj.clause_id AS clause_id, adj.entry AS entry, adj.section_num AS section_num
+        RETURN DISTINCT adj.clause_id AS clause_id, adj.entry AS entry, adj.section_num AS section_num
         """
         with self.driver.session() as session:
             result = session.run(query, cid=clause_id, org_id=org_id)
             return [dict(r) for r in result]
 
     def get_cited_clauses(self, clause_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
-        """Fetch all clauses cited by this clause (CITES_CLAUSE) with tenant filtering."""
+        """Fetch all clauses cited by, or empowering, this clause (CITES_CLAUSE | EMPOWERED_BY) with tenant filtering."""
         self.connect()
         query = """
-        MATCH (c:StatuteClause {clause_id: $cid})-[r:CITES_CLAUSE]->(cited:StatuteClause)
+        MATCH (c:StatuteClause {clause_id: $cid})-[r:CITES_CLAUSE|EMPOWERED_BY]->(cited:StatuteClause)
         WHERE coalesce(cited.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
         RETURN cited.clause_id AS clause_id, cited.entry AS entry, r.quote AS quote
         """
@@ -233,12 +283,18 @@ class Neo4jRepository:
         that cite or derive from this section with tenant filtering.
         """
         self.connect()
+        # Subordinate = a clause in *another* document that derives authority from (EMPOWERED_BY)
+        # or cites (CITES_CLAUSE) this section; same-document citations are not subordinates.
         query = """
-        MATCH (act:StatuteClause {clause_id: $cid})<-[:CITES_CLAUSE]-(reg:StatuteClause)
-        WHERE coalesce(reg.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        MATCH (act:StatuteClause {clause_id: $cid})<-[r:EMPOWERED_BY|CITES_CLAUSE]-(reg:StatuteClause)
+        WHERE reg.doc_id <> act.doc_id
+          AND coalesce(reg.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
         MATCH (reg)<-[:CONTAINS]-(doc:LegalDocument)
         WHERE coalesce(doc.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        RETURN reg.clause_id AS clause_id, reg.entry AS entry, doc.title AS document_title
+        WITH reg, doc, collect(DISTINCT type(r)) AS rels
+        RETURN reg.clause_id AS clause_id, reg.entry AS entry, doc.title AS document_title,
+               CASE WHEN 'EMPOWERED_BY' IN rels THEN 'EMPOWERED_BY' ELSE 'CITES_CLAUSE' END AS relation
+        ORDER BY relation DESC, document_title
         """
         with self.driver.session() as session:
             result = session.run(query, cid=clause_id, org_id=org_id)
