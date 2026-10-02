@@ -43,22 +43,11 @@ Verify that Neo4j is running:
 docker compose ps neo4j
 ```
 
-### Step 3: Run the Migration Utility
-To export the knowledge graph into Neo4j:
+### Step 3: Load the Knowledge Graph
+The graph is built by the tri-store migration (PostgreSQL + Qdrant + Neo4j), which `docker compose up`
+runs automatically through the `migrate` service. To run it by hand:
 ```bash
-python scripts/export_to_neo4j.py
-```
-
-Optional parameters:
-```bash
-# Test sanitization without connecting to Neo4j
-python scripts/export_to_neo4j.py --dry-run
-
-# Clear existing graph database before importing
-python scripts/export_to_neo4j.py --clear
-
-# Specify custom connection credentials
-python scripts/export_to_neo4j.py --uri bolt://localhost:7687 --user neo4j --password procurement_secret123
+docker compose run --rm migrate python scripts/migrate_to_tri_store.py
 ```
 
 ---

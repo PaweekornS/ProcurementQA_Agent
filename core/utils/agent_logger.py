@@ -79,5 +79,28 @@ class AgentTraceLogger:
         """Persists a single case execution trace to the JSONL trace log file."""
         trace_record["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
         with self._write_lock:
+            self._rotate_if_needed()
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(trace_record, ensure_ascii=False) + "\n")
+
+    def _rotate_if_needed(self):
+        """
+        Size-based rotation (traces.jsonl -> .1 -> .2 ...) so a long-running server does not grow
+        the trace file without bound. Tunable via TRACE_LOG_MAX_MB / TRACE_LOG_BACKUPS.
+        Caller must hold self._write_lock.
+        """
+        max_bytes = int(float(os.getenv("TRACE_LOG_MAX_MB", "50")) * 1024 * 1024)
+        backups = int(os.getenv("TRACE_LOG_BACKUPS", "5"))
+        try:
+            if os.path.getsize(self.log_path) < max_bytes:
+                return
+        except OSError:
+            return
+        for i in range(backups - 1, 0, -1):
+            src = f"{self.log_path}.{i}"
+            if os.path.exists(src):
+                os.replace(src, f"{self.log_path}.{i + 1}")
+        if backups > 0:
+            os.replace(self.log_path, f"{self.log_path}.1")
+        else:
+            os.remove(self.log_path)

@@ -2,12 +2,13 @@ import os
 import ast
 import hashlib
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 import numpy as np
 import requests
 import re
 from .graph_db import GraphDBManager
 from tqdm import tqdm
+from core.utils.settings import env
 
 
 _embedding_provider = "local"
@@ -19,7 +20,48 @@ _tokenmind_model = "BAAI/bge-m3"
 _embedding_dim = 1024
 _local_embedder = None
 _local_embedder_lock = threading.Lock()
-_vector_cache = {}
+
+
+class _LRUVectorCache:
+    """
+    Bounded, thread-safe text -> embedding cache. The previous plain dict kept every query
+    embedding for the life of the process (unbounded memory growth on a long-running server).
+    """
+
+    def __init__(self, maxsize: int):
+        self.maxsize = maxsize
+        self._data: "OrderedDict[str, list]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._data
+
+    def __getitem__(self, key):
+        with self._lock:
+            value = self._data[key]
+            self._data.move_to_end(key)
+            return value
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+
+    def get(self, key, default=None):
+        with self._lock:
+            if key not in self._data:
+                return default
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+_vector_cache = _LRUVectorCache(maxsize=int(os.getenv("EMBEDDING_CACHE_SIZE", "5000")))
 _http_embedder_available = None
 
 
@@ -65,9 +107,9 @@ def configure_embedding(
 
 def batch_embed_tokenmind(texts, batch_size=16):
     """Batch embed texts using Tokenmind API"""
-    api_key = _tokenmind_api_key or os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key")
-    base_url = (_tokenmind_base_url or os.getenv("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
-    model = _tokenmind_model or os.getenv("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
+    api_key = _tokenmind_api_key or env("TOKENMIND_API_KEY")
+    base_url = (_tokenmind_base_url or env("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
+    model = _tokenmind_model or env("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -101,17 +143,16 @@ def get_embedding(text):
 
     _init_vector_cache()
     # 1. Check in-memory cache
-    if text in _vector_cache:
-        return _vector_cache[text]
-    if text[:200] in _vector_cache:
-        return _vector_cache[text[:200]]
+    cached = _vector_cache.get(text) or _vector_cache.get(text[:200])
+    if cached is not None:
+        return cached
 
     # 2. Try Tokenmind API if configured as active provider
-    provider = (_embedding_provider or os.getenv("embedding_provider", "local")).lower()
+    provider = (_embedding_provider or env("EMBEDDING_PROVIDER", "local")).lower()
     if provider == "tokenmind":
-        api_key = _tokenmind_api_key or os.getenv("TOKENMIND_API_KEY") or os.getenv("tokenmind_api_key")
-        base_url = (_tokenmind_base_url or os.getenv("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
-        model = _tokenmind_model or os.getenv("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
+        api_key = _tokenmind_api_key or env("TOKENMIND_API_KEY")
+        base_url = (_tokenmind_base_url or env("TOKENMIND_BASE_URL") or "https://tokenmind.abdul.in.th/v1").rstrip("/")
+        model = _tokenmind_model or env("TOKENMIND_EMBEDDING_MODEL") or "BAAI/bge-m3"
 
         if api_key and base_url:
             try:
@@ -166,7 +207,7 @@ def get_embedding(text):
                 try:
                     import torch
                     from sentence_transformers import SentenceTransformer
-                    embed_name = os.getenv("embedding_model") or os.getenv("EMBEDDING_MODEL") or _embedding_model
+                    embed_name = env("EMBEDDING_MODEL") or _embedding_model
                     device = "cuda:0" if torch.cuda.is_available() else "cpu"
                     _local_embedder = SentenceTransformer(embed_name, device=device)
                 except Exception as e:
@@ -259,9 +300,9 @@ def rerank(model, query_text, neighbors):
     # Use GPU Cross-Encoder Reranker (BAAI/bge-reranker-v2-m3)
     try:
         from .hybrid_reranker import get_reranker
-        reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-        reranker_device = os.getenv("reranker_device", "cuda:0")
-        reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+        reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+        reranker_device = env("RERANKER_DEVICE", "cuda:0")
+        reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
         
         reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
         if reranker and reranker.model is not None:
@@ -752,9 +793,9 @@ def _ensure_bm25_index(db):
             # Warm up GPUReranker safely in the same lock so workers don't race on GPU allocation
             from .hybrid_reranker import get_reranker, is_reranker_enabled
             if is_reranker_enabled():
-                reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-                reranker_device = os.getenv("reranker_device", "cuda:0")
-                reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
+                reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+                reranker_device = env("RERANKER_DEVICE", "cuda:0")
+                reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
                 get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
         except Exception as e:
             print(f"[HybridRetrieval] Could not initialize BM25/Reranker index: {e}")
@@ -770,7 +811,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                 query_embedding = get_embedding(query_text)
 
             # 1. Hybrid Search in Qdrant (1024-dim BGE-M3 + Native Sparse BM25 + RRF) + Postgres Hydration
-            dense_top_k = int(os.getenv("dense_top_k", "30"))
+            dense_top_k = int(env("DENSE_TOP_K", "30"))
             raw_clauses = storage.hybrid_search_clauses(
                 query_text=query_text,
                 query_dense=query_embedding,
@@ -805,9 +846,9 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             else:
                 # 2. Cross-Encoder reranking if enabled
                 from .hybrid_reranker import get_reranker, is_reranker_enabled
-                reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
-                reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-                reranker_device = os.getenv("reranker_device", "cuda:0")
+                reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
+                reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+                reranker_device = env("RERANKER_DEVICE", "cuda:0")
 
                 if is_reranker_enabled() and candidates:
                     reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
@@ -871,12 +912,12 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
             logger.warning(f"[Tri-Store Direct Search] Error, falling back to local graph: {e}")
 
     db = GraphDBManager.get_db()
-    use_hybrid = os.getenv("hybrid_retrieval", "True").lower() == "true"
-    dense_top_k = int(os.getenv("dense_top_k", "30"))
-    bm25_top_k = int(os.getenv("bm25_top_k", "30"))
-    reranker_thresh = float(os.getenv("reranker_threshold", "0.20"))
-    reranker_model = os.getenv("reranker_model", "BAAI/bge-reranker-v2-m3")
-    reranker_device = os.getenv("reranker_device", "cuda:0")
+    use_hybrid = env("HYBRID_RETRIEVAL", "True").lower() == "true"
+    dense_top_k = int(env("DENSE_TOP_K", "30"))
+    bm25_top_k = int(env("BM25_TOP_K", "30"))
+    reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
+    reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+    reranker_device = env("RERANKER_DEVICE", "cuda:0")
 
     if not use_hybrid:
         # Fallback to classical dense-only Cases retrieval
@@ -951,7 +992,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
         sparse_results,
         dense_weight=1.0,
         sparse_weight=1.0,
-        rrf_k=int(os.getenv("rrf_k", "60"))
+        rrf_k=int(env("RRF_K", "60"))
     )
 
     # 4. GPU/CPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
@@ -959,7 +1000,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
     if is_reranker_enabled():
         # Default candidate pool: 50 on GPU, 15 on CPU for fast sub-8s latency
         default_pool_size = 15 if "cpu" in str(reranker_device).lower() else 50
-        pool_size = int(os.getenv("rerank_pool_size", default_pool_size))
+        pool_size = int(env("RERANK_POOL_SIZE", default_pool_size))
         rerank_pool = fused_candidates[:pool_size]
         reranker = get_reranker(model_name=reranker_model, device=reranker_device, threshold=reranker_thresh)
         if reranker and reranker.model is not None:
@@ -1282,7 +1323,7 @@ def construct_feature_graph(model, nodes_data):
     crime_nodes_data = nodes_data['crime']
 
     # Check if Tokenmind embedding provider is active
-    active_provider = (_embedding_provider or os.getenv("embedding_provider", "local")).lower()
+    active_provider = (_embedding_provider or env("EMBEDDING_PROVIDER", "local")).lower()
     if active_provider == "tokenmind":
         print(f"[GraphConstruct] Acceleration: Batch encoding nodes with Tokenmind API ({_tokenmind_model})...")
         case_texts = [str(n.get('description', ''))[:1500] for n in case_nodes_data]

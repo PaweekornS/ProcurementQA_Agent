@@ -72,11 +72,11 @@ def main(base_url: str, run_qa: bool):
     if run_qa:
         print("\n[5] POST /api/v1/qa")
         payload_qa = {
-            "question": "หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงเนื่องจากเป็นพัสดุที่มีวงเงินเล็กน้อยตาม พ.ร.บ. ได้ไม่เกินวงเงินเท่าใด และต้องขอความเห็นชอบรายงานขอซื้อขอจ้างจากใครก่อนจัดซื้อ",
-            "mode": "fast"
+            "query": "หน่วยงานของรัฐจะจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงเนื่องจากเป็นพัสดุที่มีวงเงินเล็กน้อยตาม พ.ร.บ. ได้ไม่เกินวงเงินเท่าใด และต้องขอความเห็นชอบรายงานขอซื้อขอจ้างจากใครก่อนจัดซื้อ",
+            "org_id": "DGA"
         }
         try:
-            r = requests.post(f"{base_url}/api/v1/qa", json=payload_qa, timeout=60)
+            r = requests.post(f"{base_url}/api/v1/qa", json=payload_qa, timeout=300)
             print(f"Status: {r.status_code}")
             print(json.dumps(r.json(), ensure_ascii=False, indent=2))
         except Exception as e:

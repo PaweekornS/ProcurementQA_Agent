@@ -185,9 +185,17 @@ def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 20
         })
         
     crag_meta = first_res.get("crag_meta", {})
+    # Full ranked context the generator received (labels only, to keep result files small) so the
+    # evaluator can score retrieval against what generation actually used, not just the top 20.
+    retrieved_context = [
+        {"rank": rank, "law_entry": law.get("entry", ""), "rerank_score": round(float(law.get("rerank_score", 0.0)), 4)}
+        for rank, law in enumerate(candidate_laws, start=1)
+    ]
+
     return {
         "extracted_features": extracted_features,
         "top_retrieved_evidence": evidence_list,
+        "retrieved_context": retrieved_context,
         "crag_meta": crag_meta,
     }
 
@@ -394,12 +402,17 @@ def run_evaluation(
     os.makedirs(output_dir, exist_ok=True)
     if datasets_path == "./datasets" and config.data.datasets_path:
         datasets_path = config.data.datasets_path
+    use_tri_store = os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
     if not config.graph.graph_db_path:
         config.graph.graph_db_path = os.path.join(output_dir, f"{model_name}_graph_db.pkl")
         print(f"graph_db_path not configured; using {config.graph.graph_db_path}")
-    
+
+    # Tri-store mode retrieves from PostgreSQL/Qdrant/Neo4j (seeded by the migration), exactly like
+    # the served API, so the local .pkl graph is neither built nor required.
+    if use_tri_store:
+        print("USE_TRI_STORE=true: evaluating against the tri-store; skipping local graph build.")
     # Build graph before starting parallel processes
-    if build_graph:
+    elif build_graph:
         print("="*60)
         print("Building graph database...")
         print("="*60)

@@ -76,5 +76,5 @@ Evaluated against the held-out Thai Procurement QA Benchmark (40 complex multi-i
 
 ## 5. Serving & Production Integration
 
-- **Dual-Protocol Serving:** FastAPI provides REST endpoints (`/api/v1/qa`, `/api/v1/search`, `/api/v1/verify`), while FastMCP provides native MCP endpoints (`/mcp`, `/sse`) on port 8000.
+- **Dual-Protocol Serving:** FastAPI provides REST endpoints (`/api/v1/qa`, `/api/v1/search`, `/api/v1/verify`), while FastMCP provides a native MCP endpoint (`/mcp`, Streamable HTTP) on port 8000.
 - **Super-Orchestrator Contract:** The `/api/v1/qa` endpoint returns `issues_breakdown`, cleanly marking each issue as `RESOLVED`, `OUT_OF_LEGAL_SCOPE`, or `NO_LAW_FOUND`, enabling seamless multi-agent orchestration.

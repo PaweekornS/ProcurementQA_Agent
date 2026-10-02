@@ -7,6 +7,10 @@ from .base import BaseModel
 
 class OpenAIBaseModel(BaseModel):
     """Base class for models based on OpenAI API"""
+
+    # Automatic SDK-level retries; subclasses with their own retry loop set this to 0 so the
+    # two layers do not multiply (worst case = (loop retries) x (SDK retries) x timeout).
+    sdk_max_retries = 2
     
     def __init__(
         self,
@@ -41,9 +45,13 @@ class OpenAIBaseModel(BaseModel):
         if not self.base_url:
             raise ValueError("base_url not provided")
         
+        # Bound every LLM call: the SDK default (600 s) lets one stalled request blow the
+        # whole /qa latency budget.
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "60")),
+            max_retries=self.sdk_max_retries,
         )
     
     def generate_response(self, user_input: str, max_length: int = 4096, temperature: float = 0.1) -> str:

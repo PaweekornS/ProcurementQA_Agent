@@ -75,3 +75,8 @@ procurement_data/
 .dmypy.json
 dmypy.json
 
+
+# Raw source data (OCR markdown, FAQ spreadsheet): kept out of git, provided locally / on the server
+datas/typhoon_ocr/
+datas/*.xlsx
+

@@ -148,6 +148,21 @@ class TestTriStoreIntegration(unittest.TestCase):
         self.assertTrue(scoped.get("found"))
         self.assertNotIn("ambiguous", scoped)
 
+    def test_07_reranker_loaded_and_scoring(self):
+        """
+        The cross-encoder must actually load and score candidates. A missing runtime dependency
+        once made it fail silently: retrieval ran unreranked and Hit/MRR collapsed with no error.
+        """
+        from core.graph_construct.feature_graph import search_similar_nodes_direct
+        from core.graph_construct.hybrid_reranker import reranker_status
+
+        status = reranker_status()
+        self.assertTrue(status["loaded"], f"reranker not usable: {status}")
+        if status["enabled"]:
+            _, laws = search_similar_nodes_direct(None, None, "วิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท", top_k=5)
+            scored = [l for l in laws if isinstance(l.get("rerank_score"), float) and l["rerank_score"] not in (0.8, 0.0)]
+            self.assertTrue(scored, "no candidate carries a cross-encoder score")
+
 
 if __name__ == "__main__":
     unittest.main()
