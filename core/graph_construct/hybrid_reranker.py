@@ -621,3 +621,18 @@ def weighted_rrf(
 
     return fused_docs
 
+
+
+def reranker_status() -> dict:
+    """
+    Whether the configured reranker is actually usable. A reranker that silently fails to load
+    (e.g. a missing runtime dependency) makes retrieval fall back to unreranked order, which
+    degrades answer quality without any error, so readiness probes must surface it.
+    """
+    enabled = is_reranker_enabled()
+    reranker = _global_reranker
+    return {
+        "enabled": enabled,
+        "provider": type(reranker).__name__ if reranker is not None else None,
+        "loaded": (not enabled) or (reranker is not None and getattr(reranker, "model", None) is not None),
+    }

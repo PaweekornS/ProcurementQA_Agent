@@ -114,6 +114,79 @@ def match_doc_and_section(expected_file: str, expected_section: str, candidate: 
     return match_document(expected_file, candidate)
 
 
+def _unit_ref(text: str) -> Optional[Tuple[str, int]]:
+    """('มาตรา', 56) / ('ข้อ', 27) for the first section/clause reference in `text`, else None."""
+    m = re.search(r"(มาตรา|ข้อ)\s*(\d+)", normalize_legal_text(text))
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _same_document(expected_file: str, chunk_doc: str) -> bool:
+    """
+    Expected document (OCR path) vs the chunk's document title. Corpus titles can be truncated
+    (~80 chars), so containment is checked both ways; the reverse direction requires a long
+    enough title to avoid matching a generic prefix.
+    """
+    if not expected_file:
+        return True
+    exp = re.sub(r"\s+", "", normalize_legal_text(re.sub(r"\.md$", "", os.path.basename(expected_file), flags=re.IGNORECASE)))
+    doc = re.sub(r"\s+", "", normalize_legal_text(chunk_doc))
+    if not exp or not doc:
+        return False
+    return exp in doc or (len(doc) >= 20 and doc in exp)
+
+
+def match_chunk(pair: Dict[str, str], item: Any) -> bool:
+    """
+    A retrieved chunk is relevant to a ground-truth (document, section) pair when the chunk's
+    own label is that section of that document. Chunks labelled "<document> | <มาตรา/ข้อ N>"
+    are matched structurally; a chunk merely *mentioning* "ข้อ N" in its body does not count.
+    Unlabelled chunks fall back to the legacy text matcher.
+    """
+    entry = (item.get("law_entry") or item.get("entry") or "") if isinstance(item, dict) else str(item)
+    if "|" not in entry:
+        text = entry
+        if isinstance(item, dict):
+            text = f"{entry} {item.get('snippet', '')} {item.get('text', '')}".strip()
+        return match_doc_and_section(pair.get("doc", ""), pair.get("section", ""), text)
+
+    chunk_doc, _, label = entry.partition("|")
+    if not _same_document(pair.get("doc", ""), chunk_doc):
+        return False
+    section = pair.get("section", "")
+    expected_ref = _unit_ref(section)
+    if expected_ref is not None:
+        return _unit_ref(label) == expected_ref
+    if "หมวด" in section or _SUB_ITEM.match(normalize_legal_text(section)):
+        # Chapter-level or unresolved sub-item references cannot be read from chunk labels
+        text = f"{entry} {item.get('snippet', '')} {item.get('text', '')}" if isinstance(item, dict) else entry
+        return match_doc_and_section(pair.get("doc", ""), section, text)
+    # Document-level ground truth (e.g. "ประกาศกรมบัญชีกลาง เรื่อง ..."): the document match suffices
+    return bool(pair.get("doc"))
+
+
+_SUB_ITEM = re.compile(r"^\s*(\(\s*[\dก-ฮ]+\s*\)\s*)+$")
+
+
+def resolve_expected_pairs(pairs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """
+    Ground truth sometimes splits one citation into two pairs, e.g. "มาตรา ๙๖ วรรคหนึ่ง (๒)" followed
+    by a bare "(๕)" meaning มาตรา ๙๖ (๕). A bare sub-item inherits the section of the preceding
+    pair from the same document.
+    """
+    resolved, last_ref_by_doc = [], {}
+    for pair in pairs or []:
+        pair = dict(pair)
+        doc, section = pair.get("doc", ""), pair.get("section", "")
+        ref = _unit_ref(section)
+        if ref is not None:
+            last_ref_by_doc[doc] = ref
+        elif _SUB_ITEM.match(normalize_legal_text(section)) and doc in last_ref_by_doc:
+            kind, num = last_ref_by_doc[doc]
+            pair["section"] = f"{kind} {num} {section.strip()}"
+        resolved.append(pair)
+    return resolved
+
+
 # ==============================================================================
 # 1. RETRIEVAL LAYER METRICS (STANDARD INFORMATION RETRIEVAL)
 # ==============================================================================
@@ -131,12 +204,12 @@ def compute_retrieval_metrics(
     3. Strict Hit@k: 1.0 if at least one target document + section is retrieved in top-k, else 0.0
     """
     # Build list of target pairs if not explicitly provided
-    targets = list(expected_pairs or [])
+    targets = resolve_expected_pairs(expected_pairs)
     if not targets and ground_truth_sections:
         targets = [{"doc": "", "section": s} for s in ground_truth_sections]
 
     if not targets:
-        return {"precision_at_k": 1.0, "recall_at_k": 1.0, "hit_at_k": 1.0}
+        return {"precision_at_k": 1.0, "adjusted_precision_at_k": 1.0, "recall_at_k": 1.0, "hit_at_k": 1.0, "mrr_at_k": 1.0}
 
     top_k_chunks = (retrieved_items or [])[:k]
     actual_k = max(len(top_k_chunks), 1)
@@ -146,21 +219,9 @@ def compute_retrieval_metrics(
     first_relevant_rank = None
 
     for rank_idx, item in enumerate(top_k_chunks, 1):
-        if isinstance(item, dict):
-            chunk_text = (
-                item.get("law_entry", "")
-                + " " + item.get("snippet", "")
-                + " " + item.get("text", "")
-                + " " + item.get("entry", "")
-            ).strip()
-        else:
-            chunk_text = str(item).strip()
-
         is_chunk_relevant = False
         for p_idx, pair in enumerate(targets):
-            doc = pair.get("doc", "")
-            sec = pair.get("section", "")
-            if match_doc_and_section(doc, sec, chunk_text):
+            if match_chunk(pair, item):
                 is_chunk_relevant = True
                 covered_gt_indices.add(p_idx)
 
@@ -430,12 +491,25 @@ def run_rag_triad_evaluation(
         expected_pairs = pred.get("expected_pairs") or gt_case.get("expected_pairs", [])
 
         # 1. Retrieval Layer Evaluation (Chunk Precision@K, Recall@K, Hit@K)
+        # Rank over the full context the generator received when run.py recorded it; older
+        # result files only carry the top-20 evidence, which caps every cut-off at 20.
+        ranked_context = pred.get("analysis", {}).get("retrieved_context") or evidence or retrieved_laws
         ret_metrics = compute_retrieval_metrics(
-            retrieved_items=evidence or retrieved_laws,
+            retrieved_items=ranked_context,
             expected_pairs=expected_pairs,
             ground_truth_sections=gt_sections,
             k=top_k
         )
+        ret_metrics["by_k"] = {
+            str(k): compute_retrieval_metrics(ranked_context, expected_pairs, gt_sections, k=k)
+            for k in sorted({5, 10, top_k})
+        }
+        # Context recall: share of ground-truth sections present anywhere in the generator's context
+        ret_metrics["context_size"] = len(ranked_context)
+        ret_metrics["context_recall"] = compute_retrieval_metrics(
+            ranked_context, expected_pairs, gt_sections, k=max(len(ranked_context), 1)
+        )["recall_at_k"]
+        ret_metrics["full_context_available"] = bool(pred.get("analysis", {}).get("retrieved_context"))
 
         # If NO_LAW_FOUND and skipping is enabled: skip LLM Judge & exclude from aggregate scoring
         if is_no_law_found and skip_no_law_found:
@@ -544,6 +618,16 @@ def run_rag_triad_evaluation(
         f"mean_recall_at_{top_k}": safe_avg(total_recall_k),
         "evaluated_k": top_k
     }
+    for k_str in sorted({str(k) for s in valid_samples for k in s["retrieval"].get("by_k", {})}, key=int):
+        rows = [s["retrieval"]["by_k"][k_str] for s in valid_samples if k_str in s["retrieval"].get("by_k", {})]
+        retrieval_summary[f"at_{k_str}"] = {
+            "hit": safe_avg([r["hit_at_k"] for r in rows]),
+            "mrr": safe_avg([r["mrr_at_k"] for r in rows]),
+            "recall": safe_avg([r["recall_at_k"] for r in rows]),
+        }
+    retrieval_summary["mean_context_recall"] = safe_avg([s["retrieval"].get("context_recall", 0.0) for s in valid_samples])
+    retrieval_summary["mean_context_size"] = safe_avg([s["retrieval"].get("context_size", 0) for s in valid_samples])
+    retrieval_summary["full_context_available"] = all(s["retrieval"].get("full_context_available") for s in valid_samples)
 
     summary_report = {
         "total_cases": total_count,
@@ -593,7 +677,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit for quick smoke test")
     parser.add_argument("--workers", type=int, default=8, help="Number of concurrent workers for LLM Judge evaluation")
     parser.add_argument("--no-llm-judge", action="store_true", help="Skip LLM Judge and run deterministic evaluation only")
-    parser.add_argument("--k", "-k", type=int, default=5, help="Number of evidence chunks to evaluate (default: 5)")
+    parser.add_argument("--k", "-k", type=int, default=20, help="Number of evidence chunks to evaluate (default: 5)")
     parser.add_argument("--include-no-law-found", action="store_true", help="Include NO_LAW_FOUND cases in average score calculations (default is to skip them)")
     args = parser.parse_args()
 

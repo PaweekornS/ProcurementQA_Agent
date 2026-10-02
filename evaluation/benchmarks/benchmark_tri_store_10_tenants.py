@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-scratch/benchmark_tri_store_10_tenants.py
+evaluation/benchmarks/benchmark_tri_store_10_tenants.py
 
 Tri-Store Production Architecture Multi-Tenant Benchmark:
 - Ingests mock regulations for 10 distinct Thai Agencies into PostgreSQL, Qdrant, and Neo4j
@@ -9,13 +9,20 @@ Tri-Store Production Architecture Multi-Tenant Benchmark:
 - Captures and reports per-query retrieved chunks (clause_id, entry, score, org_id, content snippet)
 - Measures Docker container resource usage (RAM/CPU) for Postgres, Qdrant, Neo4j, and Python process
 - Emits structured JSON and Markdown audit reports
+- Removes the mock tenant data from all three stores afterwards (pass --keep-data to inspect it)
+
+Usage (inside the app container, so hosts/dependencies match production):
+    docker compose exec procurement-qa python evaluation/benchmarks/benchmark_tri_store_10_tenants.py
 """
 
 import os
 import sys
 import time
 import json
-import psutil
+try:
+    import psutil  # optional: not part of the production image
+except ImportError:
+    psutil = None
 import hashlib
 import subprocess
 import numpy as np
@@ -339,7 +346,38 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
     return audit_summary, per_query_chunks
 
 
+def cleanup_tenant_data(storage: StorageManager) -> None:
+    """Delete every mock tenant record so the shared stores return to the real (PUBLIC) corpus."""
+    from qdrant_client.http import models
+    from sqlalchemy import text
+
+    org_ids = [t["org_id"] for t in TENANTS]
+    with storage.pg.engine.begin() as conn:
+        clauses = conn.execute(text("DELETE FROM statute_clauses WHERE org_id IN :ids"), {"ids": tuple(org_ids)}).rowcount
+        conn.execute(text("DELETE FROM legal_documents WHERE org_id IN :ids"), {"ids": tuple(org_ids)})
+    storage.qdrant.client.delete(
+        collection_name=storage.qdrant.STATUTES_COLLECTION,
+        points_selector=models.FilterSelector(filter=models.Filter(must=[
+            models.FieldCondition(key="org_id", match=models.MatchAny(any=org_ids))
+        ])),
+    )
+    with storage.neo4j.driver.session() as session:
+        session.run("MATCH (n) WHERE n.org_id IN $ids DETACH DELETE n", ids=org_ids)
+    print(f"[*] Removed mock data for {len(org_ids)} tenants ({clauses} PostgreSQL clauses) from all stores.")
+
+
+def _pct(values: List[float], q: float) -> float:
+    return float(np.percentile(values, q)) if values else 0.0
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="10-tenant tri-store isolation & latency benchmark")
+    parser.add_argument("--keep-data", action="store_true", help="Leave the mock tenant data in the stores")
+    parser.add_argument("--clauses-per-tenant", type=int, default=50,
+                        help="Mock clauses per tenant (corpus has ~2,633 PUBLIC clauses; 2633 ~= 10x total load)")
+    args = parser.parse_args()
+
     print("=" * 90)
     print(" TRI-STORE (POSTGRES + QDRANT + NEO4J) 10-TENANT BENCHMARK & AUDIT")
     print("=" * 90)
@@ -347,9 +385,20 @@ def main():
     # 1. Initialize Storage
     storage = StorageManager.get_instance()
     storage.init_all_stores()
+    cleanup_tenant_data(storage)  # leftovers from an earlier interrupted run
 
+    try:
+        run_benchmark(storage, args.clauses_per_tenant)
+    finally:
+        if args.keep_data:
+            print("[!] --keep-data: mock tenant data left in the stores.")
+        else:
+            cleanup_tenant_data(storage)
+
+
+def run_benchmark(storage: StorageManager, clauses_per_tenant: int = 50) -> None:
     # 2. Ingest 10 tenants
-    inject_tri_store_tenant_data(storage, clauses_per_tenant=50)
+    inject_tri_store_tenant_data(storage, clauses_per_tenant=clauses_per_tenant)
 
     # 3. Verify Stats
     stats = storage.get_stats()
@@ -364,7 +413,11 @@ def main():
 
     # 5. Measure Docker & Python Memory
     docker_stats = get_docker_stats()
-    py_ram_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    if psutil is not None:
+        py_ram_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    else:
+        import resource  # Linux: ru_maxrss is in KiB (peak RSS)
+        py_ram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
     print("\n[*] Resource & Memory Footprint:")
     print(f"    - Python Process RSS RAM: {py_ram_mb:.2f} MB")
@@ -395,19 +448,29 @@ def main():
 
     # 7. Save Markdown Report
     out_md = "outputs/TRI_STORE_10_TENANTS_REPORT.md"
-    avg_search_ms = np.mean([e["search_latency_ms"] for e in audit_summary])
-    avg_trav_ms = np.mean([e["traversal_latency_ms"] for e in audit_summary])
+    search_ms = [e["search_latency_ms"] for e in audit_summary]
+    trav_ms = [e["traversal_latency_ms"] for e in audit_summary]
+    total_ms = [e["total_latency_ms"] for e in audit_summary]
+    leaks = sum(1 for e in audit_summary if e["leaked"])
+    leak_rate = 100.0 * leaks / len(audit_summary) if audit_summary else 0.0
+    try:
+        qdrant_version = storage.qdrant.client.info().version
+    except Exception:
+        qdrant_version = "unknown"
 
     with open(out_md, "w", encoding="utf-8") as f:
         f.write("# รายงานผลการทดสอบ Multi-Tenant Tri-Store Architecture (10 หน่วยงาน)\n\n")
         f.write(f"- **วันที่ทดสอบ:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"- **สถาปัตยกรรม:** Tri-Store (PostgreSQL 16 + Qdrant 1.13 + Neo4j 5.26 Community)\n")
-        f.write(f"- **จำนวนหน่วยงานที่ทดสอบ:** 10 องค์กร (พร้อมกฎหมายส่วนกลาง `PUBLIC`)\n")
-        f.write(f"- **Cross-Agency Leak Rate:** **0.00% (Zero Leakage - ผ่านเกณฑ์ความปลอดภัย 100%)**\n\n")
+        f.write(f"- **สถาปัตยกรรม:** Tri-Store (PostgreSQL 16 + Qdrant {qdrant_version} + Neo4j 5.26 Community)\n")
+        f.write(f"- **จำนวนหน่วยงานที่ทดสอบ:** {len(TENANTS)} องค์กร (พร้อมกฎหมายส่วนกลาง `PUBLIC`), {len(audit_summary)} queries\n")
+        f.write(f"- **Cross-Agency Leak Rate:** **{leak_rate:.2f}%** ({leaks}/{len(audit_summary)} queries leaked)\n\n")
 
         f.write("## 1. ผลการตรวจวัดประสิทธิภาพและความเร็ว (Latency Breakdown)\n\n")
-        f.write(f"- **Qdrant Vector Hybrid Search (Payload Index):** ค่าเฉลี่ย **{avg_search_ms:.2f} ms**\n")
-        f.write(f"- **Neo4j Graph Traversal (Property Index):** ค่าเฉลี่ย **{avg_trav_ms:.2f} ms**\n")
+        f.write("| ขั้นตอน | Mean | p50 | p95 | Max |\n| :--- | ---: | ---: | ---: | ---: |\n")
+        for label, vals in (("Qdrant hybrid search + PostgreSQL hydration", search_ms),
+                            ("Neo4j graph traversal", trav_ms),
+                            ("รวมต่อ query (รวม embedding ผ่าน API)", total_ms)):
+            f.write(f"| {label} | {np.mean(vals):.1f} ms | {_pct(vals, 50):.1f} ms | {_pct(vals, 95):.1f} ms | {max(vals):.1f} ms |\n")
         f.write(f"- **การคืนบริบทต่อ Query:** รองรับการดึงระเบียบเฉพาะและกฎหมายแม่บทพร้อมกันในหลัก Milliseconds\n\n")
 
         f.write("## 2. การใช้ทรัพยากรระบบ (Resource & RAM Footprint)\n\n")

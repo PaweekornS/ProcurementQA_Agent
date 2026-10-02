@@ -80,6 +80,3 @@ dmypy.json
 datas/typhoon_ocr/
 datas/*.xlsx
 
-# Run outputs; only the RAG-triad baseline is versioned for regression comparison
-logs/*
-!logs/agentic_triad_report.json
