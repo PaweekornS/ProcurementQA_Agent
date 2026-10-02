@@ -75,8 +75,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Export Knowledge Graph to Neo4j")
     parser.add_argument(
         "--input", "-i",
-        default=os.getenv("graph_db_path", "outputs/openrouter_graph_db.pkl"),
-        help="Path to openrouter_graph_db.pkl (default: outputs/openrouter_graph_db.pkl)"
+        default=os.getenv("graph_db_path", "outputs/graph_db.pkl"),
+        help="Path to graph_db.pkl (default: outputs/graph_db.pkl)"
     )
     parser.add_argument(
         "--uri",
@@ -90,8 +90,8 @@ def parse_args():
     )
     parser.add_argument(
         "--password",
-        default=os.getenv("NEO4J_PASSWORD", "procurement123"),
-        help="Neo4j password (default: procurement123)"
+        default=os.getenv("NEO4J_PASSWORD", "procurement_secret123"),
+        help="Neo4j password (default: procurement_secret123)"
     )
     parser.add_argument(
         "--batch-size",

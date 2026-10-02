@@ -8,7 +8,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 from core.models import BaseModel
-from core.utils.util import analyze_case
 from core.graph_construct.graph_db import GraphDBManager
 
 
@@ -115,8 +114,8 @@ class LegalGraphRAGConfig:
     data: DataConfig = field(default_factory=DataConfig)
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
-    crag: CRAGConfig = field(default_factory=CRAGConfig)
-    rag_mode: str = "crag"  # "crag" or "agentic"
+    crag: Optional[CRAGConfig] = field(default_factory=CRAGConfig)
+    rag_mode: str = "agentic"  # Pure Agentic RAG
     agentic_max_retries: int = 2
     
     @classmethod
@@ -193,8 +192,9 @@ class LegalGraphRAGConfig:
         )
         
         # Graph configuration
+        default_graph_db = "./outputs/graph_db.pkl" if os.path.exists("./outputs/graph_db.pkl") else None
         graph_config = GraphConfig(
-            graph_db_path=os.getenv("graph_db_path"),
+            graph_db_path=os.getenv("graph_db_path", default_graph_db),
             embedding_provider=os.getenv("embedding_provider", "local").lower(),
             embedding_api_url=os.getenv("embedding_api_url", "http://localhost:11434/api/embed"),
             embedding_model=os.getenv("embedding_model", "unsloth/embeddinggemma-300m"),
@@ -212,7 +212,7 @@ class LegalGraphRAGConfig:
         )
 
         # RAG mode configuration
-        rag_mode = os.getenv("RAG_MODE", "crag").lower()
+        rag_mode = os.getenv("RAG_MODE", "agentic").lower()
         agentic_max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", 2))
         
         return cls(
@@ -241,7 +241,7 @@ class LegalGraphRAGConfig:
         retrieve_config = RetrieveConfig(**config_dict.get("retrieve", {}))
         graph_config = GraphConfig(**config_dict.get("graph", {}))
         crag_config = CRAGConfig(**config_dict.get("crag", {}))
-        rag_mode = config_dict.get("rag_mode", "crag")
+        rag_mode = config_dict.get("rag_mode", "agentic")
         agentic_max_retries = int(config_dict.get("agentic_max_retries", 2))
         
         return cls(
@@ -425,7 +425,7 @@ class LegalGraphRAG:
     
     def analyze_case(self, case: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Analyze a single case
+        Analyze a single case using compiled LangGraph Agentic RAG workflow.
         
         Args:
             case: Case dictionary containing "fact" and "name" fields
@@ -434,36 +434,14 @@ class LegalGraphRAG:
             List of analysis results, each element corresponds to a defendant's analysis result
         """
         retrieve_config = self.config.retrieve.to_dict()
-        crag_config = self.config.crag.to_dict() if hasattr(self.config, "crag") else {"enabled": True, "max_retry": 1}
-
-        # Check if LangGraph Agentic RAG is enabled (via config or env)
-        is_agentic = (
-            getattr(self.config, "rag_mode", "crag") == "agentic"
-            or os.getenv("RAG_MODE", "").lower() == "agentic"
-            or os.getenv("USE_AGENTIC_RAG", "false").lower() in ("true", "1", "yes")
-        )
-        if is_agentic:
-            try:
-                from core.agent import ProcurementAgenticWorkflow
-                workflow = ProcurementAgenticWorkflow(
-                    self.model,
-                    retrieve_config=retrieve_config,
-                    max_retries=getattr(self.config, "agentic_max_retries", 2)
-                )
-                agent_res = workflow.invoke(case)
-                return [agent_res]
-            except Exception as e:
-                import logging
-                logging.getLogger("LegalGraphRAG").warning(f"Agentic RAG fallback to CRAG: {e}")
-
-        return analyze_case(
+        from core.agent import ProcurementAgenticWorkflow
+        workflow = ProcurementAgenticWorkflow(
             self.model,
-            case,
-            self.law_to_crime,
-            self.cases_db,
-            retrieve_config,
-            crag_config=crag_config
+            retrieve_config=retrieve_config,
+            max_retries=getattr(self.config, "agentic_max_retries", 2)
         )
+        agent_res = workflow.invoke(case)
+        return [agent_res]
     
     def analyze_cases(self, cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -662,13 +640,17 @@ class LegalGraphRAG:
             print("Graph construction completed (not saved, graph_db_path not specified)")
     
     def __del__(self):
-        """Destructor, auto-save graph database"""
-        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
-            return
-        if hasattr(self, 'config') and self.config.graph.auto_save and self.config.graph.graph_db_path:
-            try:
+        """Destructor, auto-save graph database safely if interpreter is not tearing down."""
+        try:
+            import os
+            import builtins
+            if not hasattr(builtins, "open") or builtins.open is None:
+                return
+            if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+                return
+            if hasattr(self, 'config') and getattr(self.config.graph, 'auto_save', False) and getattr(self.config.graph, 'graph_db_path', None):
                 db = GraphDBManager.get_db()
-                if len(db.nodes_data) > 0:
+                if db is not None and getattr(db, 'nodes_data', None) and len(db.nodes_data) > 0:
                     self.save_graph_db()
-            except Exception as e:
-                print(f"Failed to auto-save graph database: {e}")
+        except Exception:
+            pass

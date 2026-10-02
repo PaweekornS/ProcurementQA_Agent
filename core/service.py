@@ -143,16 +143,20 @@ class ProcurementService:
                                 self._section_index.setdefault(f"ข้อ {num}", []).append(node_entry)
                                 self._section_index.setdefault(f"rule_{num}", []).append(node_entry)
 
-    def lookup_section(self, section: str, doc_title: Optional[str] = None) -> Dict[str, Any]:
+    def lookup_section(self, section: str, doc_title: Optional[str] = None, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Exact statutory section lookup without generative overhead.
-        
+
         Args:
             section: Section string e.g. "มาตรา 56", "56", "ข้อ 79", "มาตรา ๕๖ (๒) (ข)"
             doc_title: Optional filter by document title (e.g. "พระราชบัญญัติ", "ระเบียบ")
+            org_id: Tenant scope (tri-store mode); PUBLIC records are always visible
         """
         if not section or not section.strip():
             return {"found": False, "error": "section parameter is required"}
+
+        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+            return self._lookup_section_tri_store(section, doc_title, org_id)
 
         sec_norm = normalize_digits(section.strip()).lower()
         candidates = self._section_index.get(sec_norm, [])
@@ -214,6 +218,56 @@ class ProcurementService:
             "full_macro_chunk": full_text
         }
 
+    def _lookup_section_tri_store(self, section: str, doc_title: Optional[str], org_id: Optional[str]) -> Dict[str, Any]:
+        """PostgreSQL-backed lookup with the same response contract as the in-memory index."""
+        from core.database import StorageManager
+
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        sec_norm = normalize_digits(section.strip())
+        num_m = re.search(r"(\d+)", sec_norm)
+        if not num_m:
+            return {"found": False, "section": section, "message": f"No section/clause number in: {section}"}
+
+        pg = StorageManager.get_instance().pg
+        num = int(num_m.group(1))
+        if "ข้อ" in sec_norm:
+            records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
+        else:
+            # 'มาตรา N' or a bare number: Act sections first, then regulation clauses
+            records = pg.lookup_section(doc_title or "", num, org_id=active_org)
+            if not records and "มาตรา" not in sec_norm:
+                records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
+
+        if not records:
+            return {
+                "found": False,
+                "section": section,
+                "message": f"No statutory clause found matching section: {section}"
+            }
+
+        top = records[0]
+        full_text = top.get("content_thai", "")
+        result = {
+            "found": True,
+            "section": section,
+            "source_id": top.get("entry", ""),
+            "clause_id": top.get("clause_id"),
+            "doc_title": top.get("doc_title"),
+            "topics": top.get("topics", []),
+            "related_laws": top.get("related_laws", []),
+            "judge_dep": top.get("judge_dep", []),
+            "focused_content": self._extract_focused_section_text(full_text, section) or full_text[:1500],
+            "full_macro_chunk": full_text,
+        }
+        # The same number exists in many documents; tell the caller instead of silently picking one
+        other_docs = list(dict.fromkeys(
+            r.get("doc_title") for r in records[1:] if r.get("doc_title") and r.get("doc_title") != top.get("doc_title")
+        ))
+        if other_docs and not doc_title:
+            result["ambiguous"] = True
+            result["other_documents_with_same_number"] = other_docs[:5]
+        return result
+
     def _extract_focused_section_text(self, macro_text: str, section: str) -> Optional[str]:
         """Extract only the lines relevant to the requested section."""
         sec_num = normalize_digits(section)
@@ -223,12 +277,15 @@ class ProcurementService:
         target_num = num_match.group(1)
         thai_num = to_thai_digits(target_num)
 
+        # Remove leading bracket header if present: [พระราชบัญญัติ... | มาตรา ๕๖]
+        cleaned = re.sub(r"^\[[^\]]+\]\s*", "", macro_text.strip())
+
         # Pattern matching 'มาตรา 56' or 'มาตรา ๕๖' or 'ข้อ 79' or 'ข้อ ๗๙'
-        pattern = rf"(?:มาตรา|ข้อ)\s*(?:{target_num}|{thai_num})\b[\s\S]*?(?=(?:มาตรา|ข้อ)\s*(?:\d+|[๐-๙]+)\b|#|\Z)"
-        match = re.search(pattern, macro_text)
-        if match:
+        pattern = rf"(?:^|\n)\s*(?:มาตรา|ข้อ)\s*(?:{target_num}|{thai_num})[\s\S]*?(?=(?:\n\s*(?:มาตรา|ข้อ)\s*(?:\d+|[๐-๙]+))|#|\Z)"
+        match = re.search(pattern, cleaned)
+        if match and len(match.group(0).strip()) > 10:
             return match.group(0).strip()
-        return None
+        return cleaned if len(cleaned) > 10 else macro_text
 
     def search_clauses(self, query: str, top_k: int = 5, doc_filter: Optional[str] = None, org_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -267,6 +324,7 @@ class ProcurementService:
                 "entry": entry,
                 "topics": topics,
                 "content": desc[:800],
+                "description": desc[:800],
                 "score": round(float(law.get("rerank_score", law.get("similarity", 0.0))), 4)
             })
 
@@ -421,6 +479,14 @@ class ProcurementService:
             "associated_topics": cross_laws
         }
 
+    def get_related_clauses(self, section_reference: str, org_id: Optional[str] = None, max_hops: int = 1) -> List[Dict[str, Any]]:
+        """
+        Convenience wrapper returning the list of related nodes discovered through
+        Knowledge Graph traversal for a given statute section or ministerial rule.
+        """
+        res = self.traverse_regulations(section_reference=section_reference, org_id=org_id)
+        return res.get("related_nodes", [])
+
     # --------------------------------------------------------------------------
     # Tier 3: Compliance Engine & CRAG Pipeline
     # --------------------------------------------------------------------------
@@ -515,12 +581,10 @@ class ProcurementService:
             "potential_risks": risks
         }
 
-    def ask_procurement_law(self, question: str, mode: str = "deep", org_id: Optional[str] = None) -> Dict[str, Any]:
+    def ask_procurement_law(self, question: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Execute CRAG synthesis pipeline.
-        mode="deep": full CRAG with Issue Decomposer, Synthesizer, Auditor, Refiner Retry.
-        mode="fast": single-pass hybrid retrieval + Synthesizer without auditor retry loop.
-        Filtered by tenant org_id.
+        Execute LangGraph Agentic RAG legal analysis workflow.
+        Scoped to tenant org_id.
         """
         if not question or not question.strip():
             return {
@@ -529,82 +593,35 @@ class ProcurementService:
                 "decisive_quotes": [],
                 "applicable_laws": [],
                 "exceptions_or_conditions": "",
-                "citations": [],
-                "crag_meta": {},
+                "issues_breakdown": [],
                 "error": "`question` must be a non-empty string."
             }
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org, "mode": mode}
+        case = {"fact": question.strip(), "name": "ผู้สอบถาม", "org_id": active_org}
 
-        # Direct path to LangGraph Agentic RAG if enabled
-        use_agentic = os.getenv("USE_AGENTIC_RAG", "true").lower() in ("true", "1", "yes")
-        if use_agentic:
-            try:
-                from core.agent import AgenticLegalGraphRAG
-                agent = AgenticLegalGraphRAG(model_client=self.rag.model)
-                result = agent.invoke(query=question.strip(), org_id=active_org, mode=mode)
-                if result:
-                    return {
-                        "status": result.get("status", "SUCCESS"),
-                        "mode": mode,
-                        "direct_answer": result.get("direct_answer", ""),
-                        "decisive_quotes": result.get("decisive_quotes", []),
-                        "applicable_laws": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
-                        "exceptions_or_conditions": result.get("disclaimer", ""),
-                        "citations": [f"มาตรา {s}" for s in result.get("cited_sections", [])],
-                        "crag_meta": {
-                            "grounding_score": result.get("grounding_score", 1.0),
-                            "guardrail_warnings": result.get("guardrail_warnings", [])
-                        },
-                        "organization_id": active_org,
-                        "disclaimer": result.get("disclaimer", "")
-                    }
-            except Exception as e:
-                import logging
-                logging.getLogger("ProcurementService").warning(f"LangGraph Agent invocation fallback: {e}")
+        from core.agent import ProcurementAgenticWorkflow
+        retrieve_config = self.rag.config.retrieve.to_dict()
+        max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", "2"))
+        workflow = ProcurementAgenticWorkflow(
+            self.rag.model,
+            retrieve_config=retrieve_config,
+            max_retries=max_retries
+        )
+        agent_res = workflow.invoke(case)
+        judge = agent_res.get("judge_result", {})
+        used_laws = agent_res.get("used_laws", [])
 
-        # Fallback to legacy CRAG
-        original_retry = getattr(self.rag.config.crag, "max_retry", 1)
-        original_enabled = getattr(self.rag.config.crag, "enabled", True)
-
-        try:
-            if mode == "fast":
-                self.rag.config.crag.max_retry = 0
-            else:
-                self.rag.config.crag.max_retry = max(1, original_retry)
-
-            results: List[Dict[str, Any]] = self.rag.analyze_case(case)
-        finally:
-            self.rag.config.crag.max_retry = original_retry
-            self.rag.config.crag.enabled = original_enabled
-
-        if not results:
-            return {
-                "status": "ERROR",
-                "direct_answer": "",
-                "decisive_quotes": [],
-                "applicable_laws": [],
-                "exceptions_or_conditions": "",
-                "citations": [],
-                "crag_meta": {},
-                "error": "Pipeline returned no results."
-            }
-
-        item = results[0]
-        judge_result = item.get("judge_result", {}) or {}
-        used_laws = item.get("used_laws", []) or []
-
-        raw_quotes = judge_result.get("decisive_quotes") or judge_result.get("decisive_quote") or []
+        raw_quotes = judge.get("decisive_quotes", [])
         enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws)
 
         return {
-            "status": judge_result.get("status", "OK"),
-            "mode": mode,
-            "direct_answer": judge_result.get("direct_answer", ""),
+            "status": judge.get("status", "COMPLIANT"),
+            "direct_answer": judge.get("direct_answer", ""),
             "decisive_quotes": enriched_quotes,
-            "applicable_laws": judge_result.get("applicable_laws", []),
-            "exceptions_or_conditions": judge_result.get("exceptions_or_conditions", ""),
+            "applicable_laws": judge.get("applicable_laws", []),
+            "exceptions_or_conditions": judge.get("exceptions_or_conditions", ""),
+            "issues_breakdown": judge.get("issues_breakdown", []),
             "citations": [
                 {
                     "entry": law.get("entry", ""),
@@ -612,7 +629,9 @@ class ProcurementService:
                 }
                 for law in used_laws
             ],
-            "crag_meta": item.get("crag_meta", {})
+            "crag_meta": agent_res.get("crag_meta", {}),
+            "guardrail_verdict": judge.get("guardrail_verdict", {}),
+            "organization_id": active_org
         }
 
     def _enrich_decisive_quotes(

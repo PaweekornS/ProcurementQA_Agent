@@ -3,21 +3,22 @@
 core/agent/__init__.py
 
 LangGraph Agentic Legal GraphRAG Module.
-Exposes the State schema, Tools, Guardrail, and Compiled Agent workflow.
+Exposes the state schema, guardrail, and the agentic RAG workflow with its LLM components.
 """
 
-from .state import LegalAgentState, AgenticRAGState
-from .tools import LEGAL_TOOLS
+from .state import AgenticRAGState
 from .guardrail import GroundingGuardrail
-from .graph import AgenticLegalGraphRAG
 from .workflow import ProcurementAgenticWorkflow
+from .decomposer import IssueDecomposer
+from .refiner import QueryRefiner
+from .synthesizer import LegalSynthesizer
 
 __all__ = [
-    "LegalAgentState",
     "AgenticRAGState",
-    "LEGAL_TOOLS",
     "GroundingGuardrail",
-    "AgenticLegalGraphRAG",
     "ProcurementAgenticWorkflow",
+    "IssueDecomposer",
+    "QueryRefiner",
+    "LegalSynthesizer",
 ]
 
