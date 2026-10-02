@@ -34,6 +34,23 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.database import StorageManager
+from core.graph_construct.citation_linker import (
+    ACT_TITLE,
+    extract_legal_edges,
+    parse_unit_label,
+    resolve_case_citations,
+)
+
+# Bump whenever relationship-extraction rules change: a seeded store whose Neo4j graph carries
+# an older version gets its relationships rebuilt on the next `--skip-if-seeded` run.
+GRAPH_LINKER_VERSION = 3
+
+# Shared linker relations -> Neo4j relationship types queried by Neo4jRepository
+NEO4J_REL_TYPES = {
+    "CITES": "CITES_CLAUSE",
+    "EMPOWERED_BY": "EMPOWERED_BY",
+    "NEXT_SECTION": "ADJACENT_SECTION",
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("migrate_to_tri_store")
@@ -77,14 +94,19 @@ def extract_year_be(title: str) -> Optional[int]:
 
 
 def classify_doc_type(title: str) -> str:
-    """Classify legal document level."""
-    if "พระราชบัญญัติ" in title or "พ.ร.บ." in title:
+    """Classify legal document level from the title's leading instrument type.
+
+    Matching on the prefix matters: subordinate titles such as 'กฎกระทรวง...ตามพระราชบัญญัติ...'
+    mention the Act but are not Acts themselves.
+    """
+    t = title.strip()
+    if t.startswith(("พระราชบัญญัติ", "พ.ร.บ.")):
         return "ACT"
-    elif "กฎกระทรวง" in title:
+    if t.startswith("กฎกระทรวง"):
         return "MINISTERIAL_RULE"
-    elif "ระเบียบ" in title:
+    if t.startswith("ระเบียบ"):
         return "REGULATION"
-    elif "ประกาศ" in title or "หนังสือเวียน" in title or " ว " in title:
+    if t.startswith(("ประกาศ", "หนังสือเวียน")) or " ว " in t:
         return "CIRCULAR"
     return "REGULATION"
 
@@ -99,61 +121,10 @@ def extract_pages(entry_id: str) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def extract_section_and_clause(entry_text: str, content_text: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-    """
-    Extracts (section_number, clause_number, chapter_number) using normalized Arabic digits.
-    """
-    combined = thai_to_arabic(f"{entry_text} {content_text[:600]}")
-    
-    # Extract Section (มาตรา)
-    sec_num = None
-    m_sec = re.search(r"มาตรา\s*(\d+)", combined)
-    if m_sec:
-        try:
-            sec_num = int(m_sec.group(1))
-        except ValueError:
-            pass
-
-    # Extract Clause (ข้อ)
-    cls_num = None
-    m_cls = re.search(r"ข้อ\s*(\d+)", combined)
-    if m_cls:
-        try:
-            cls_num = int(m_cls.group(1))
-        except ValueError:
-            pass
-
-    # Extract Chapter (หมวด)
-    chap_num = None
-    m_ch = re.search(r"หมวด\s*(\d+)", combined)
-    if m_ch:
-        try:
-            chap_num = int(m_ch.group(1))
-        except ValueError:
-            pass
-
-    return sec_num, cls_num, chap_num
-
-
-def extract_citations(text: str) -> Tuple[Set[int], Set[int]]:
-    """Extract section and clause numbers cited within the text."""
-    text_norm = thai_to_arabic(str(text))
-    cited_sections = set()
-    cited_clauses = set()
-
-    for m in re.finditer(r"ตาม(?:ความใน)?มาตรา\s*(\d+)", text_norm):
-        try:
-            cited_sections.add(int(m.group(1)))
-        except ValueError:
-            pass
-
-    for m in re.finditer(r"ตาม(?:ความใน)?ข้อ\s*(\d+)", text_norm):
-        try:
-            cited_clauses.add(int(m.group(1)))
-        except ValueError:
-            pass
-
-    return cited_sections, cited_clauses
+def extract_chapter(entry_text: str, content_text: str) -> Optional[int]:
+    """Extract the chapter number (หมวด) using normalized Arabic digits."""
+    m_ch = re.search(r"หมวด\s*(\d+)", thai_to_arabic(f"{entry_text} {content_text[:600]}"))
+    return int(m_ch.group(1)) if m_ch else None
 
 
 def batch_embed_texts(
@@ -172,7 +143,8 @@ def batch_embed_texts(
         "Content-Type": "application/json",
     }
     all_embeddings = []
-    
+    failed = 0
+
     for i in tqdm(range(0, len(texts), batch_size), desc="Embedding batches"):
         chunk = [str(t)[:2000] for t in texts[i:i + batch_size]]
         try:
@@ -197,10 +169,34 @@ def batch_embed_texts(
                     r.raise_for_status()
                     all_embeddings.append(r.json()["data"][0]["embedding"])
                 except Exception as ex:
-                    logger.error(f"Single embed failed: {ex}. Using zero vector fallback.")
-                    all_embeddings.append([0.0] * 1024)
+                    logger.error(f"Single embed failed: {ex}")
+                    failed += 1
 
+    # Zero-vector placeholders would silently poison the dense index (and the embedding
+    # cache), so abort instead and let the caller re-run once the embedding API is healthy.
+    if failed:
+        raise RuntimeError(f"{failed}/{len(texts)} texts could not be embedded; aborting migration.")
     return all_embeddings
+
+
+def is_already_seeded(storage: StorageManager) -> bool:
+    """True when all three stores hold data in parity and the graph was built by the current linker."""
+    try:
+        stats = storage.get_stats()
+        linker_version = storage.neo4j.get_graph_meta("linker_version")
+    except Exception as e:
+        logger.warning(f"Could not read Tri-Store stats: {e}")
+        return False
+    pg_clauses = stats["postgres"]["statute_clauses"]
+    in_parity = (
+        pg_clauses > 0
+        and stats["qdrant"]["statutes_points"] == pg_clauses
+        and stats["neo4j"].get("clauses", 0) == pg_clauses
+    )
+    if in_parity and linker_version != GRAPH_LINKER_VERSION:
+        print(f"Neo4j graph built by linker v{linker_version}, current is v{GRAPH_LINKER_VERSION}: relinking.")
+        return False
+    return in_parity
 
 
 def run_migration(
@@ -209,16 +205,28 @@ def run_migration(
     cache_dir: str = "outputs/migration_cache",
     limit: Optional[int] = None,
     skip_embed: bool = False,
+    skip_if_seeded: bool = False,
+    force_embed: bool = False,
 ):
     print("=" * 65)
     print("LEGAL-GRAPH-RAG: TRI-STORE DATABASE MIGRATION PIPELINE")
     print("=" * 65)
     t_start = time.time()
-    load_dotenv(override=True)
+    # Never override: inside docker compose, POSTGRES_HOST/QDRANT_HOST/NEO4J_URI point at the
+    # service names, while the mounted .env still holds the localhost values for host-side runs.
+    load_dotenv(override=False)
 
-    os.makedirs(cache_dir, exist_ok=True)
     storage = StorageManager.get_instance()
     storage.init_all_stores()
+
+    if skip_if_seeded and is_already_seeded(storage):
+        print("Tri-Store already seeded (PostgreSQL/Qdrant/Neo4j clause counts in parity). Skipping.")
+        return
+
+    tokenmind_api_key = os.getenv("TOKENMIND_API_KEY", "").strip()
+    tokenmind_base_url = os.getenv("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1").rstrip("/")
+    tokenmind_model = os.getenv("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3")
+    os.makedirs(cache_dir, exist_ok=True)
 
     # ---------------------------------------------------------
     # Step 1: Parse and normalize Statutory Clauses & Documents
@@ -236,6 +244,8 @@ def run_migration(
 
     doc_map: Dict[str, Dict[str, Any]] = {}
     clauses: List[Dict[str, Any]] = []
+    # Inputs for the shared citation linker (core/graph_construct/citation_linker.py)
+    linker_units: List[Dict[str, Any]] = []
 
     for raw in raw_laws:
         entry_id = str(raw.get("id", ""))
@@ -271,9 +281,17 @@ def run_migration(
             }
 
         p_start, p_end = extract_pages(entry_id)
-        sec_num, cls_num, chap_num = extract_section_and_clause(entry_id, text_content)
+        # Numbers come from the chunk's own label ('มาตรา ๕๖', 'ข้อ ๗๙ (ตอนที่ 2)'), never from body
+        # text: a regulation clause saying 'ตามมาตรา 56' is not section 56.
+        # The entry id keeps the '(ตอนที่ N)' part suffix that the 'section' field drops.
+        label = (entry_id.partition("|")[2] or str(raw.get("section") or "")).strip()
+        kind, unit_num, _, _ = parse_unit_label(label)
+        sec_num = unit_num if kind == "section" else None
+        cls_num = unit_num if kind == "clause" else None
+        chap_num = extract_chapter(entry_id, text_content)
 
         clause_id = f"clause_{hashlib.md5(entry_id.encode('utf-8')).hexdigest()[:16]}"
+        linker_units.append({"id": clause_id, "doc_name": doc_title, "label": label, "text": text_content})
         clauses.append({
             "clause_id": clause_id,
             "doc_id": doc_id,
@@ -340,10 +358,20 @@ def run_migration(
     # Step 4: Generate Embeddings & Upsert into Qdrant
     # ---------------------------------------------------------
     print("\n[Step 4] Generating embeddings and indexing into Qdrant VectorDB...")
+    qdrant_stats = storage.qdrant.count_stats()
+    qdrant_in_parity = (
+        qdrant_stats["statutes_points"] == len(clauses)
+        and qdrant_stats["cases_points"] == len(faq_cases)
+    )
+    if qdrant_in_parity and not force_embed:
+        # clause_id is a hash of the entry, so equal counts mean the same points are already indexed
+        print(f"Qdrant already holds {len(clauses)} statute / {len(faq_cases)} case points. Skipping (use --force-embed to re-index).")
+        skip_embed = True
+
     cache_file = os.path.join(cache_dir, f"dense_embeddings_{len(clauses)}.json")
     dense_embeddings = None
 
-    if os.path.exists(cache_file):
+    if not skip_embed and os.path.exists(cache_file):
         print(f"Loading cached embeddings from {cache_file}...")
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
@@ -354,11 +382,10 @@ def run_migration(
         except Exception:
             dense_embeddings = None
 
-    if dense_embeddings is None and not skip_embed:
-        tokenmind_api_key = os.getenv("TOKENMIND_API_KEY", "***REMOVED***")
-        tokenmind_base_url = os.getenv("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1")
-        tokenmind_model = os.getenv("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3")
+    if not skip_embed and not tokenmind_api_key and (dense_embeddings is None or faq_cases):
+        raise RuntimeError("TOKENMIND_API_KEY is not set; it is required to embed the corpus into Qdrant.")
 
+    if dense_embeddings is None and not skip_embed:
         clause_texts = [f"{c['entry']}\n{c['content_thai'][:1500]}" for c in clauses]
         print(f"Calling Tokenmind Embedding API ({tokenmind_model}) for {len(clause_texts)} clauses...")
         dense_embeddings = batch_embed_texts(
@@ -383,9 +410,9 @@ def run_migration(
             case_texts = [f"{cs['question']} {cs['answer']}" for cs in faq_cases]
             case_embs = batch_embed_texts(
                 case_texts,
-                api_key=os.getenv("TOKENMIND_API_KEY", "***REMOVED***"),
-                base_url=os.getenv("TOKENMIND_BASE_URL", "https://tokenmind.abdul.in.th/v1"),
-                model=os.getenv("TOKENMIND_EMBEDDING_MODEL", "BAAI/bge-m3"),
+                api_key=tokenmind_api_key,
+                base_url=tokenmind_base_url,
+                model=tokenmind_model,
                 batch_size=16,
             )
             storage.qdrant.upsert_case_points(faq_cases, case_embs, batch_size=50)
@@ -399,103 +426,58 @@ def run_migration(
     if faq_cases:
         storage.neo4j.sync_faq_cases(faq_cases)
 
-    # Build Relationships
-    print("Constructing intra-document edges (ADJACENT_SECTION & CITES_CLAUSE)...")
+    # MERGE never removes edges, so derived corpus relationships from earlier (buggier) runs
+    # would survive a re-link. Drop them first; CONTAINS and tenant-private edges are kept.
+    removed = storage.neo4j.clear_derived_relationships(
+        list(NEO4J_REL_TYPES.values()) + ["RELATES_TO_LAW", "REFERENCES_DOCUMENT"]
+    )
+    print(f"Removed {removed} previously derived relationships.")
+
+    # 5.1 Statutory edges from the shared linker (same rules as the in-memory GraphDB build)
+    print("Extracting citation, empowerment and reading-order edges (citation_linker)...")
     edges: List[Dict[str, Any]] = []
-
-    # 5.1 Group clauses by document for adjacency
-    doc_grouped: Dict[str, List[Dict[str, Any]]] = {}
-    sec_to_clause: Dict[Tuple[str, int], str] = {}
-    cls_to_clause: Dict[Tuple[str, int], str] = {}
-
-    for c in clauses:
-        d_id = c["doc_id"]
-        doc_grouped.setdefault(d_id, []).append(c)
-        if c["section_num"]:
-            sec_to_clause[(d_id, c["section_num"])] = c["clause_id"]
-        if c["clause_num"]:
-            cls_to_clause[(d_id, c["clause_num"])] = c["clause_id"]
-
-    for d_id, group in doc_grouped.items():
-        if len(group) < 2:
-            continue
-        # Sort by section_num or clause_num or page
-        def sort_key(x):
-            nums = [n for n in (x["section_num"], x["clause_num"], x["page_start"]) if n is not None]
-            return min(nums) if nums else 999999
-
-        sorted_group = sorted(group, key=sort_key)
-        for i in range(len(sorted_group) - 1):
-            curr_id = sorted_group[i]["clause_id"]
-            next_id = sorted_group[i + 1]["clause_id"]
-            if curr_id != next_id:
-                edges.append({
-                    "source_id": curr_id,
-                    "target_id": next_id,
-                    "rel_type": "ADJACENT_SECTION",
-                    "props": {"direction": "next"}
-                })
-                edges.append({
-                    "source_id": next_id,
-                    "target_id": curr_id,
-                    "rel_type": "ADJACENT_SECTION",
-                    "props": {"direction": "prev"}
-                })
-
-    # 5.2 Extract cross-statutory citations
-    for c in clauses:
-        src_id = c["clause_id"]
-        d_id = c["doc_id"]
-        cited_secs, cited_clss = extract_citations(c["content_thai"])
-
-        for s in cited_secs:
-            tgt_id = sec_to_clause.get((d_id, s))
-            if tgt_id and tgt_id != src_id:
-                edges.append({
-                    "source_id": src_id,
-                    "target_id": tgt_id,
-                    "rel_type": "CITES_CLAUSE",
-                    "props": {"quote": f"ตามมาตรา {s}"}
-                })
-
-        for cls_n in cited_clss:
-            tgt_id = cls_to_clause.get((d_id, cls_n))
-            if tgt_id and tgt_id != src_id:
-                edges.append({
-                    "source_id": src_id,
-                    "target_id": tgt_id,
-                    "rel_type": "CITES_CLAUSE",
-                    "props": {"quote": f"ตามข้อ {cls_n}"}
-                })
+    for e in extract_legal_edges(linker_units, act_title=normalize_doc_name(ACT_TITLE)):
+        rel = NEO4J_REL_TYPES[e["rel_type"]]
+        if rel == "ADJACENT_SECTION":
+            edges.append({**e, "rel_type": rel, "props": {"direction": "next"}})
+            edges.append({
+                "source_id": e["target_id"],
+                "target_id": e["source_id"],
+                "rel_type": rel,
+                "props": {"direction": "prev"},
+            })
+        else:
+            edges.append({**e, "rel_type": rel})
 
     if edges:
         storage.neo4j.sync_relationships(edges, batch_size=1000)
 
-    # 5.3 Link FAQ Cases to Clauses
-    case_links = []
+    # 5.2 Link FAQ Cases to the documents they reference and to any clause they cite
     if faq_cases:
+        title_to_doc_id = {d["title"]: d["doc_id"] for d in documents}
+        case_doc_links, case_links = [], []
         for cs in faq_cases:
-            cs_id = cs["case_id"]
-            for law_ref in cs.get("cited_laws", []):
-                ref_norm = thai_to_arabic(str(law_ref))
-                m = re.search(r"(?:มาตรา|ม\.)\s*(\d+)", ref_norm)
-                if m:
-                    sec_n = int(m.group(1))
-                    for (d_id, s_n), c_id in sec_to_clause.items():
-                        if s_n == sec_n:
-                            case_links.append({"case_id": cs_id, "clause_id": c_id})
+            cited_docs = [normalize_doc_name(str(t)) for t in cs.get("cited_laws", [])]
+            cited_docs = [t for t in cited_docs if t in title_to_doc_id]
+            case_doc_links.extend(
+                {"case_id": cs["case_id"], "doc_id": title_to_doc_id[t]} for t in dict.fromkeys(cited_docs)
+            )
+            fact_text = f"{cs['question']} {cs['answer']}"
+            case_links.extend(
+                {"case_id": cs["case_id"], "clause_id": cid}
+                for cid in resolve_case_citations(fact_text, cited_docs, linker_units, normalize_doc_name(ACT_TITLE))
+            )
 
-                m_cls = re.search(r"ข้อ\s*(\d+)", ref_norm)
-                if m_cls:
-                    cls_n = int(m_cls.group(1))
-                    for (d_id, c_n), c_id in cls_to_clause.items():
-                        if c_n == cls_n:
-                            case_links.append({"case_id": cs_id, "clause_id": c_id})
-
+        if case_doc_links:
+            storage.neo4j.link_case_to_documents(case_doc_links)
         if case_links:
             storage.neo4j.link_case_to_laws(case_links)
-            print(f"Linked {len(case_links)} FAQ precedent relationships to Statute Clauses.")
+        print(
+            f"Linked FAQ precedents: {len(case_doc_links)} case->document, "
+            f"{len(case_links)} case->clause relationships."
+        )
 
+    storage.neo4j.set_graph_meta("linker_version", GRAPH_LINKER_VERSION)
     # ---------------------------------------------------------
     # Step 6: Parity Validation & Final Report
     # ---------------------------------------------------------
@@ -520,12 +502,15 @@ def run_migration(
 
 
 if __name__ == "__main__":
+    load_dotenv(override=False)
     parser = argparse.ArgumentParser(description="Migrate Thai Procurement QA corpus to Tri-Store")
-    parser.add_argument("--laws-path", default="datas/law_to_crime.json", help="Path to law_to_crime.json")
-    parser.add_argument("--cases-path", default="datas/cases_with_feature.json", help="Path to cases_with_feature.json")
+    parser.add_argument("--laws-path", default=os.getenv("law_to_crime_path", "datas/law_to_crime.json"), help="Path to law_to_crime.json")
+    parser.add_argument("--cases-path", default=os.getenv("case_db_path", "datas/cases_with_feature.json"), help="Path to cases_with_feature.json")
     parser.add_argument("--cache-dir", default="outputs/migration_cache", help="Cache directory for embeddings")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of chunks to ingest (for testing)")
     parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation and Qdrant ingestion")
+    parser.add_argument("--force-embed", action="store_true", help="Re-embed and re-index Qdrant even if it is already in parity")
+    parser.add_argument("--skip-if-seeded", action="store_true", help="Exit early if all three stores are already populated and in parity")
 
     args = parser.parse_args()
     run_migration(
@@ -534,4 +519,6 @@ if __name__ == "__main__":
         cache_dir=args.cache_dir,
         limit=args.limit,
         skip_embed=args.skip_embed,
+        skip_if_seeded=args.skip_if_seeded,
+        force_embed=args.force_embed,
     )

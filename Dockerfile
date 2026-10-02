@@ -20,15 +20,18 @@ ENV PIP_DEFAULT_TIMEOUT=1000 \
     HF_HOME=/app/.cache/huggingface
 
 COPY requirements.txt ./
+# Install torch from TORCH_INDEX_URL first: with only --extra-index-url, pip may resolve the
+# much larger CUDA build from PyPI instead of the CPU wheel.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --extra-index-url ${TORCH_INDEX_URL} -r requirements.txt
+    pip install --index-url ${TORCH_INDEX_URL} "torch>=2.6.0" \
+    && pip install -r requirements.txt
 
 # Pre-download default Cross-Encoder reranker into image cache during build time
-RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
-    m = 'BAAI/bge-reranker-v2-m3'; \
-    print(f'Pre-caching {m}...'); \
-    AutoTokenizer.from_pretrained(m); \
-    AutoModelForSequenceClassification.from_pretrained(m)"
+# RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+#     m = 'BAAI/bge-reranker-v2-m3'; \
+#     print(f'Pre-caching {m}...'); \
+#     AutoTokenizer.from_pretrained(m); \
+#     AutoModelForSequenceClassification.from_pretrained(m)"
 
 # Create application user and runtime directories (including HuggingFace model cache)
 RUN useradd -u 10001 -m -d /app appuser \
@@ -37,10 +40,12 @@ RUN useradd -u 10001 -m -d /app appuser \
 
 # Copy application source code
 COPY core/ ./core/
+COPY api/ ./api/
 COPY scripts/ ./scripts/
 COPY evaluation/ ./evaluation/
 COPY datas/ ./datas/
-COPY run.py mcp_server.py ./
+COPY tests/ ./tests/
+COPY run.py server.py ./
 
 USER appuser
 
@@ -54,8 +59,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Production Readiness Probe: checks whether models, graph DB, and services are loaded.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# Readiness probe: models loaded and Tri-Store reachable + seeded. Long start period covers
+# the first-boot download of the local cross-encoder reranker into the HF cache volume.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
     CMD curl -f -s http://localhost:${MCP_PORT}/ready || exit 1
 
-CMD ["python", "mcp_server.py"]
+CMD ["python", "server.py"]

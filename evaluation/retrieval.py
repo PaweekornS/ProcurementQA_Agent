@@ -488,7 +488,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--graph-db",
-        default="./outputs/openrouter_section_graph_db.pkl",
+        default="./outputs/graph_db.pkl",
         help="Path to prebuilt Graph DB pkl"
     )
     parser.add_argument(

@@ -5,7 +5,7 @@ tests/test_tri_store_integration.py
 Integration verification for Tri-Store Database Architecture:
 1. Validates PostgreSQL connectivity, schemas, and counts.
 2. Validates Qdrant collection vectors (1024-dim dense + native sparse BM25).
-3. Validates Neo4j knowledge graph traversal (CITES_CLAUSE, ADJACENT_SECTION).
+3. Validates Neo4j knowledge graph traversal (CITES_CLAUSE, EMPOWERED_BY, ADJACENT_SECTION).
 4. Validates ProcurementService MCP tool calls.
 """
 
@@ -18,11 +18,34 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-load_dotenv(override=True)
+# override=False: keep container/CI endpoints (POSTGRES_HOST=postgres, ...) over .env localhost values
+load_dotenv(override=False)
 os.environ["USE_TRI_STORE"] = "true"
 
+import json
+
 from core.database import StorageManager
-from core.mcp_service import ProcurementService
+from core.service import ProcurementService
+from scripts.migrate_to_tri_store import GRAPH_LINKER_VERSION, normalize_doc_name
+
+
+def _corpus_expectations() -> dict:
+    """
+    Minimum counts derived from the real corpus in datas/ (the PUBLIC tenant), parsed exactly as
+    scripts/migrate_to_tri_store.py does. Stores may hold more when tenant benchmark data is
+    loaded on top, hence the >= assertions.
+    """
+    laws_path = os.getenv("law_to_crime_path", str(PROJECT_ROOT / "datas" / "law_to_crime.json"))
+    cases_path = os.getenv("case_db_path", str(PROJECT_ROOT / "datas" / "cases_with_feature.json"))
+    with open(laws_path, encoding="utf-8") as f:
+        laws = [r for r in json.load(f) if r.get("items")]
+    with open(cases_path, encoding="utf-8") as f:
+        cases = json.load(f)
+    return {
+        "legal_documents": len({normalize_doc_name(str(r.get("id", "")).split("|")[0]) for r in laws}),
+        "statute_clauses": len(laws),
+        "faq_cases": len(cases),
+    }
 
 
 class TestTriStoreIntegration(unittest.TestCase):
@@ -38,10 +61,10 @@ class TestTriStoreIntegration(unittest.TestCase):
         stats = self.storage.get_stats()
         print("\n[Test 1] DB Counts:", stats)
         
-        # PostgreSQL assertions
-        self.assertGreaterEqual(stats["postgres"]["legal_documents"], 100)
-        self.assertGreaterEqual(stats["postgres"]["statute_clauses"], 3000)
-        self.assertGreaterEqual(stats["postgres"]["faq_cases"], 20)
+        # PostgreSQL assertions: at least the full real corpus is loaded
+        expected = _corpus_expectations()
+        for key, minimum in expected.items():
+            self.assertGreaterEqual(stats["postgres"][key], minimum, f"{key} below corpus size")
 
         # Qdrant assertions
         self.assertEqual(stats["qdrant"]["statutes_points"], stats["postgres"]["statute_clauses"])
@@ -50,7 +73,9 @@ class TestTriStoreIntegration(unittest.TestCase):
         # Neo4j assertions
         self.assertEqual(stats["neo4j"]["documents"], stats["postgres"]["legal_documents"])
         self.assertEqual(stats["neo4j"]["clauses"], stats["postgres"]["statute_clauses"])
-        self.assertGreater(stats["neo4j"]["relationships"], 5000)
+        # Every clause hangs off its document via CONTAINS, so citations/adjacency must add more
+        self.assertGreater(stats["neo4j"]["relationships"], stats["neo4j"]["clauses"])
+        self.assertEqual(self.storage.neo4j.get_graph_meta("linker_version"), GRAPH_LINKER_VERSION)
 
     def test_02_hybrid_search_clauses(self):
         """Verify hybrid vector + sparse search in Qdrant with Postgres hydration."""
@@ -98,6 +123,30 @@ class TestTriStoreIntegration(unittest.TestCase):
         graph_res = self.service.traverse_regulations("มาตรา 56")
         print(f"[Test 4] Service traverse_regulations returned {graph_res['graph_neighbors_count']} neighbors.")
         self.assertGreaterEqual(graph_res["graph_neighbors_count"], 1)
+
+    def test_05_cross_document_subordinate_links(self):
+        """Act มาตรา 56 must reach subordinate instruments in *other* documents (EMPOWERED_BY / CITES_CLAUSE)."""
+        records = self.storage.pg.lookup_section("", 56)
+        self.assertGreater(len(records), 0)
+        self.assertTrue(records[0]["doc_title"].startswith("พระราชบัญญัติ"), "bare section lookup must rank the Act first")
+
+        subordinates = self.storage.neo4j.get_subordinate_laws(records[0]["clause_id"])
+        print(f"\n[Test 5] มาตรา 56 has {len(subordinates)} subordinate clauses.")
+        self.assertGreater(len(subordinates), 0)
+        self.assertIn("EMPOWERED_BY", {s["relation"] for s in subordinates})
+        self.assertTrue(all(s["document_title"] != records[0]["doc_title"] for s in subordinates))
+
+    def test_06_ambiguous_clause_lookup_is_flagged(self):
+        """A bare 'ข้อ N' that exists in several documents is flagged so the caller (MCP get_statute_section) can disambiguate."""
+        res = self.service.lookup_section("ข้อ 2")
+        print(f"\n[Test 6] 'ข้อ 2' resolved to: {res.get('doc_title')}")
+        self.assertTrue(res.get("found"))
+        self.assertTrue(res.get("ambiguous"))
+        self.assertGreater(len(res.get("other_documents_with_same_number", [])), 0)
+
+        scoped = self.service.lookup_section("ข้อ 2", doc_title=res["other_documents_with_same_number"][0])
+        self.assertTrue(scoped.get("found"))
+        self.assertNotIn("ambiguous", scoped)
 
 
 if __name__ == "__main__":

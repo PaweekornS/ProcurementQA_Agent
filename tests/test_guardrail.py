@@ -1,25 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-tests/test_langgraph_agent.py
+tests/test_guardrail.py
 
-Unit and Integration tests for LangGraph-based Agentic Legal GraphRAG:
-1. Verify GroundingGuardrail (0-LLM Fact Checking & Anti-Hallucination).
-2. Verify Tool Definitions (exact lookup, hybrid search, graph traversal, threshold).
-3. Verify Agentic Graph execution and State propagation.
+Unit tests for GroundingGuardrail (0-LLM fact checking & anti-hallucination), the final node of
+the agentic RAG workflow.
 """
 
 import unittest
-import json
-from unittest.mock import MagicMock
-from langchain_core.messages import AIMessage, HumanMessage
 
 from core.agent.guardrail import GroundingGuardrail
-from core.agent.state import LegalAgentState
-from core.agent.tools import verify_procurement_threshold
-from core.agent.graph import AgenticLegalGraphRAG
 
 
-class TestLangGraphAgent(unittest.TestCase):
+class TestGroundingGuardrail(unittest.TestCase):
 
     def test_01_guardrail_valid_citations(self):
         """Guardrail should pass when synthesized text cites sections present in context."""
@@ -60,30 +52,6 @@ class TestLangGraphAgent(unittest.TestCase):
         # Should flag warning regarding 500,000 ceiling
         has_ceiling_warning = any("500,000" in w for w in verdict["warnings"])
         self.assertTrue(has_ceiling_warning)
-
-    def test_04_verify_threshold_tool(self):
-        """verify_procurement_threshold tool must return valid audit JSON."""
-        res_str = verify_procurement_threshold.invoke({
-            "procurement_item": "คอมพิวเตอร์พกพา",
-            "estimated_budget": 450000.0,
-            "proposed_method": "เฉพาะเจาะจง"
-        })
-        res = json.loads(res_str)
-        self.assertTrue(res["is_compliant"])
-        self.assertEqual(res["compliance_status"], "PASSED")
-
-    def test_05_agent_orchestration_flow(self):
-        """AgenticLegalGraphRAG should initialize workflow and compile without error."""
-        mock_model = MagicMock()
-        mock_model.bind_tools = MagicMock(return_value=mock_model)
-        mock_model.invoke = MagicMock(return_value=AIMessage(content="สามารถใช้วิธีเฉพาะเจาะจงได้ตามมาตรา 56"))
-
-        agent = AgenticLegalGraphRAG(model_client=mock_model)
-        self.assertIsNotNone(agent.workflow)
-
-        response = agent.invoke(query="วงเงิน 300,000 บาท ใช้วิธีเฉพาะเจาะจงได้ไหม", org_id="DGA")
-        self.assertIn("status", response)
-        self.assertEqual(response["organization_id"], "DGA")
 
 
 if __name__ == "__main__":

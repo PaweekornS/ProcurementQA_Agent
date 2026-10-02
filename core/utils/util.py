@@ -197,18 +197,12 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_co
         if not case_by_defendant:
             case_by_defendant = [{"name": names[0], "description": raw_fact[:1024]}]
 
-    use_crag = True
-    max_retry = 1
-    if crag_config is not None:
-        use_crag = bool(crag_config.get("enabled", True))
-        max_retry = int(crag_config.get("max_retry", 1))
-
-    if use_crag:
-        from core.crag.pipeline import CRAGPipeline
-        crag_pipe = CRAGPipeline(chatbot, retrieve_config=retrieve_config, max_retry=max_retry)
-        for item in case_by_defendant:
-            crag_pipe.process_case_item(item, law_to_crime, cases_db)
-        return case_by_defendant
+    from core.agent import ProcurementAgenticWorkflow
+    workflow = ProcurementAgenticWorkflow(chatbot, retrieve_config=retrieve_config)
+    res_list = []
+    for item in case_by_defendant:
+        res_list.append(workflow.invoke(item))
+    return res_list
 
     for item in case_by_defendant:
         item["feature"] = get_features(chatbot, item)

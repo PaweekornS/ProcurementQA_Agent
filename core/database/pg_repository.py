@@ -278,7 +278,8 @@ class PostgresRepository:
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)
               AND sc.section_num = :sec
               AND sc.org_id IN ('PUBLIC', :org_id)
-            ORDER BY sc.page_start ASC NULLS LAST;
+            -- The parent Act first (circulars may quote 'มาตรา N'), then continuation parts in order
+            ORDER BY (ld.doc_type = 'ACT') DESC, sc.page_start ASC NULLS LAST, length(sc.entry), sc.entry;
         """)
         kw = f"%{doc_id_or_keyword.strip()}%"
         with self.engine.connect() as conn:
@@ -294,7 +295,12 @@ class PostgresRepository:
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)
               AND sc.clause_num = :cls
               AND sc.org_id IN ('PUBLIC', :org_id)
-            ORDER BY sc.page_start ASC NULLS LAST;
+            -- 'ข้อ N' exists in dozens of documents. Without a document keyword, prefer regulations
+            -- over ministerial rules / circulars, then the most comprehensive document (most clauses),
+            -- then continuation parts in reading order.
+            ORDER BY CASE ld.doc_type WHEN 'REGULATION' THEN 0 WHEN 'MINISTERIAL_RULE' THEN 1 ELSE 2 END,
+                     (SELECT count(*) FROM statute_clauses s2 WHERE s2.doc_id = sc.doc_id) DESC,
+                     sc.page_start ASC NULLS LAST, length(sc.entry), sc.entry;
         """)
         kw = f"%{doc_id_or_keyword.strip()}%"
         with self.engine.connect() as conn:
