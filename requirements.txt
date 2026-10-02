@@ -1,6 +1,8 @@
 # Core dependencies
 torch>=2.6.0
 transformers>=4.51.0
+# Required at runtime by transformers to load the cross-encoder reranker (device placement); no direct import
+accelerate>=0.26.0
 numpy>=1.24.0
 scipy>=1.10.0
 networkx>=3.0

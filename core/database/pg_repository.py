@@ -5,12 +5,24 @@ core/database/pg_repository.py
 PostgreSQL Data Access Layer (SSOT) for Thai Procurement LegalGraphRAG.
 Provides transactional persistence for legal documents, statutory macro-clauses,
 Comptroller General FAQ cases, and QA audit logs.
+
+Tenant isolation is enforced by the database with Row-Level Security (RLS):
+- Two connection roles. The owner (POSTGRES_USER) runs schema setup, ingestion and admin stats.
+  The runtime role (POSTGRES_APP_USER, not superuser, not table owner) serves tenant-scoped
+  reads and writes and is always subject to the RLS policies.
+- Every runtime transaction sets `app.org_id` (transaction-local, so pooled connections never
+  carry another tenant's value). Policies let a tenant read PUBLIC rows plus its own, and write
+  only its own. Without `app.org_id` only PUBLIC rows are visible (fail-closed).
+- The explicit `org_id IN ('PUBLIC', :org_id)` predicates stay in the queries as a second layer
+  and so the planner keeps using the org_id indexes.
 """
 
 import os
+import re
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
+from typing import Iterator, List, Dict, Any, Optional
 from sqlalchemy import (
     create_engine, text, inspect
 )
@@ -19,6 +31,33 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 logger = logging.getLogger("pg_repository")
+
+
+_ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+# Tables holding tenant data; each carries an org_id column ('PUBLIC' = shared corpus)
+RLS_TABLES = ("legal_documents", "statute_clauses", "faq_cases", "query_audit_logs")
+
+
+def _policy_ddl(table: str, role: str) -> Dict[str, str]:
+    """Read PUBLIC + own tenant; insert/update/delete own tenant only."""
+    tenant = "current_setting('app.org_id', true)"
+    return {
+        "tenant_read": (
+            f'CREATE POLICY tenant_read ON {table} FOR SELECT TO "{role}" '
+            f"USING (org_id = 'PUBLIC' OR org_id = {tenant})"
+        ),
+        "tenant_insert": (
+            f'CREATE POLICY tenant_insert ON {table} FOR INSERT TO "{role}" WITH CHECK (org_id = {tenant})'
+        ),
+        "tenant_update": (
+            f'CREATE POLICY tenant_update ON {table} FOR UPDATE TO "{role}" '
+            f"USING (org_id = {tenant}) WITH CHECK (org_id = {tenant})"
+        ),
+        "tenant_delete": (
+            f'CREATE POLICY tenant_delete ON {table} FOR DELETE TO "{role}" USING (org_id = {tenant})'
+        ),
+    }
 
 
 class PostgresRepository:
@@ -47,6 +86,70 @@ class PostgresRepository:
             pool_timeout=30,
             pool_recycle=1800,
         )
+
+        # Runtime role subject to RLS. Without it, tenant queries fall back to the owner engine,
+        # which bypasses RLS (owner / superuser), leaving only the WHERE-clause filtering.
+        self.app_user = os.getenv("POSTGRES_APP_USER", "procurement_app").strip()
+        self.app_password = os.getenv("POSTGRES_APP_PASSWORD", "").strip()
+        if not _ROLE_NAME.match(self.app_user):
+            raise ValueError(f"Invalid POSTGRES_APP_USER: {self.app_user!r}")
+        if self.app_password and self.app_user != self.user:
+            self.app_engine = create_engine(
+                f"postgresql+psycopg2://{self.app_user}:{self.app_password}@{self.host}:{self.port}/{self.dbname}",
+                poolclass=QueuePool,
+                pool_size=10,
+                max_overflow=20,
+                pool_timeout=30,
+                pool_recycle=1800,
+            )
+            self.rls_enforced = True
+        else:
+            logger.warning(
+                "POSTGRES_APP_PASSWORD is not set: tenant queries run as the owner role, which "
+                "bypasses Row-Level Security. Set POSTGRES_APP_USER/POSTGRES_APP_PASSWORD to enforce RLS."
+            )
+            self.app_engine = self.engine
+            self.rls_enforced = False
+
+    @contextmanager
+    def tenant_connection(self, org_id: Optional[str]) -> Iterator[Any]:
+        """Runtime transaction scoped to one tenant (RLS reads app.org_id for its lifetime only)."""
+        with self.app_engine.begin() as conn:
+            conn.execute(text("SELECT set_config('app.org_id', :org, true)"), {"org": org_id or ""})
+            yield conn
+
+    def _init_rls(self):
+        """
+        Idempotently create the runtime role, grant it table access, and install RLS policies.
+        Runs as the owner. Policies are created only when missing, so concurrent startups
+        (migrate + api containers) do not race on DROP/CREATE.
+        """
+        if not self.app_password or self.app_user == self.user:
+            return
+        with self.engine.begin() as conn:
+            exists = conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": self.app_user}).first()
+            verb = "ALTER" if exists else "CREATE"
+            # psycopg2 interpolates %s client-side, so the password is safely quoted in DDL
+            conn.exec_driver_sql(
+                f'{verb} ROLE "{self.app_user}" LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD %s',
+                (self.app_password,),
+            )
+            conn.exec_driver_sql(f'GRANT USAGE ON SCHEMA public TO "{self.app_user}"')
+            conn.exec_driver_sql(
+                f'GRANT SELECT, INSERT, UPDATE, DELETE ON {", ".join(RLS_TABLES)} TO "{self.app_user}"'
+            )
+            for table in RLS_TABLES:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+                existing = {
+                    r[0] for r in conn.execute(
+                        text("SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = :t"),
+                        {"t": table},
+                    )
+                }
+                for name, ddl in _policy_ddl(table, self.app_user).items():
+                    if name not in existing:
+                        conn.exec_driver_sql(ddl)
+        logger.info("PostgreSQL Row-Level Security enabled for role '%s' on %s.", self.app_user, ", ".join(RLS_TABLES))
 
     def init_schema(self):
         """Idempotently create tables, constraints, and indexes, including multi-tenancy columns."""
@@ -141,6 +244,7 @@ class PostgresRepository:
         """
         with self.engine.begin() as conn:
             conn.execute(text(ddl))
+        self._init_rls()
         logger.info("PostgreSQL schema successfully initialized with multi-tenancy.")
 
     def upsert_documents(self, documents: List[Dict[str, Any]], org_id: str = "PUBLIC"):
@@ -260,7 +364,7 @@ class PostgresRepository:
             JOIN legal_documents ld ON sc.doc_id = ld.doc_id
             WHERE sc.clause_id = :cid AND sc.org_id IN ('PUBLIC', :org_id)
         """)
-        with self.engine.connect() as conn:
+        with self.tenant_connection(org_id) as conn:
             row = conn.execute(query, {"cid": clause_id, "org_id": org_id}).mappings().first()
             if row:
                 return dict(row)
@@ -276,7 +380,7 @@ class PostgresRepository:
             JOIN legal_documents ld ON sc.doc_id = ld.doc_id
             WHERE sc.clause_id IN :cids AND sc.org_id IN ('PUBLIC', :org_id)
         """)
-        with self.engine.connect() as conn:
+        with self.tenant_connection(org_id) as conn:
             rows = conn.execute(query, {"cids": tuple(clause_ids), "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
 
@@ -293,7 +397,7 @@ class PostgresRepository:
             ORDER BY (ld.doc_type = 'ACT') DESC, sc.page_start ASC NULLS LAST, length(sc.entry), sc.entry;
         """)
         kw = f"%{doc_id_or_keyword.strip()}%"
-        with self.engine.connect() as conn:
+        with self.tenant_connection(org_id) as conn:
             rows = conn.execute(query, {"kw": kw, "sec": section_num, "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
 
@@ -314,7 +418,7 @@ class PostgresRepository:
                      sc.page_start ASC NULLS LAST, length(sc.entry), sc.entry;
         """)
         kw = f"%{doc_id_or_keyword.strip()}%"
-        with self.engine.connect() as conn:
+        with self.tenant_connection(org_id) as conn:
             rows = conn.execute(query, {"kw": kw, "cls": clause_num, "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
 
@@ -333,11 +437,11 @@ class PostgresRepository:
         params = dict(record)
         for key in ("decomposed_issues", "retrieved_clause_ids", "citations"):
             params[key] = json.dumps(params.get(key) or [], ensure_ascii=False)
-        with self.engine.begin() as conn:
+        with self.tenant_connection(params.get("org_id")) as conn:
             conn.execute(query, params)
 
-    def count_stats(self) -> Dict[str, int]:
-        """Return counts of all tables."""
+    def count_stats(self) -> Dict[str, Any]:
+        """Return counts of all tables (owner role: totals across every tenant)."""
         with self.engine.connect() as conn:
             doc_cnt = conn.execute(text("SELECT count(*) FROM legal_documents")).scalar() or 0
             cls_cnt = conn.execute(text("SELECT count(*) FROM statute_clauses")).scalar() or 0
@@ -345,5 +449,6 @@ class PostgresRepository:
             return {
                 "legal_documents": int(doc_cnt),
                 "statute_clauses": int(cls_cnt),
-                "faq_cases": int(faq_cnt)
+                "faq_cases": int(faq_cnt),
+                "rls_enforced": self.rls_enforced,
             }

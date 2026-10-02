@@ -3,6 +3,7 @@
 # Regenerate after changing requirements.txt and re-running the test suite:
 #   docker run --rm --entrypoint pip procurement-qa:latest freeze --all
 #     | grep -v "^pip==\|^setuptools==\|^wheel==" > requirements.lock   (then re-add this header)
+accelerate==1.15.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -63,6 +64,7 @@ packaging==26.3
 pandas==3.0.6
 portalocker==3.2.0
 protobuf==7.36.2
+psutil==7.2.2
 psycopg2-binary==2.9.13
 pycparser==3.0
 pydantic==2.13.5

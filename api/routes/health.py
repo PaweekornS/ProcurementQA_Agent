@@ -31,6 +31,17 @@ def readiness(response: Response, service: ProcurementService = Depends(get_serv
         model_name = service.rag.config.model.model_name
         sections_indexed = len(service._section_index)
 
+        from core.graph_construct.hybrid_reranker import reranker_status
+        reranker = reranker_status()
+        if not reranker["loaded"]:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return ReadinessStatus(
+                ready=False,
+                status="not_ready",
+                model=model_name,
+                error="Reranker is enabled but failed to load; retrieval would run unreranked. Check the server log."
+            )
+
         tri_store_stats = None
         if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
             from core.database import StorageManager
