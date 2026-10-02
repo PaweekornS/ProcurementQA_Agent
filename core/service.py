@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
 from core.graph_construct.graph_db import GraphDBManager
+from core.preprocess.page_locator import format_page_range
 
 
 # Thai to Arabic digits mapping and vice versa
@@ -253,6 +254,8 @@ class ProcurementService:
             "source_id": top.get("entry", ""),
             "clause_id": top.get("clause_id"),
             "doc_title": top.get("doc_title"),
+            "source_file": top.get("source_file"),
+            "page": format_page_range(top.get("page_start"), top.get("page_end"), top.get("total_pages")),
             "topics": top.get("topics", []),
             "related_laws": top.get("related_laws", []),
             "judge_dep": top.get("judge_dep", []),
@@ -634,6 +637,16 @@ class ProcurementService:
             "organization_id": active_org
         }
 
+    def _clause_source_record(self, clause_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Authoritative clause row (with source_file / page range) from PostgreSQL in tri-store mode."""
+        if not clause_id or os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
+            return None
+        try:
+            from core.database import StorageManager
+            return StorageManager.get_instance().pg.get_clause_by_id(clause_id, org_id="PUBLIC")
+        except Exception:
+            return None
+
     def _enrich_decisive_quotes(
         self,
         raw_quotes: List[Any],
@@ -645,110 +658,78 @@ class ProcurementService:
         - page: page number or page range in document (e.g. '4-6/42')
         - law: exact section or rule identifier
         - quote: verbatim quoted text
-        """
-        enriched = []
-        if not raw_quotes:
-            return enriched
 
-        for q in raw_quotes:
+        A quote is attributed to a source only when both the document and the มาตรา/ข้อ number
+        match; unknown metadata is None (never a same-numbered clause of another document).
+        """
+        from core.graph_construct.citation_linker import parse_unit_label
+
+        def split_law(law: str):
+            """'ระเบียบ... พ.ศ. 2560 ข้อ 86' -> ('ระเบียบ... พ.ศ. 2560', 'clause', 86)."""
+            norm = normalize_digits(re.sub(r"\s+", " ", law.replace("|", " "))).strip()
+            m = re.search(r"(มาตรา|ข้อ)\s*(\d+)", norm)
+            if not m:
+                return norm, None, None
+            kind, num, _, _ = parse_unit_label(f"{m.group(1)} {m.group(2)}")
+            return norm[:m.start()].strip(), kind, num
+
+        def same_doc(a: str, b: str) -> bool:
+            a, b = normalize_digits(a).replace(" ", ""), normalize_digits(b).replace(" ", "")
+            return bool(a) and bool(b) and (a in b or b in a)
+
+        def page_of(*texts: str) -> Optional[str]:
+            for t in texts:
+                m = re.search(r"หน้า\s*([0-9\-\/]+)", t) or re.search(r"_p(\d+(?:_p\d+)?)", t)
+                if m:
+                    return m.group(1).replace("_p", "-")
+            return None
+
+        enriched = []
+        for q in raw_quotes or []:
             if not isinstance(q, dict):
                 if isinstance(q, str) and q.strip():
-                    enriched.append({
-                        "filename": "ไม่ระบุ",
-                        "page": "ไม่ระบุ",
-                        "law": "ไม่ระบุ",
-                        "quote": q.strip()
-                    })
+                    enriched.append({"filename": None, "page": None, "law": None, "quote": q.strip()})
                 continue
 
             law_name = str(q.get("law", "")).strip()
             quote_text = str(q.get("quote", "")).strip()
+            doc_part, kind, num = split_law(law_name)
 
-            filename = ""
-            page = ""
+            # 1. A retrieved chunk of the same document and the same มาตรา/ข้อ
+            matched = None  # (doc_name, entry, text, clause_id)
+            for cand in used_laws:
+                entry = str(cand.get("entry", "") or cand.get("id", ""))
+                cand_doc, _, cand_label = entry.partition("|")
+                cand_kind, cand_num, _, _ = parse_unit_label(cand_label)
+                if kind and cand_kind == kind and cand_num == num and same_doc(doc_part, cand_doc):
+                    cid = cand.get("clause_id") or (cand.get("data") or {}).get("clause_id")
+                    matched = (cand_doc.strip(), entry, str(cand.get("description", "")), cid)
+                    break
 
-            # 1. Match against used_laws from retrieval
-            norm_law = normalize_digits(law_name).lower()
-            law_num_match = re.search(r"(\d+)", norm_law)
-            law_num = law_num_match.group(1) if law_num_match else None
+            # 2. Otherwise (or when the workflow dropped clause_id while merging candidates)
+            #    an exact store lookup scoped to that document
+            if (not matched or not matched[3]) and kind and doc_part:
+                res = self.lookup_section(f"{'มาตรา' if kind == 'section' else 'ข้อ'} {num}", doc_title=doc_part)
+                if res.get("found") and same_doc(doc_part, str(res.get("source_id", "")).split("|")[0]):
+                    entry = str(res.get("source_id", ""))
+                    matched = (entry.split("|")[0].strip(), entry, str(res.get("full_macro_chunk", "")), res.get("clause_id"))
 
-            matched_law = None
-            if law_name or quote_text:
-                for cand in used_laws:
-                    cand_entry = normalize_digits(str(cand.get("entry", ""))).lower()
-                    cand_id = normalize_digits(str(cand.get("id", ""))).lower()
-                    cand_desc = str(cand.get("description", ""))
-                    cand_related = [normalize_digits(str(r)).lower() for r in cand.get("related_laws", [])]
-
-                    # Match by exact section identifier or number
-                    if (norm_law and (norm_law in cand_entry or norm_law in cand_id or any(norm_law in r for r in cand_related))) or \
-                       (law_num and (f" {law_num}" in cand_entry or f" {law_num}" in cand_id or any(f" {law_num}" in r for r in cand_related))) or \
-                       (quote_text and len(quote_text) > 15 and quote_text[:30] in cand_desc):
-                        matched_law = cand
-                        break
-
-            # 2. Extract metadata from matched used_law
-            if matched_law:
-                # Find filename from related_laws or id
-                related = matched_law.get("related_laws", [])
-                for r in related:
-                    if str(r).endswith((".md", ".pdf")):
-                        filename = str(r)
-                        break
-                if not filename:
-                    entry_raw = matched_law.get("entry") or matched_law.get("id") or ""
-                    parts = str(entry_raw).split("|")[0].strip()
-                    parts = re.sub(r"_p\d+.*$", "", parts).strip()
-                    if parts:
-                        filename = parts if parts.endswith(".md") else f"{parts}.md"
-
-                # Find page from judge_dep or id or description
-                judge_dep = str(matched_law.get("judge_dep", ""))
-                p_match = re.search(r"หน้า\s*([0-9\-\/]+)", judge_dep)
-                if p_match:
-                    page = p_match.group(1)
+            filename, page = None, None
+            if matched:
+                doc_name, entry, text, clause_id = matched
+                record = self._clause_source_record(clause_id)
+                if record:
+                    # Tri-store: OCR-relative path and page range recovered at ingestion
+                    filename = record.get("source_file") or f"{doc_name}.md"
+                    page = format_page_range(record.get("page_start"), record.get("page_end"), record.get("total_pages"))
                 else:
-                    id_raw = str(matched_law.get("id", ""))
-                    pid_match = re.search(r"_p(\d+(?:_p\d+)?)", id_raw)
-                    if pid_match:
-                        page = pid_match.group(1).replace("_p", "-")
-
-            # 3. Fallback to lookup_section index if filename or page is still missing
-            if (not filename or not page) and law_name:
-                lookup_res = self.lookup_section(law_name)
-                if lookup_res.get("found"):
-                    source_id = str(lookup_res.get("source_id", ""))
-                    topics = lookup_res.get("topics", [])
-                    raw_text = lookup_res.get("full_macro_chunk", "")
-                    related = lookup_res.get("related_laws", [])
-                    judge_dep = str(lookup_res.get("judge_dep", ""))
-
-                    if not filename:
-                        for r in related:
-                            if str(r).endswith((".md", ".pdf")):
-                                filename = str(r)
-                                break
-                    if not filename:
-                        fn_match = re.search(r"^\[(.*?)\s*\|", raw_text)
-                        if fn_match:
-                            fn_title = fn_match.group(1).strip()
-                            filename = fn_title if fn_title.endswith(".md") else f"{fn_title}.md"
-                        elif topics:
-                            filename = f"{topics[-1]}.md"
-
-                    if not page:
-                        p_match = re.search(r"หน้า\s*([0-9\-\/]+)", judge_dep) or re.search(r"หน้า\s*([0-9\-\/]+)", raw_text)
-                        if p_match:
-                            page = p_match.group(1)
-                        else:
-                            pid_match = re.search(r"_p(\d+(?:_p\d+)?)", source_id)
-                            if pid_match:
-                                page = pid_match.group(1).replace("_p", "-")
+                    filename = f"{doc_name}.md"
+                    page = page_of(entry, text[:300])
 
             enriched.append({
-                "filename": filename or "ไม่ระบุ",
-                "page": page or "ไม่ระบุ",
-                "law": law_name or "ไม่ระบุ",
+                "filename": filename,
+                "page": page,
+                "law": law_name or None,
                 "quote": quote_text
             })
 

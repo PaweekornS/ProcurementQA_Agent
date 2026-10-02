@@ -248,8 +248,10 @@ class PostgresRepository:
     def get_clause_by_id(self, clause_id: str, org_id: str = "DGA") -> Optional[Dict[str, Any]]:
         """Fetch full statutory clause record by clause_id with tenant filtering."""
         query = text("""
-            SELECT * FROM statute_clauses 
-            WHERE clause_id = :cid AND org_id IN ('PUBLIC', :org_id)
+            SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
+            FROM statute_clauses sc
+            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
+            WHERE sc.clause_id = :cid AND sc.org_id IN ('PUBLIC', :org_id)
         """)
         with self.engine.connect() as conn:
             row = conn.execute(query, {"cid": clause_id, "org_id": org_id}).mappings().first()
@@ -262,8 +264,10 @@ class PostgresRepository:
         if not clause_ids:
             return []
         query = text("""
-            SELECT * FROM statute_clauses 
-            WHERE clause_id IN :cids AND org_id IN ('PUBLIC', :org_id)
+            SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
+            FROM statute_clauses sc
+            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
+            WHERE sc.clause_id IN :cids AND sc.org_id IN ('PUBLIC', :org_id)
         """)
         with self.engine.connect() as conn:
             rows = conn.execute(query, {"cids": tuple(clause_ids), "org_id": org_id}).mappings().all()
@@ -272,7 +276,7 @@ class PostgresRepository:
     def lookup_section(self, doc_id_or_keyword: str, section_num: int, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fast relational lookup for a section number in a statute with tenant filtering."""
         query = text("""
-            SELECT sc.*, ld.title as doc_title
+            SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
             FROM statute_clauses sc
             JOIN legal_documents ld ON sc.doc_id = ld.doc_id
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)
@@ -289,7 +293,7 @@ class PostgresRepository:
     def lookup_clause(self, doc_id_or_keyword: str, clause_num: int, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fast relational lookup for a regulation clause number (ข้อ) with tenant filtering."""
         query = text("""
-            SELECT sc.*, ld.title as doc_title
+            SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
             FROM statute_clauses sc
             JOIN legal_documents ld ON sc.doc_id = ld.doc_id
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)

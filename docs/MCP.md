@@ -62,60 +62,51 @@ flowchart TD
 
 ## 2. Super-Orchestrator Contract: `POST /api/v1/qa`
 
-The primary integration endpoint for the Super-Orchestrator returns structured sub-issue decomposition:
-
-### Request Schema (`LegalQARequest`)
+### Request
 ```json
 {
-  "question": "หน่วยงานของรัฐสามารถจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจงในวงเงินไม่เกินเท่าใด และต้องขออนุมัติใครบ้าง",
-  "mode": "fast",
+  "query": "หน่วยงานของรัฐจัดซื้อโดยวิธีเฉพาะเจาะจงได้ในวงเงินไม่เกินเท่าใด และต้องขออนุมัติใครบ้าง",
+  "org_id": "DGA"
+}
+```
+`org_id` is optional: falls back to the `X-Organization-Id` header, then `DEFAULT_ORG_ID`.
+The same contract is returned by the MCP tool `ask_procurement_law(query, org_id)`.
+
+### Response
+```json
+{
+  "status": "COMPLIANT",
+  "answer": "หน่วยงานของรัฐสามารถสั่งซื้อหรือสั่งจ้างโดยวิธีเฉพาะเจาะจงได้ภายในวงเงินที่กำหนดตามตำแหน่งผู้สั่งซื้อ ...",
+  "conditions": "กรณีที่มีความจำเป็นเร่งด่วน ... ให้ดำเนินการไปก่อนแล้วรีบรายงานขอความเห็นชอบต่อหัวหน้าหน่วยงานของรัฐ",
+  "citations": [
+    {
+      "law": "พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 มาตรา 56",
+      "quote": "การจัดซื้อจัดจ้างพัสดุ ... โดยวิธีเฉพาะเจาะจง ...",
+      "filename": "พรบ/พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md",
+      "page": "19-20/42"
+    },
+    {
+      "law": "ระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 ข้อ 86",
+      "quote": "การสั่งซื้อหรือสั่งจ้างโดยวิธีเฉพาะเจาะจงครั้งหนึ่ง ให้เป็นอำนาจของผู้ดำรงตำแหน่งและภายในวงเงิน ...",
+      "filename": "ระเบียบกระทรวงการคลัง/ระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md",
+      "page": "28/72"
+    }
+  ],
+  "unresolved_issues": [],
+  "grounded": true,
   "org_id": "DGA"
 }
 ```
 
-### Response Schema (`LegalQAResponse`)
-```json
-{
-  "status": "COMPLIANT",
-  "mode": "fast",
-  "direct_answer": "หน่วยงานของรัฐสามารถจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจงได้ในวงเงินไม่เกิน 500,000 บาท และต้องขอความเห็นชอบรายงานขอซื้อขอจ้างจากหัวหน้าหน่วยงานของรัฐก่อนเริ่มกระบวนการจัดซื้อจัดจ้าง",
-  "applicable_laws": [
-    "พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 มาตรา 56 (2) (ข)",
-    "ระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 ข้อ 25"
-  ],
-  "decisive_quotes": [
-    {
-      "filename": "พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560.md",
-      "page": "มาตรา 56 (2) (ข)",
-      "law": "พ.ร.บ. จัดซื้อจัดจ้างฯ มาตรา 56 (2) (ข)",
-      "quote": "การจัดซื้อจัดจ้างพัสดุที่มีการผลิต จำหน่าย... หรือวงเงินไม่เกินที่กำหนดในกฎกระทรวง"
-    }
-  ],
-  "issues_breakdown": [
-    {
-      "issue_id": "Q1",
-      "topic": "วงเงินวิธีเฉพาะเจาะจง",
-      "status": "RESOLVED",
-      "answer": "วงเงินไม่เกิน 500,000 บาท ตามที่กำหนดในกฎกระทรวง",
-      "missing_aspect": null
-    },
-    {
-      "issue_id": "Q2",
-      "topic": "ผู้อนุมัติรายงานขอซื้อขอจ้าง",
-      "status": "RESOLVED",
-      "answer": "ต้องได้รับความเห็นชอบจากหัวหน้าหน่วยงานของรัฐก่อนดำเนินการ",
-      "missing_aspect": null
-    }
-  ],
-  "exceptions_or_conditions": "ห้ามมิให้แบ่งซื้อหรือแบ่งจ้างพัสดุเพื่อลดวงเงินให้เข้าเกณฑ์วิธีเฉพาะเจาะจง",
-  "organization_id": "DGA"
-}
-```
-
-### สถานะใน `issues_breakdown` (Issue Statuses):
-- **`RESOLVED`**: ระบบมีฐานกฎหมายครบถ้วนและตอบคำถามได้สมบูรณ์
-- **`OUT_OF_LEGAL_SCOPE`**: ประเด็นอยู่นอกเหนือขอบเขตข้อกฎหมายการจัดซื้อจัดจ้าง (เช่น ถามเรื่องราคากลางทางวิศวกรรม, การคำนวณภาษี) โดยจะระบุใน `missing_aspect` เพื่อให้ Super-Orchestrator ส่งต่อไปยัง Feature Agent ตัวอื่น
-- **`NO_LAW_FOUND`**: ไม่พบบทบัญญัติทางกฎหมายที่รองรับข้อเท็จจริงดังกล่าว
+| Field | Meaning |
+|---|---|
+| `status` | `COMPLIANT`, `PARTIALLY_RESOLVED`, `NO_LAW_FOUND` or `OUT_OF_LEGAL_SCOPE` |
+| `answer` | Direct legal answer covering every resolved sub-question |
+| `conditions` | Exceptions, thresholds or prerequisites qualifying the answer; `null` if none |
+| `citations[]` | Laws relied on. `quote` is verbatim statutory text. `filename` is the OCR document path under `datas/typhoon_ocr/` and `page` its page range (`start-end/total`); both are `null` when the cited law is not in the corpus (e.g. a repealed regulation) or its page could not be recovered |
+| `unresolved_issues[]` | Only sub-questions that were **not** answered (`NO_LAW_FOUND` / `OUT_OF_LEGAL_SCOPE`), with `missing_aspect`, so the orchestrator can delegate them to another agent |
+| `grounded` | `true` when every cited section appears in the retrieved evidence (guardrail); `false` means treat the answer with caution; `null` if not evaluated |
+| `org_id` | Tenant the answer was scoped to |
 
 ---
 
