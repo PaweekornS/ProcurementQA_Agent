@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Statutory monetary thresholds shared by /verify, the guardrail and the thresholds resource.
+"""Statutory monetary thresholds shared by the /qa guardrail and the MCP thresholds resource.
 
-Keep every ceiling here so /qa and /verify cannot drift apart. Values are overridable via env
+Keep every ceiling here so they cannot drift apart. Values are overridable via env
 so a legal change does not need a code change.
 """
 

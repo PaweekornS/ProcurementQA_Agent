@@ -38,7 +38,6 @@ if hasattr(sys.stdout, "reconfigure"):
 from tests.test_healthcheck import TestHealthcheck
 from tests.test_retrieval_modes import TestRetrievalModes
 from tests.test_multitenancy import TestMultiTenancy
-from tests.test_compliance_engine import TestComplianceEngine
 from tests.test_mcp_protocol import TestMCPProtocol
 from tests.test_main_qa_engine import TestMainQAEngine
 
@@ -61,7 +60,6 @@ def run_suites(skip_qa: bool = False) -> bool:
     # 3. Multi-Tenancy Isolation
     suite.addTests(loader.loadTestsFromTestCase(TestMultiTenancy))
     # 4. Compliance Engine
-    suite.addTests(loader.loadTestsFromTestCase(TestComplianceEngine))
     # 5. MCP Protocol
     suite.addTests(loader.loadTestsFromTestCase(TestMCPProtocol))
 

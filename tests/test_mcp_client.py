@@ -25,7 +25,6 @@ EXPECTED_TOOLS = {
     "get_statute_section",
     "search_procurement_clauses",
     "ask_procurement_law",
-    "check_procurement_threshold",
 }
 
 failures = []
@@ -78,15 +77,6 @@ async def main(url: str, org: str, run_qa: bool, question: str) -> None:
             check(bool(thresholds.contents and thresholds.contents[0].text.strip()), "thresholds resource readable")
             prompts = await session.list_prompts()
             check(len(prompts.prompts) >= 2, f"{len(prompts.prompts)} prompts listed")
-
-            print("\n--- 2. check_procurement_threshold (450,000 THB, เฉพาะเจาะจง) ---")
-            comp = _extract(await session.call_tool("check_procurement_threshold", {
-                "procurement_item": "จัดซื้อเครื่องคอมพิวเตอร์และอุปกรณ์ต่อพ่วง",
-                "estimated_budget": 450000.0,
-                "proposed_method": "เฉพาะเจาะจง",
-                "justification_reason": "วงเงินไม่เกิน 500,000 บาท",
-            }))
-            check(comp.get("is_compliant") is True, f"compliant verdict (status={comp.get('compliance_status')})")
 
             print("\n--- 3. get_statute_section ---")
             sec = _extract(await session.call_tool("get_statute_section", {"section": "มาตรา 56"}))

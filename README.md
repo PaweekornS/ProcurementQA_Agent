@@ -39,7 +39,6 @@ ProcurementQA_Agent/
 │   ├── routes/
 │   │   ├── qa.py                   # POST /api/v1/qa (Agentic Inquiry for Super-Orchestrator)
 │   │   ├── search.py               # POST /api/v1/search (Statutory Hybrid Search)
-│   │   ├── verify.py               # POST /api/v1/verify (Compliance Threshold Check)
 │   │   └── health.py               # GET /healthz (Liveness) & GET /ready (Readiness)
 │   └── mcp/                        # FastMCP Tools & Prompts Adapter (Streamable HTTP on /mcp)
 │
