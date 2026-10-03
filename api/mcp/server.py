@@ -42,7 +42,7 @@ mcp = FastMCP(
         "Thai public procurement law service (พ.ร.บ.การจัดซื้อจัดจ้างฯ 2560, ระเบียบกระทรวงการคลังฯ, "
         "กฎกระทรวง, หนังสือเวียน). Use ask_procurement_law for full legal answers, "
         "get_statute_section for verbatim text of a known มาตรา/ข้อ, search_procurement_clauses for "
-        "retrieval without synthesis, and check_procurement_threshold for budget/method checks. "
+        "retrieval without synthesis. "
         "Send the tenant in the X-Organization-Id HTTP header."
     ),
     # Stateless: every call is self-contained, so the service scales across uvicorn workers/replicas
@@ -224,37 +224,6 @@ async def ask_procurement_law(
         }
 
 
-@mcp.tool()
-async def check_procurement_threshold(
-    procurement_item: str,
-    estimated_budget: float,
-    proposed_method: str,
-    justification_reason: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Deterministic check of a procurement method against statutory budget thresholds (~2 ms, no LLM).
-
-    Args:
-        procurement_item: What is being procured, e.g. "เครื่องคอมพิวเตอร์".
-        estimated_budget: Estimated budget in THB.
-        proposed_method: Proposed method, e.g. "เฉพาะเจาะจง", "คัดเลือก", "e-bidding".
-        justification_reason: Optional legal ground, e.g. "จำเป็นเร่งด่วน".
-
-    Same fields as REST POST /api/v1/verify.
-    """
-    try:
-        service = await _run(get_service)
-        return await _run(
-            service.verify_compliance,
-            procurement_item=procurement_item,
-            estimated_budget=estimated_budget,
-            proposed_method=proposed_method,
-            justification_reason=justification_reason
-        )
-    except Exception as e:
-        return {"status": "ERROR", "is_compliant": False, "error": _error_ref(e)}
-
-
 if _expose_internal:
     @mcp.tool()
     async def healthcheck() -> Dict[str, Any]:
@@ -305,7 +274,7 @@ def prompt_audit_procurement_plan(
         f"- วิธีจัดซื้อจัดจ้างที่เสนอ: {proposed_method}\n"
         f"- เหตุผลความจำเป็น: {justification or 'ไม่มี'}\n\n"
         f"คำสั่งสำหรับ Agent:\n"
-        f"1. เรียกใช้เครื่องมือ `check_procurement_threshold` เพื่อตรวจสอบเกณฑ์วงเงินและข้อห้าม\n"
+        f"1. อ่าน resource `procurement://rules/thresholds` แล้วถาม `ask_procurement_law` ว่าวิธีและวงเงินนี้ทำได้หรือไม่ พร้อมเหตุผลทางกฎหมาย\n"
         f"2. หากมีข้อสงสัยเกี่ยวกับมาตราที่เกี่ยวข้อง ให้ค้นหาเพิ่มเติมด้วย `get_statute_section` หรือ `search_procurement_clauses`\n"
         f"3. สรุปผลการตรวจสอบโดยระบุ: สถานะ (ผ่าน/มีความเสี่ยง/ขัดต่อกฎหมาย), ฐานกฎหมายที่รองรับ, ผู้มีอำนาจอนุมัติ, และข้อควรระวังเรื่องการแบ่งซื้อแบ่งจ้าง"
     )

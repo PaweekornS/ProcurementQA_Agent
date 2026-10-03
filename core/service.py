@@ -7,7 +7,6 @@ Domain service providing decoupled access to LegalGraphRAG capabilities:
 - Hybrid search over statutory clauses without synthesis (~100-300ms)
 - FAQ precedent search over Comptroller General cases (~50ms)
 - Knowledge graph neighbor and subordinate legislation traversal (~10ms)
-- Rule-based procurement compliance verification against statutory thresholds
 - CRAG reasoning (fast and deep modes)
 - Resources (thresholds & catalog)
 """
@@ -513,96 +512,6 @@ class ProcurementService:
     # Tier 3: Compliance Engine & CRAG Pipeline
     # --------------------------------------------------------------------------
 
-    def verify_compliance(
-        self,
-        procurement_item: str,
-        estimated_budget: float,
-        proposed_method: str,
-        justification_reason: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Evaluates structured procurement project parameters against Thai statutory thresholds:
-        - พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 (ม. 55, 56)
-        - กฎกระทรวงกำหนดวงเงินการจัดซื้อจัดจ้างพัสดุโดยวิธีเฉพาะเจาะจง พ.ศ. 2560
-        - ระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างฯ พ.ศ. 2560 (ข้อ 79)
-        """
-        method_clean = proposed_method.strip()
-        reason = (justification_reason or "").strip()
-        risks = []
-        approvals = ["หัวหน้าเจ้าหน้าที่", "หัวหน้าหน่วยงานของรัฐ"]
-        is_compliant = True
-        status = "PASSED"
-        statutory_threshold = ""
-        legal_basis = []
-
-        is_specific = "เฉพาะเจาะจง" in method_clean
-        is_ebidding = "e-bidding" in method_clean.lower() or "ประกวดราคา" in method_clean
-        is_emarket = "e-market" in method_clean.lower() or "ตลาดอิเล็กทรอนิกส์" in method_clean
-        is_selection = "คัดเลือก" in method_clean
-
-        if is_specific:
-            statutory_threshold = f"วงเงินไม่เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท ตามกฎกระทรวงกำหนดวงเงินฯ พ.ศ. 2560"
-            legal_basis.append("พ.ร.บ. จัดซื้อจัดจ้างฯ 2560 มาตรา ๕๖ (๒) (ข)")
-            legal_basis.append("ระเบียบกระทรวงการคลังฯ 2560 ข้อ ๗๙")
-
-            if estimated_budget > SPECIFIC_METHOD_CEILING_THB:
-                # Check whether special justification allows specific method > 500,000 THB
-                valid_exceptions = [
-                    "เร่งด่วน", "ฉุกเฉิน", "ราชการลับ", "ที่ดิน", "สิ่งปลูกสร้าง",
-                    "ไม่มีผู้ยื่น", "ยกเลิกการประกวดราคา", "ตัวแทนจำหน่ายแต่ผู้เดียว",
-                    "สิทธิบัตร", "จำเป็นต้องใช้โดยตรง"
-                ]
-                has_valid_exception = any(kw in reason for kw in valid_exceptions)
-
-                if not has_valid_exception:
-                    is_compliant = False
-                    status = "VIOLATION"
-                    risks.append(
-                        f"วงเงิน {estimated_budget:,.2f} บาท เกินเพดานวิธีเฉพาะเจาะจง {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท "
-                        "และไม่มีเหตุผลยกเว้นตามมาตรา ๕๖ (๒) (ก), (ค), (ง), (จ), (ฉ), (ช) หรือ (ซ)"
-                    )
-                else:
-                    status = "FLAGGED"
-                    risks.append(
-                        f"วงเงินเกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท ต้องมีบันทึกรายงานความจำเป็นชี้แจงเหตุผลความเร่งด่วน/ความเฉพาะเจาะจง "
-                        "พร้อมเอกสารหลักฐานประกอบอย่างเคร่งครัด"
-                    )
-                    approvals.append("คณะกรรมการหรือผู้มีอำนาจสั่งซื้อสั่งจ้างตามระเบียบฯ")
-
-            if estimated_budget <= 100000.0:
-                # Small amount exemption for agreement in writing
-                legal_basis.append("พ.ร.บ. มาตรา ๙๖ วรรคสอง (การจัดทำข้อตกลงเป็นหนังสือ)")
-
-        elif is_emarket or is_ebidding:
-            statutory_threshold = f"วงเงินเกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาทขึ้นไป (วิธีประกาศเชิญชวนทั่วไป)"
-            legal_basis.append("พ.ร.บ. จัดซื้อจัดจ้างฯ 2560 มาตรา ๕๕ (๑)")
-            legal_basis.append("ระเบียบกระทรวงการคลังฯ 2560 ข้อ ๒๙")
-
-            if estimated_budget <= SPECIFIC_METHOD_CEILING_THB:
-                status = "FLAGGED"
-                risks.append(
-                    f"วงเงิน {estimated_budget:,.2f} บาท ไม่เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท โดยปกติสามารถใช้วิธีเฉพาะเจาะจงได้ "
-                    "เพื่อความคล่องตัวและประหยัดระยะเวลา"
-                )
-
-        # Anti-splitting check (ห้ามแบ่งซื้อแบ่งจ้าง มาตรา ๖๕)
-        risks.append(
-            "ข้อควรระวัง: ห้ามมิให้แบ่งวงเงินเพื่อลดวงเงินจัดซื้อจัดจ้างโดยมุ่งหมายให้อำนาจสั่งซื้อสั่งจ้างเปลี่ยนแปลงไป "
-            "หรือเพื่อหลีกเลี่ยงการจัดซื้อจัดจ้างโดยวิธีประกาศเชิญชวนทั่วไป (มาตรา ๖๕)"
-        )
-
-        return {
-            "procurement_item": procurement_item,
-            "estimated_budget": estimated_budget,
-            "proposed_method": proposed_method,
-            "is_compliant": is_compliant,
-            "compliance_status": status,
-            "statutory_threshold": statutory_threshold,
-            "legal_basis": legal_basis,
-            "required_approvals": approvals,
-            "potential_risks": risks
-        }
-
     def ask_procurement_law(self, question: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute LangGraph Agentic RAG legal analysis workflow, scoped to tenant org_id.
@@ -854,7 +763,6 @@ class ProcurementService:
 
     # Alias for consistent high-level agent naming
     procurement_qa = ask_procurement_law
-    check_procurement_threshold = verify_compliance
 
     # --------------------------------------------------------------------------
     # Tier 4: Resources

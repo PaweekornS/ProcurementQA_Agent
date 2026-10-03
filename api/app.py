@@ -4,7 +4,7 @@ api/app.py
 
 Main FastAPI Application for LegalGraphRAG Thai Procurement Law.
 Provides dual-protocol serving:
-  1. Standard REST API (/api/v1/qa, /api/v1/search, /api/v1/verify, /healthz, /ready)
+  1. Standard REST API (/api/v1/qa, /api/v1/search, /api/v1/documents, /healthz, /ready)
   2. FastMCP Protocol over Streamable HTTP (/mcp)
 """
 
@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from api.dependencies import get_service
-from api.routes import documents_router, health_router, qa_router, search_router, verify_router
+from api.routes import documents_router, health_router, qa_router, search_router
 from api.mcp.server import mcp
 
 
@@ -48,7 +48,6 @@ app = FastAPI(
         "Exposes:\n"
         "- **Agentic Q&A (/api/v1/qa)**: Pure LangGraph workflow returning direct answers, decisive quotes, and sub-issue breakdown.\n"
         "- **Hybrid Search (/api/v1/search)**: Dense vector + Thai BM25 statutory retrieval.\n"
-        "- **Compliance Check (/api/v1/verify)**: Rule-based monetary thresholds & procurement method verification.\n"
         "- **MCP Protocol (/mcp)**: Model Context Protocol endpoint (Streamable HTTP) for client agents."
     ),
     version="1.0.0",
@@ -73,7 +72,6 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(qa_router)
 app.include_router(search_router)
-app.include_router(verify_router)
 app.include_router(documents_router)
 
 # The FastMCP sub-app already carries its own path (/mcp). Register its routes on the root app

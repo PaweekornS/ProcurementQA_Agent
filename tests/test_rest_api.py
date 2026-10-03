@@ -6,7 +6,6 @@ test_rest_api.py
 Smoke-tests the dual-protocol REST API endpoints of server.py (FastAPI):
   - GET  /healthz
   - GET  /ready
-  - POST /api/v1/verify
   - POST /api/v1/search
   - POST /api/v1/qa
 
@@ -37,21 +36,6 @@ def main(base_url: str, run_qa: bool):
     try:
         r = requests.get(f"{base_url}/ready", timeout=10)
         print(f"Status: {r.status_code} -> {r.json()}")
-    except Exception as e:
-        print(f"Failed: {e}")
-
-    # 3. Verify Compliance
-    print("\n[3] POST /api/v1/verify")
-    payload_verify = {
-        "procurement_item": "จัดจ้างพัฒนาซอฟต์แวร์สารสนเทศ",
-        "estimated_budget": 350000.0,
-        "proposed_method": "เฉพาะเจาะจง",
-        "justification_reason": "วงเงินไม่เกิน 500,000 บาท"
-    }
-    try:
-        r = requests.post(f"{base_url}/api/v1/verify", json=payload_verify, timeout=5)
-        print(f"Status: {r.status_code}")
-        print(json.dumps(r.json(), ensure_ascii=False, indent=2))
     except Exception as e:
         print(f"Failed: {e}")
 

@@ -54,7 +54,6 @@ print(bool('$GID') and any(i.startswith('$GID') for i in ids) and any('ข้อ
 curl -s -o /dev/null -X DELETE "$QA/api/v1/documents/$GID" -H "X-Organization-Id: DGA"
 
 echo "--- QA: ceiling consistency (item 4)"
-check "/verify uses 500,000 ceiling" "$(curl -s -X POST $QA/api/v1/verify -H 'Content-Type: application/json' -d '{"procurement_item":"คอมพิวเตอร์","proposed_method":"วิธีเฉพาะเจาะจง","estimated_budget":800000}' | grep -c '500,000')" "1"
 check "guardrail flags 1M general ceiling" "$(docker exec procurement-mcp python -c "from core.agent.guardrail import GroundingGuardrail as G; print(G.audit('วิธีเฉพาะเจาะจงใช้ได้ไม่เกินหนึ่งล้านบาท',[])['passed'])")" "False"
 check "guardrail accepts MoE special case" "$(docker exec procurement-mcp python -c "from core.agent.guardrail import GroundingGuardrail as G; print(G.audit('สถานศึกษาสังกัดกระทรวงศึกษาธิการใช้วิธีเฉพาะเจาะจงได้ไม่เกินหนึ่งล้านบาท',[])['passed'])")" "True"
 
