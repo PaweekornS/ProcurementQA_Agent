@@ -3,9 +3,8 @@
 tests/test_mcp_protocol.py
 
 Validates the Model Context Protocol (MCP) server configuration:
-1. Verifies that the FastMCP server registers the 4 Core Public Tools:
+1. Verifies that the FastMCP server registers the 3 Core Public Tools:
    - ask_procurement_law
-   - check_procurement_threshold
    - get_statute_section
    - search_procurement_clauses
 2. Verifies that internal/diagnostic tools are hidden by default unless requested.
@@ -26,7 +25,7 @@ from api.mcp.server import mcp
 
 class TestMCPProtocol(unittest.TestCase):
     def test_01_exposed_tools_contract(self):
-        """Verifies that exactly the 4 primary public tools are registered on FastMCP by default."""
+        """Verifies that exactly the 3 primary public tools are registered on FastMCP by default."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -35,7 +34,6 @@ class TestMCPProtocol(unittest.TestCase):
             
             expected_public_tools = {
                 "ask_procurement_law",
-                "check_procurement_threshold",
                 "get_statute_section",
                 "search_procurement_clauses"
             }

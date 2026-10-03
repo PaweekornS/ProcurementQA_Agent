@@ -38,7 +38,6 @@ flowchart TD
 
         subgraph T3["Tier 3: Reasoning & Compliance (Pure Agentic RAG)"]
             T3_1["POST /api/v1/qa\nLangGraph Multi-Turn Reflection & Decomposition"]
-            T3_2["POST /api/v1/verify\nStatutory threshold & method check (~2ms)"]
         end
 
         subgraph T4["Tier 4: Resources & Prompts (Native MCP Primitives)"]

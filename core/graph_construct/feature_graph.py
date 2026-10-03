@@ -1,5 +1,6 @@
 import os
 import ast
+import logging
 import hashlib
 import threading
 from collections import OrderedDict, defaultdict
@@ -10,8 +11,10 @@ from .graph_db import GraphDBManager
 from tqdm import tqdm
 from core.utils.settings import env
 
+logger = logging.getLogger(__name__)
 
-_embedding_provider = "local"
+
+_embedding_provider = None  # None -> read EMBEDDING_PROVIDER from env until configure_embedding() runs
 _embedding_api_url = "http://localhost:11434/api/embed"
 _embedding_model = "BAAI/bge-m3"
 _tokenmind_api_key = None
@@ -666,7 +669,9 @@ def search_similar_nodes_top(model, query_embedding, query_text, top_k=5, org_id
                         })
                     return clusters, [], formatted_laws
         except Exception as e:
-            logger.warning(f"[Tri-Store] Fallback to local graph: {e}")
+            logger.warning(f"[Tri-Store] Cluster search error: {e}")
+        # The legacy local graph treats untagged nodes as PUBLIC, so it must never answer for a tenant
+        return [], [], []
 
     db = GraphDBManager.get_db()
     
@@ -841,8 +846,34 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                     'data': c
                 })
 
+            # Tenant-private documents compete with the statutes in the same rerank pool
+            try:
+                for t in storage.hybrid_search_tenant_docs(
+                    query_text=query_text,
+                    query_dense=query_embedding,
+                    org_id=active_org,
+                    top_k=max(top_k * 2, 10),
+                ):
+                    page = t.get('page_start')
+                    candidates.append({
+                        'id': t['chunk_id'],
+                        'clause_id': t['chunk_id'],
+                        'entry': f"{t.get('title', '')} | หน้า {page}" if page else t.get('title', ''),
+                        'description': t.get('content', ''),
+                        'crimes': [],
+                        'judge_dep': [],
+                        'related_laws': [],
+                        'insights': '',
+                        'similarity': t.get('score', 0.0),
+                        'score': t.get('score', 0.0),
+                        'source_type': 'tenant_document',
+                        'data': t
+                    })
+            except Exception as e:
+                logger.warning(f"[Tri-Store] Tenant document search failed: {e}")
+
             if not candidates:
-                logger.warning("[Tri-Store] Empty search results; falling back to local graph.")
+                return [], []
             else:
                 # 2. Cross-Encoder reranking if enabled
                 from .hybrid_reranker import get_reranker, is_reranker_enabled
@@ -872,11 +903,13 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                     if cid and cid not in seen_law_ids:
                         laws.append(cand)
                         seen_law_ids.add(cid)
-
                         # Graph context expansion
                         try:
-                            graph_ctx = storage.traverse_clause_graph(cid, org_id=active_org)
-                            for cited in graph_ctx.get("cited_clauses", []):
+                            if cand.get('source_type') == 'tenant_document':
+                                cited_clauses = storage.neo4j.get_tenant_chunk_citations(cid, active_org)
+                            else:
+                                cited_clauses = storage.traverse_clause_graph(cid, org_id=active_org).get("cited_clauses", [])
+                            for cited in cited_clauses:
                                 tgt_id = cited.get("clause_id")
                                 if tgt_id and tgt_id not in seen_law_ids:
                                     tgt_rec = storage.pg.get_clause_by_id(tgt_id, org_id=active_org)
@@ -909,7 +942,9 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
 
                 return cases, laws
         except Exception as e:
-            logger.warning(f"[Tri-Store Direct Search] Error, falling back to local graph: {e}")
+            logger.warning(f"[Tri-Store Direct Search] Error: {e}")
+        # The legacy local graph treats untagged nodes as PUBLIC, so it must never answer for a tenant
+        return [], []
 
     db = GraphDBManager.get_db()
     use_hybrid = env("HYBRID_RETRIEVAL", "True").lower() == "true"

@@ -5,7 +5,7 @@ api/routes/qa.py
 Main Q&A endpoint exposing the agentic RAG workflow to the Super-Orchestrator.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Request, APIRouter, Depends, HTTPException, status
 
 from api.dependencies import get_service, get_tenant_org_id
 from api.errors import internal_error, service_busy
@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/v1", tags=["Agentic Legal Q&A"])
     status_code=status.HTTP_200_OK
 )
 def ask_procurement_qa(
+    request: Request,
     payload: QARequest,
     service: ProcurementService = Depends(get_service),
     default_tenant_id: str = Depends(get_tenant_org_id)
@@ -31,7 +32,7 @@ def ask_procurement_qa(
 
     - `status` and `unresolved_issues` tell the orchestrator what still needs another agent.
     - `grounded` is false when the answer cites a section missing from the retrieved evidence.
-    - Tenant: `org_id` in the body, else the `X-Organization-Id` header, else `DEFAULT_ORG_ID`.
+    - Tenant: the `X-Organization-Id` header, else `org_id` in the body, else `DEFAULT_ORG_ID`.
     - 503 + Retry-After when all QA slots (QA_MAX_CONCURRENCY) are busy.
     """
     if not payload.query.strip():
@@ -40,7 +41,10 @@ def ask_procurement_qa(
             detail="The 'query' field cannot be empty."
         )
 
-    resolved_org_id = payload.org_id.strip() if payload.org_id and payload.org_id.strip() else default_tenant_id
+    # X-Organization-Id (set by the calling platform) wins over the body, matching the MCP adapter
+    header_org = request.headers.get("x-organization-id", "").strip()
+    body_org = payload.org_id.strip() if payload.org_id else ""
+    resolved_org_id = header_org or body_org or default_tenant_id
 
     try:
         raw_result = service.ask_procurement_law(question=payload.query, org_id=resolved_org_id)

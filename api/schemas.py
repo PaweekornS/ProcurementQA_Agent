@@ -139,14 +139,6 @@ class StatutorySearchResponse(BaseModel):
     results: List[Dict[str, Any]] = Field(default_factory=list)
 
 
-class VerifyComplianceRequest(BaseModel):
-    """Payload for rule-based procurement threshold and method verification."""
-    procurement_item: str = Field(..., example="จัดซื้อคอมพิวเตอร์และอุปกรณ์ต่อพ่วง")
-    estimated_budget: float = Field(..., example=450000.0)
-    proposed_method: str = Field(..., example="เฉพาะเจาะจง")
-    justification_reason: Optional[str] = Field(None, example="วงเงินไม่เกิน 500,000 บาท")
-
-
 # ==============================================================================
 # PROBES & HEALTH STATUS
 # ==============================================================================

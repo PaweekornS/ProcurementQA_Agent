@@ -80,3 +80,7 @@ dmypy.json
 datas/typhoon_ocr/
 datas/*.xlsx
 
+
+# Runtime logs may contain user queries; tracked eval results in logs/ stay versioned
+logs/*.log
+logs/query_*

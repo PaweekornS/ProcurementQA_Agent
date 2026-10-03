@@ -192,7 +192,11 @@ class ProcurementAgenticWorkflow:
         # 2. Multi-hop statutory citation traversal (EMPOWERS, CITED_BY, CITES, NEXT_SECTION)
         # 3. Topic & Crime graph topology expansion
         graph_results = []
+        # The local graph is untenanted (untagged nodes count as PUBLIC); Neo4j covers tri-store mode
+        tri_store = os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
         try:
+            if tri_store:
+                raise LookupError("legacy graph backup disabled in tri-store mode")
             from core.graph_construct.citation_linker import LegalCitationLinker
             from core.graph_construct.graph_db import GraphDBManager
             db_inst = GraphDBManager.get_db()

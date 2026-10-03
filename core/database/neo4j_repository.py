@@ -9,7 +9,7 @@ Manages topological relationships: document hierarchies, sequential clause adjac
 
 import os
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional
 
 try:
     from neo4j import GraphDatabase, Driver
@@ -82,6 +82,10 @@ class Neo4jRepository:
             "CREATE INDEX doc_org_id_lookup IF NOT EXISTS FOR (d:LegalDocument) ON (d.org_id)",
             "CREATE INDEX clause_org_id_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.org_id)",
             "CREATE INDEX case_org_id_lookup IF NOT EXISTS FOR (f:FAQCase) ON (f.org_id)",
+            "CREATE CONSTRAINT unique_tenant_doc_id IF NOT EXISTS FOR (t:TenantDocument) REQUIRE t.doc_id IS UNIQUE",
+            "CREATE CONSTRAINT unique_tenant_chunk_id IF NOT EXISTS FOR (t:TenantChunk) REQUIRE t.chunk_id IS UNIQUE",
+            "CREATE INDEX tenant_doc_org_id_lookup IF NOT EXISTS FOR (t:TenantDocument) ON (t.org_id)",
+            "CREATE INDEX tenant_chunk_org_id_lookup IF NOT EXISTS FOR (t:TenantChunk) ON (t.org_id)",
         ]
         with self.driver.session() as session:
             for stmt in constraints:
@@ -182,24 +186,26 @@ class Neo4jRepository:
                     session.run(query, batch=chunk)
             logger.info(f"Synced {len(edge_list)} relationships of type ':{rel_type}' to Neo4j.")
 
-    def clear_derived_relationships(self, rel_types: List[str], batch_size: int = 10000) -> int:
+    def clear_derived_relationships(self, rel_types: List[str], org_id: str = "PUBLIC", batch_size: int = 10000) -> int:
         """
-        Delete corpus-derived relationships of the given types between PUBLIC nodes so a re-link
-        starts clean. Tenant-private edges (either endpoint non-PUBLIC) are left untouched.
+        Delete corpus-derived relationships of the given types between corpus nodes (PUBLIC or the
+        corpus tenant `org_id`) so a re-link starts clean. Tenant document edges are left untouched.
         """
         self.connect()
         removed = 0
         for rel_type in rel_types:
             query = f"""
             MATCH (a)-[r:{rel_type}]->(b)
-            WHERE coalesce(a.org_id, 'PUBLIC') = 'PUBLIC' AND coalesce(b.org_id, 'PUBLIC') = 'PUBLIC'
+            WHERE NOT a:TenantChunk AND NOT a:TenantDocument
+              AND coalesce(a.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+              AND coalesce(b.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
             WITH r LIMIT $limit
             DELETE r
             RETURN count(*) AS n
             """
             with self.driver.session() as session:
                 while True:
-                    n = session.run(query, limit=batch_size).single()["n"]
+                    n = session.run(query, limit=batch_size, org_id=org_id).single()["n"]
                     removed += n
                     if n < batch_size:
                         break
@@ -324,6 +330,114 @@ class Neo4jRepository:
         """
         with self.driver.session() as session:
             result = session.run(query, org_id=org_id)
+            return [dict(r) for r in result]
+
+    # ==========================================
+    # Tenant-private documents (OCR'd TOR / BOQ / contracts)
+    # ==========================================
+    # Tenant nodes always carry the owner's org_id and every read filters on it exactly
+    # (never PUBLIC), so a CITES_CLAUSE edge into a shared statute leaks nothing across tenants.
+
+    def resolve_statute_refs(self, refs: List[Dict[str, Any]]) -> Dict[Tuple[str, str, int], List[str]]:
+        """{(doc_title, kind, num): [clause_id, ...]} for ('section'|'clause') references by document title."""
+        if not refs:
+            return {}
+        self.connect()
+        query = """
+        UNWIND $refs AS ref
+        MATCH (d:LegalDocument {title: ref.title})-[:CONTAINS]->(c:StatuteClause)
+        WHERE (ref.kind = 'section' AND c.section_num = ref.num)
+           OR (ref.kind = 'clause' AND c.clause_num = ref.num)
+        RETURN ref.title AS title, ref.kind AS kind, ref.num AS num, collect(c.clause_id) AS ids
+        """
+        with self.driver.session() as session:
+            result = session.run(query, refs=refs)
+            return {(r["title"], r["kind"], r["num"]): r["ids"] for r in result}
+
+    def replace_tenant_document(
+        self,
+        org_id: str,
+        doc: Dict[str, Any],
+        chunks: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+    ) -> int:
+        """Drop any previous version, then write TenantDocument -CONTAINS-> TenantChunk -NEXT_CHUNK->
+        and TenantChunk -CITES_CLAUSE-> StatuteClause. Returns the number of citation edges."""
+        self.connect()
+        with self.driver.session() as session:
+            return session.execute_write(self._replace_tenant_document_tx, org_id, doc, chunks, citations)
+
+    @staticmethod
+    def _replace_tenant_document_tx(tx, org_id, doc, chunks, citations) -> int:
+        tx.run(
+            """
+            MATCH (d:TenantDocument {doc_id: $doc_id}) WHERE d.org_id = $org_id
+            OPTIONAL MATCH (d)-[:CONTAINS]->(t:TenantChunk)
+            DETACH DELETE d, t
+            """,
+            doc_id=doc["doc_id"], org_id=org_id,
+        )
+        tx.run(
+            """
+            CREATE (d:TenantDocument {doc_id: $doc.doc_id, org_id: $org_id, title: $doc.title,
+                                      source_file: $doc.source_file, total_pages: $doc.total_pages})
+            WITH d
+            UNWIND $chunks AS ch
+            CREATE (d)-[:CONTAINS]->(:TenantChunk {chunk_id: ch.chunk_id, org_id: $org_id, doc_id: $doc.doc_id,
+                                                   chunk_index: ch.chunk_index, page_start: ch.page_start})
+            """,
+            doc=doc, org_id=org_id,
+            chunks=[{k: c.get(k) for k in ("chunk_id", "chunk_index", "page_start")} for c in chunks],
+        )
+        tx.run(
+            """
+            MATCH (d:TenantDocument {doc_id: $doc_id})-[:CONTAINS]->(a:TenantChunk)
+            WHERE d.org_id = $org_id
+            WITH a ORDER BY a.chunk_index
+            WITH collect(a) AS seq
+            UNWIND range(0, size(seq) - 2) AS i
+            WITH seq[i] AS a, seq[i + 1] AS b
+            CREATE (a)-[:NEXT_CHUNK]->(b)
+            """,
+            doc_id=doc["doc_id"], org_id=org_id,
+        )
+        if not citations:
+            return 0
+        rec = tx.run(
+            """
+            UNWIND $cites AS ct
+            MATCH (t:TenantChunk {chunk_id: ct.chunk_id}) WHERE t.org_id = $org_id
+            MATCH (c:StatuteClause {clause_id: ct.clause_id})
+            MERGE (t)-[r:CITES_CLAUSE]->(c)
+            SET r.quote = ct.quote
+            RETURN count(r) AS n
+            """,
+            cites=citations, org_id=org_id,
+        ).single()
+        return rec["n"] if rec else 0
+
+    def delete_tenant_document(self, org_id: str, doc_id: str) -> None:
+        self.connect()
+        with self.driver.session() as session:
+            session.run(
+                """
+                MATCH (d:TenantDocument {doc_id: $doc_id}) WHERE d.org_id = $org_id
+                OPTIONAL MATCH (d)-[:CONTAINS]->(t:TenantChunk)
+                DETACH DELETE d, t
+                """,
+                doc_id=doc_id, org_id=org_id,
+            )
+
+    def get_tenant_chunk_citations(self, chunk_id: str, org_id: str) -> List[Dict[str, Any]]:
+        """Statute clauses cited by a tenant chunk, limited to clauses this tenant may see."""
+        self.connect()
+        query = """
+        MATCH (t:TenantChunk {chunk_id: $cid})-[r:CITES_CLAUSE]->(c:StatuteClause)
+        WHERE t.org_id = $org_id AND coalesce(c.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        RETURN c.clause_id AS clause_id, c.entry AS entry, r.quote AS quote
+        """
+        with self.driver.session() as session:
+            result = session.run(query, cid=chunk_id, org_id=org_id)
             return [dict(r) for r in result]
 
     def count_stats(self) -> Dict[str, int]:
