@@ -211,6 +211,7 @@ def run_migration(
     skip_if_seeded: bool = False,
     force_embed: bool = False,
     ocr_dir: str = "datas/typhoon_ocr",
+    org_id: str = "DGA",
 ):
     print("=" * 65)
     print("LEGAL-GRAPH-RAG: TRI-STORE DATABASE MIGRATION PIPELINE")
@@ -369,6 +370,11 @@ def run_migration(
     # ---------------------------------------------------------
     # Step 3: Ingest into PostgreSQL (SSOT)
     # ---------------------------------------------------------
+    # Every corpus record is owned by one tenant; the stores read org_id from each record.
+    for record in (*documents, *clauses, *faq_cases):
+        record["org_id"] = org_id
+    print(f"\nCorpus tenant (org_id): {org_id}")
+
     print("\n[Step 3] Upserting records into PostgreSQL (SSOT)...")
     storage.pg.upsert_documents(documents)
     storage.pg.upsert_clauses(clauses)
@@ -451,7 +457,7 @@ def run_migration(
     # MERGE never removes edges, so derived corpus relationships from earlier (buggier) runs
     # would survive a re-link. Drop them first; CONTAINS and tenant-private edges are kept.
     removed = storage.neo4j.clear_derived_relationships(
-        list(NEO4J_REL_TYPES.values()) + ["RELATES_TO_LAW", "REFERENCES_DOCUMENT"]
+        list(NEO4J_REL_TYPES.values()) + ["RELATES_TO_LAW", "REFERENCES_DOCUMENT"], org_id=org_id
     )
     print(f"Removed {removed} previously derived relationships.")
 
@@ -533,6 +539,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation and Qdrant ingestion")
     parser.add_argument("--ocr-dir", default="datas/typhoon_ocr", help="Typhoon OCR markdown root used to recover page numbers")
     parser.add_argument("--force-embed", action="store_true", help="Re-embed and re-index Qdrant even if it is already in parity")
+    parser.add_argument("--org-id", default=env("DEFAULT_ORG_ID", "DGA"), help="Tenant that owns the seeded corpus (default: DEFAULT_ORG_ID, else DGA)")
     parser.add_argument("--skip-if-seeded", action="store_true", help="Exit early if all three stores are already populated and in parity")
 
     args = parser.parse_args()
@@ -545,4 +552,5 @@ if __name__ == "__main__":
         skip_if_seeded=args.skip_if_seeded,
         force_embed=args.force_embed,
         ocr_dir=args.ocr_dir,
+        org_id=args.org_id,
     )
