@@ -167,6 +167,32 @@ For production environments requiring database isolation:
 
 See [docs/MULTI_TENANCY_CHECKLIST.md](docs/MULTI_TENANCY_CHECKLIST.md) for detailed stakeholder requirement questions and architectural decision matrix.
 
+### Run the full stack locally (Docker) with ProcurementOCR
+
+```bash
+# QA Agent: Postgres + Qdrant + Neo4j + API on :8000 (first run seeds the corpus via the migrate container)
+git clone https://github.com/PaweekornS/ProcurementQA_Agent.git && cd ProcurementQA_Agent
+cp env.example .env        # set TOKENMIND_API_KEY, OPPER_API_KEY (or RERANKER_ENABLED=false), LLM key
+mkdir -p outputs logs && sudo chown -R 10001:10001 outputs logs   # Linux only; not needed on Docker Desktop
+docker compose up -d --build
+docker logs -f procurement-migrate     # wait for exit 0
+
+# OCR on :8001; finished jobs are pushed to the QA Agent automatically
+git clone https://github.com/PaweekornS/ProcurementOCR.git && cd ProcurementOCR
+cp env.example .env        # set TYPHOON_API_KEY
+docker compose up -d --build
+
+# End-to-end regression (needs both stacks running)
+bash ../ProcurementQA_Agent/tests/regression_deploy.sh
+```
+
+**Tenants:** the `X-Organization-Id` header wins over `org_id` in the body, then `DEFAULT_ORG_ID`.
+`/api/v1/documents` always requires a tenant. Tenant documents (`POST /api/v1/documents`, or pushed by OCR)
+are visible only to their owner; they are indexed in Postgres (RLS), Qdrant and Neo4j, where chunks link to
+the statutes they cite (`มาตรา N` → the Act, `ระเบียบฯ ข้อ N` → the MoF regulation).
+The migrate container seeds the statute corpus as tenant `DGA` (`DEFAULT_ORG_ID`; override with
+`python scripts/migrate_to_tri_store.py --org-id <ORG>`), so other tenants see only their own documents.
+
 ---
 
 ## 📄 License
