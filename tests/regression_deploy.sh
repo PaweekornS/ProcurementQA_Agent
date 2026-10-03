@@ -6,8 +6,17 @@ OCR=${OCR:-http://localhost:8001}
 A=REGTEST_A; B=REGTEST_B
 pass=0; fail=0
 check() { if [ "$2" = "$3" ]; then pass=$((pass+1)); echo "PASS  $1"; else fail=$((fail+1)); echo "FAIL  $1 (got '$2', want '$3')"; fi; }
+# Send -d bodies through stdin: curl.exe on Windows re-encodes argv with the ANSI codepage and mangles Thai
+curl() {
+  local args=() body= has_body=0
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "-d" ]; then body=$2; has_body=1; shift 2; else args+=("$1"); shift; fi
+  done
+  if [ $has_body = 1 ]; then printf '%s' "$body" | command curl "${args[@]}" --data-binary @-; else command curl "${args[@]}"; fi
+}
 code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
-jget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
+PY=$(command -v python3 || command -v python)   # Windows/Git Bash ships only "python"
+jget() { "$PY" -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
 neo() { docker exec procurement-neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" --format plain "$1" | tail -1 | tr -d '"'; }
 NEO4J_PASSWORD=$(grep ^NEO4J_PASSWORD "$(dirname "$0")/../.env" | cut -d= -f2- | tr -d '"')
 
