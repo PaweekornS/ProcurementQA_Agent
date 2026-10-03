@@ -53,6 +53,9 @@ _QA_MAX_CONCURRENCY = int(os.getenv("QA_MAX_CONCURRENCY", "4"))
 _QA_SLOTS = threading.BoundedSemaphore(_QA_MAX_CONCURRENCY)
 
 
+from core.compliance_constants import SPECIFIC_METHOD_CEILING_THB, fmt_thb
+
+
 class ServiceBusyError(RuntimeError):
     """Raised when no QA slot frees up within QA_QUEUE_TIMEOUT_SECONDS."""
 
@@ -328,7 +331,7 @@ class ProcurementService:
         results = []
         for law in laws:
             data = law.get("data", {}) or law
-            entry = data.get("entry") or law.get("id", "")
+            entry = law.get("entry") or data.get("entry") or law.get("id", "")
             desc = data.get("description") or law.get("description", "")
             topics = data.get("crimes", data.get("crime", []))
 
@@ -343,7 +346,8 @@ class ProcurementService:
                 "topics": topics,
                 "content": desc[:800],
                 "description": desc[:800],
-                "score": round(float(law.get("rerank_score", law.get("similarity", 0.0))), 4)
+                "score": round(float(law.get("rerank_score", law.get("similarity", 0.0))), 4),
+                "source_type": law.get("source_type", "statute"),
             })
 
             if len(results) >= top_k:
@@ -537,11 +541,11 @@ class ProcurementService:
         is_selection = "คัดเลือก" in method_clean
 
         if is_specific:
-            statutory_threshold = "วงเงินไม่เกิน 500,000 บาท ตามกฎกระทรวงกำหนดวงเงินฯ พ.ศ. 2560"
+            statutory_threshold = f"วงเงินไม่เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท ตามกฎกระทรวงกำหนดวงเงินฯ พ.ศ. 2560"
             legal_basis.append("พ.ร.บ. จัดซื้อจัดจ้างฯ 2560 มาตรา ๕๖ (๒) (ข)")
             legal_basis.append("ระเบียบกระทรวงการคลังฯ 2560 ข้อ ๗๙")
 
-            if estimated_budget > 500000.0:
+            if estimated_budget > SPECIFIC_METHOD_CEILING_THB:
                 # Check whether special justification allows specific method > 500,000 THB
                 valid_exceptions = [
                     "เร่งด่วน", "ฉุกเฉิน", "ราชการลับ", "ที่ดิน", "สิ่งปลูกสร้าง",
@@ -554,13 +558,13 @@ class ProcurementService:
                     is_compliant = False
                     status = "VIOLATION"
                     risks.append(
-                        f"วงเงิน {estimated_budget:,.2f} บาท เกินเพดานวิธีเฉพาะเจาะจง 500,000 บาท "
+                        f"วงเงิน {estimated_budget:,.2f} บาท เกินเพดานวิธีเฉพาะเจาะจง {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท "
                         "และไม่มีเหตุผลยกเว้นตามมาตรา ๕๖ (๒) (ก), (ค), (ง), (จ), (ฉ), (ช) หรือ (ซ)"
                     )
                 else:
                     status = "FLAGGED"
                     risks.append(
-                        f"วงเงินเกิน 500,000 บาท ต้องมีบันทึกรายงานความจำเป็นชี้แจงเหตุผลความเร่งด่วน/ความเฉพาะเจาะจง "
+                        f"วงเงินเกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท ต้องมีบันทึกรายงานความจำเป็นชี้แจงเหตุผลความเร่งด่วน/ความเฉพาะเจาะจง "
                         "พร้อมเอกสารหลักฐานประกอบอย่างเคร่งครัด"
                     )
                     approvals.append("คณะกรรมการหรือผู้มีอำนาจสั่งซื้อสั่งจ้างตามระเบียบฯ")
@@ -570,14 +574,14 @@ class ProcurementService:
                 legal_basis.append("พ.ร.บ. มาตรา ๙๖ วรรคสอง (การจัดทำข้อตกลงเป็นหนังสือ)")
 
         elif is_emarket or is_ebidding:
-            statutory_threshold = "วงเงินเกิน 500,000 บาทขึ้นไป (วิธีประกาศเชิญชวนทั่วไป)"
+            statutory_threshold = f"วงเงินเกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาทขึ้นไป (วิธีประกาศเชิญชวนทั่วไป)"
             legal_basis.append("พ.ร.บ. จัดซื้อจัดจ้างฯ 2560 มาตรา ๕๕ (๑)")
             legal_basis.append("ระเบียบกระทรวงการคลังฯ 2560 ข้อ ๒๙")
 
-            if estimated_budget <= 500000.0:
+            if estimated_budget <= SPECIFIC_METHOD_CEILING_THB:
                 status = "FLAGGED"
                 risks.append(
-                    f"วงเงิน {estimated_budget:,.2f} บาท ไม่เกิน 500,000 บาท โดยปกติสามารถใช้วิธีเฉพาะเจาะจงได้ "
+                    f"วงเงิน {estimated_budget:,.2f} บาท ไม่เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท โดยปกติสามารถใช้วิธีเฉพาะเจาะจงได้ "
                     "เพื่อความคล่องตัวและประหยัดระยะเวลา"
                 )
 
@@ -654,7 +658,7 @@ class ProcurementService:
         used_laws = agent_res.get("used_laws", [])
 
         raw_quotes = judge.get("decisive_quotes", [])
-        enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws)
+        enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws, active_org)
 
         return {
             "status": judge.get("status", "COMPLIANT"),
@@ -711,20 +715,52 @@ class ProcurementService:
         except Exception as exc:
             print(f"[ProcurementService] WARNING: audit log write failed for {query_id}: {exc}", file=sys.stderr)
 
-    def _clause_source_record(self, clause_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    def _clause_source_record(self, clause_id: Optional[str], org_id: str) -> Optional[Dict[str, Any]]:
         """Authoritative clause row (with source_file / page range) from PostgreSQL in tri-store mode."""
         if not clause_id or os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
             return None
         try:
             from core.database import StorageManager
-            return StorageManager.get_instance().pg.get_clause_by_id(clause_id, org_id="PUBLIC")
+            return StorageManager.get_instance().pg.get_clause_by_id(clause_id, org_id=org_id)
         except Exception:
             return None
+
+    def _tenant_chunk_source(self, law_name: str, quote_text: str, used_laws: List[Dict[str, Any]], org_id: str):
+        """
+        (source_file, page) of the retrieved tenant chunk a quote came from: the verbatim quote
+        appears in the chunk text, or the quote's law label names the document title.
+        """
+        from core.tenant_documents import is_tenant_chunk_id
+        norm = lambda s: re.sub(r"\s+", "", normalize_digits(s or ""))
+        target = norm(law_name.split("|")[0])
+        quote = norm(quote_text)[:60]
+        tenant_cands = [c for c in used_laws if is_tenant_chunk_id(c.get("clause_id") or c.get("id"))]
+        # A paraphrased quote labelled only "หน้า N" is attributed only when one document has that page
+        page_m = re.search(r"หน้า\s*(\d+)", normalize_digits(law_name))
+        on_page = [c for c in tenant_cands if page_m and str(c.get("entry", "")).endswith(f"หน้า {page_m.group(1)}")]
+        page_unique = len({str(c.get("entry", "")).split("|")[0] for c in on_page}) == 1
+        for cand in tenant_cands:
+            cid = cand.get("clause_id") or cand.get("id")
+            title = norm(str(cand.get("entry", "")).split("|")[0])
+            quoted = len(quote) >= 10 and quote in norm(cand.get("description", ""))
+            titled = bool(title and target) and (title in target or target in title)
+            paged = page_unique and cand in on_page
+            if quoted or titled or paged:
+                try:
+                    from core.database import StorageManager
+                    rows = StorageManager.get_instance().pg.get_tenant_chunks_by_ids([cid], org_id=org_id)
+                except Exception:
+                    rows = []
+                if rows:
+                    r = rows[0]
+                    return r.get("source_file") or r.get("title"), format_page_range(r.get("page_start"), r.get("page_end"), r.get("total_pages"))
+        return None
 
     def _enrich_decisive_quotes(
         self,
         raw_quotes: List[Any],
-        used_laws: List[Dict[str, Any]]
+        used_laws: List[Dict[str, Any]],
+        org_id: str,
     ) -> List[Dict[str, Any]]:
         """
         Enrich decisive quotes with statutory source metadata:
@@ -767,6 +803,13 @@ class ProcurementService:
 
             law_name = str(q.get("law", "")).strip()
             quote_text = str(q.get("quote", "")).strip()
+
+            # Tenant documents first: their 'ข้อ N' is a TOR item, not a regulation clause
+            tenant_hit = self._tenant_chunk_source(law_name, quote_text, used_laws, org_id)
+            if tenant_hit:
+                enriched.append({"filename": tenant_hit[0], "page": tenant_hit[1], "law": law_name or None, "quote": quote_text})
+                continue
+
             doc_part, kind, num = split_law(law_name)
 
             # 1. A retrieved chunk of the same document and the same มาตรา/ข้อ
@@ -791,7 +834,7 @@ class ProcurementService:
             filename, page = None, None
             if matched:
                 doc_name, entry, text, clause_id = matched
-                record = self._clause_source_record(clause_id)
+                record = self._clause_source_record(clause_id, org_id)
                 if record:
                     # Tri-store: OCR-relative path and page range recovered at ingestion
                     filename = record.get("source_file") or f"{doc_name}.md"
@@ -819,14 +862,14 @@ class ProcurementService:
 
     def get_thresholds_resource(self) -> str:
         """Markdown summary of statutory monetary thresholds and procedural rules."""
-        return """# เกณฑ์วงเงินและข้อกำหนดตามกฎหมายจัดซื้อจัดจ้างภาครัฐไทย (พ.ร.บ. 2560)
+        return f"""# เกณฑ์วงเงินและข้อกำหนดตามกฎหมายจัดซื้อจัดจ้างภาครัฐไทย (พ.ร.บ. 2560)
 
 ## 1. วิธีการจัดซื้อจัดจ้างพัสดุ (มาตรา 55, 56)
 - **วิธีเฉพาะเจาะจง (Specific Selection)**:
-  - วงเงินเล็กน้อย: **ไม่เกิน 500,000 บาท** (ตามกฎกระทรวงกำหนดวงเงินฯ พ.ศ. 2560)
-  - วงเงินเกิน 500,000 บาท ต้องมีข้อยกเว้นตามมาตรา 56 (2) เช่น จำเป็นเร่งด่วนฉุกเฉิน (ง), เป็นพัสดุที่มีตัวแทนจำหน่ายแต่เพียงผู้เดียว (ค), ยกเลิก e-bidding แล้วไม่มีผู้ยื่น (ก)
+  - วงเงินเล็กน้อย: **ไม่เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท** (ตามกฎกระทรวงกำหนดวงเงินฯ พ.ศ. 2560)
+  - วงเงินเกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท ต้องมีข้อยกเว้นตามมาตรา 56 (2) เช่น จำเป็นเร่งด่วนฉุกเฉิน (ง), เป็นพัสดุที่มีตัวแทนจำหน่ายแต่เพียงผู้เดียว (ค), ยกเลิก e-bidding แล้วไม่มีผู้ยื่น (ก)
 - **วิธีประกาศเชิญชวนทั่วไป (General Invitation)**:
-  - วงเงิน **เกิน 500,000 บาทขึ้นไป**
+  - วงเงิน **เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาทขึ้นไป**
   - **e-Market**: พัสดุมีมาตรฐาน อยู่ในระบบ e-catalog
   - **e-Bidding**: พัสดุที่มีความซับซ้อน หรือไม่อยู่ใน e-catalog
 - **วิธีคัดเลือก (Selective Method)**:

@@ -36,7 +36,10 @@ logger = logging.getLogger("pg_repository")
 _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 # Tables holding tenant data; each carries an org_id column ('PUBLIC' = shared corpus)
-RLS_TABLES = ("legal_documents", "statute_clauses", "faq_cases", "query_audit_logs")
+RLS_TABLES = (
+    "legal_documents", "statute_clauses", "faq_cases", "query_audit_logs",
+    "tenant_documents", "tenant_chunks",
+)
 
 
 def _policy_ddl(table: str, role: str) -> Dict[str, str]:
@@ -241,6 +244,32 @@ class PostgresRepository:
         CREATE INDEX IF NOT EXISTS idx_statute_doc_cls ON statute_clauses(doc_id, clause_num);
         CREATE INDEX IF NOT EXISTS idx_statute_chapter ON statute_clauses(doc_id, chapter_num);
         CREATE INDEX IF NOT EXISTS idx_statute_content_trgm ON statute_clauses USING gin (content_thai gin_trgm_ops);
+
+        -- Tenant-private documents (TOR, BOQ, contracts...) ingested from the OCR service
+        CREATE TABLE IF NOT EXISTS tenant_documents (
+            doc_id VARCHAR(128) PRIMARY KEY,
+            org_id VARCHAR(64) NOT NULL,
+            title TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_file TEXT,
+            total_pages INT,
+            metadata JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS tenant_chunks (
+            chunk_id VARCHAR(160) PRIMARY KEY,
+            doc_id VARCHAR(128) NOT NULL REFERENCES tenant_documents(doc_id) ON DELETE CASCADE,
+            org_id VARCHAR(64) NOT NULL,
+            chunk_index INT NOT NULL,
+            page_start INT,
+            page_end INT,
+            content TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_doc_org ON tenant_documents(org_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_tenant_chunk_org ON tenant_chunks(org_id);
+        CREATE INDEX IF NOT EXISTS idx_tenant_chunk_doc ON tenant_chunks(doc_id, chunk_index);
         """
         with self.engine.begin() as conn:
             conn.execute(text(ddl))
@@ -439,6 +468,59 @@ class PostgresRepository:
             params[key] = json.dumps(params.get(key) or [], ensure_ascii=False)
         with self.tenant_connection(params.get("org_id")) as conn:
             conn.execute(query, params)
+
+    def replace_tenant_document(self, org_id: str, doc: Dict[str, Any], chunks: List[Dict[str, Any]]) -> None:
+        """Atomically (re)write one tenant document and its chunks under the tenant's RLS scope."""
+        with self.tenant_connection(org_id) as conn:
+            conn.execute(text("DELETE FROM tenant_documents WHERE doc_id = :d"), {"d": doc["doc_id"]})
+            conn.execute(
+                text("""
+                    INSERT INTO tenant_documents (doc_id, org_id, title, source_id, source_file, total_pages, metadata)
+                    VALUES (:doc_id, :org_id, :title, :source_id, :source_file, :total_pages, :metadata)
+                """),
+                {**doc, "org_id": org_id, "metadata": json.dumps(doc.get("metadata") or {}, ensure_ascii=False)},
+            )
+            if chunks:
+                conn.execute(
+                    text("""
+                        INSERT INTO tenant_chunks (chunk_id, doc_id, org_id, chunk_index, page_start, page_end, content)
+                        VALUES (:chunk_id, :doc_id, :org_id, :chunk_index, :page_start, :page_end, :content)
+                    """),
+                    [{**c, "doc_id": doc["doc_id"], "org_id": org_id} for c in chunks],
+                )
+
+    def delete_tenant_document(self, org_id: str, doc_id: str) -> bool:
+        """Delete a tenant document (chunks cascade). False when it does not exist for this tenant."""
+        with self.tenant_connection(org_id) as conn:
+            res = conn.execute(
+                text("DELETE FROM tenant_documents WHERE doc_id = :d AND org_id = :o"),
+                {"d": doc_id, "o": org_id},
+            )
+            return res.rowcount > 0
+
+    def list_tenant_documents(self, org_id: str) -> List[Dict[str, Any]]:
+        query = text("""
+            SELECT d.doc_id, d.title, d.source_id, d.source_file, d.total_pages, d.metadata, d.created_at,
+                   (SELECT count(*) FROM tenant_chunks c WHERE c.doc_id = d.doc_id) AS chunks
+            FROM tenant_documents d
+            WHERE d.org_id = :o
+            ORDER BY d.created_at DESC
+        """)
+        with self.tenant_connection(org_id) as conn:
+            return [dict(r) for r in conn.execute(query, {"o": org_id}).mappings().all()]
+
+    def get_tenant_chunks_by_ids(self, chunk_ids: List[str], org_id: str) -> List[Dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        query = text("""
+            SELECT c.*, d.title, d.source_file, d.total_pages
+            FROM tenant_chunks c
+            JOIN tenant_documents d ON c.doc_id = d.doc_id
+            WHERE c.chunk_id IN :ids AND c.org_id = :o
+        """)
+        with self.tenant_connection(org_id) as conn:
+            rows = conn.execute(query, {"ids": tuple(chunk_ids), "o": org_id}).mappings().all()
+            return [dict(r) for r in rows]
 
     def count_stats(self) -> Dict[str, Any]:
         """Return counts of all tables (owner role: totals across every tenant)."""

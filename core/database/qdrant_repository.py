@@ -72,6 +72,7 @@ class QdrantRepository:
 
     STATUTES_COLLECTION = "procurement_statutes"
     CASES_COLLECTION = "procurement_cases"
+    TENANT_DOCS_COLLECTION = "tenant_documents"
 
     def __init__(
         self,
@@ -139,6 +140,25 @@ class QdrantRepository:
             )
             logger.info(f"Created Qdrant collection '{self.CASES_COLLECTION}'.")
 
+        # 3. Tenant-private documents (OCR output)
+        if self.TENANT_DOCS_COLLECTION not in existing:
+            self.client.create_collection(
+                collection_name=self.TENANT_DOCS_COLLECTION,
+                vectors_config={
+                    "dense_bge_m3": models.VectorParams(
+                        size=self.dense_dim,
+                        distance=models.Distance.COSINE,
+                        hnsw_config=models.HnswConfigDiff(m=16, ef_construct=128),
+                    )
+                },
+                sparse_vectors_config={
+                    "sparse_bm25": models.SparseVectorParams(
+                        index=models.SparseIndexParams(on_disk=False)
+                    )
+                },
+            )
+            logger.info(f"Created Qdrant collection '{self.TENANT_DOCS_COLLECTION}'.")
+
         # Create Payload Field Indexes for fast filtering
         self._ensure_payload_indexes()
 
@@ -174,6 +194,16 @@ class QdrantRepository:
                     collection_name=self.CASES_COLLECTION,
                     field_name=f_name,
                     field_schema=f_type,
+                )
+            except Exception:
+                pass
+
+        for f_name in ("org_id", "doc_id"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.TENANT_DOCS_COLLECTION,
+                    field_name=f_name,
+                    field_schema=models.PayloadSchemaType.KEYWORD,
                 )
             except Exception:
                 pass
@@ -418,6 +448,80 @@ class QdrantRepository:
             {"case_id": pt.payload.get("case_id"), "score": pt.score, "payload": pt.payload}
             for pt in response.points
         ]
+
+    @staticmethod
+    def _own_tenant_filter(org_id: str, doc_id: Optional[str] = None) -> models.Filter:
+        """Tenant documents are private: only the owner's org_id matches (no PUBLIC)."""
+        must = [models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id))]
+        if doc_id:
+            must.append(models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id)))
+        return models.Filter(must=must)
+
+    def upsert_tenant_chunks(
+        self,
+        org_id: str,
+        doc_id: str,
+        title: str,
+        chunks: List[Dict[str, Any]],
+        dense_embeddings: List[List[float]],
+        batch_size: int = 100,
+    ):
+        """Replace a tenant document's points: drop the old ones, then upsert the new chunks."""
+        self.delete_tenant_document(org_id, doc_id)
+        points = []
+        for chunk, dense_emb in zip(chunks, dense_embeddings):
+            sparse_indices, sparse_values = self.vectorizer.vectorize(f"{title} {chunk['content']}")
+            vector_dict = {"dense_bge_m3": [float(x) for x in dense_emb]}
+            if sparse_indices:
+                vector_dict["sparse_bm25"] = models.SparseVector(indices=sparse_indices, values=sparse_values)
+            points.append(models.PointStruct(
+                id=hashlib.md5(chunk["chunk_id"].encode("utf-8")).hexdigest(),
+                vector=vector_dict,
+                payload={
+                    "chunk_id": chunk["chunk_id"],
+                    "org_id": org_id,
+                    "doc_id": doc_id,
+                    "title": title,
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                },
+            ))
+        for i in range(0, len(points), batch_size):
+            self.client.upsert(collection_name=self.TENANT_DOCS_COLLECTION, points=points[i:i + batch_size])
+
+    def delete_tenant_document(self, org_id: str, doc_id: str):
+        self.client.delete(
+            collection_name=self.TENANT_DOCS_COLLECTION,
+            points_selector=models.FilterSelector(filter=self._own_tenant_filter(org_id, doc_id)),
+            wait=True,
+        )
+
+    def hybrid_search_tenant_chunks(
+        self,
+        query_text: str,
+        query_dense: List[float],
+        org_id: str,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """RRF over dense + sparse vectors, restricted to the tenant's own documents."""
+        tenant_filter = self._own_tenant_filter(org_id)
+        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        prefetch = [models.Prefetch(query=query_dense, using="dense_bge_m3", limit=max(30, top_k * 3), filter=tenant_filter)]
+        if sparse_indices:
+            prefetch.append(models.Prefetch(
+                query=models.SparseVector(indices=sparse_indices, values=sparse_values),
+                using="sparse_bm25",
+                limit=max(30, top_k * 3),
+                filter=tenant_filter,
+            ))
+        response = self.client.query_points(
+            collection_name=self.TENANT_DOCS_COLLECTION,
+            prefetch=prefetch,
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=top_k,
+            with_payload=True,
+        )
+        return [{"chunk_id": pt.payload.get("chunk_id"), "score": pt.score, "payload": pt.payload} for pt in response.points]
 
     def count_stats(self) -> Dict[str, int]:
         """Count total points in each collection."""

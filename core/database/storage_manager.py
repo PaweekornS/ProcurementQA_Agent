@@ -124,6 +124,22 @@ class StorageManager:
             })
         return results
 
+    def hybrid_search_tenant_docs(
+        self,
+        query_text: str,
+        query_dense: List[float],
+        org_id: str,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search the tenant's private documents; content is hydrated from PostgreSQL under RLS."""
+        hits = self.qdrant.hybrid_search_tenant_chunks(query_text, query_dense, org_id=org_id, top_k=top_k)
+        score_map = {h["chunk_id"]: h["score"] for h in hits if h.get("chunk_id")}
+        rows = self.pg.get_tenant_chunks_by_ids(list(score_map), org_id=org_id)
+        for r in rows:
+            r["score"] = score_map.get(r["chunk_id"], 0.0)
+        rows.sort(key=lambda r: r["score"], reverse=True)
+        return rows
+
     def traverse_clause_graph(self, clause_id: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """Traverses Neo4j for structural and citation graph context around a clause, isolated by organization."""
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")

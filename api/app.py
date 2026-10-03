@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from api.dependencies import get_service
-from api.routes import health_router, qa_router, search_router, verify_router
+from api.routes import documents_router, health_router, qa_router, search_router, verify_router
 from api.mcp.server import mcp
 
 
@@ -65,7 +65,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins or ["*"],
     allow_credentials=bool(_cors_origins),
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -74,6 +74,7 @@ app.include_router(health_router)
 app.include_router(qa_router)
 app.include_router(search_router)
 app.include_router(verify_router)
+app.include_router(documents_router)
 
 # The FastMCP sub-app already carries its own path (/mcp). Register its routes on the root app
 # instead of mounting, which would nest it under /mcp/mcp. The legacy SSE transport is not served:
