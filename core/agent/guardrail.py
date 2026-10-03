@@ -15,6 +15,11 @@ Responsibilities:
 import re
 from typing import Dict, Any, List, Set, Tuple
 
+from core.compliance_constants import SPECIAL_CASE_QUALIFIERS, SPECIFIC_METHOD_CEILING_THB, fmt_thb
+
+# Spelled-out amounts the LLM tends to copy verbatim from statute text
+TH_WORD_AMOUNTS = {"หนึ่งแสน": 100000, "ห้าแสน": 500000, "หนึ่งล้าน": 1000000, "สองล้าน": 2000000, "ห้าล้าน": 5000000}
+
 TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
 
@@ -71,6 +76,17 @@ class GroundingGuardrail:
             "circulars": grounded_circulars
         }
 
+    @staticmethod
+    def extract_stated_ceilings(norm_text: str) -> Set[int]:
+        """Amounts phrased as a ceiling ("ไม่เกิน X บาท") in digits or spelled-out Thai."""
+        found: Set[int] = set()
+        for m in re.finditer(r"ไม่เกิน\s*(?:วงเงิน\s*)?([\d,]{5,})\s*บาท", norm_text):
+            found.add(int(m.group(1).replace(",", "")))
+        for word, amount in TH_WORD_AMOUNTS.items():
+            if re.search(rf"ไม่เกิน\s*(?:วงเงิน\s*)?{word}บาท", norm_text):
+                found.add(amount)
+        return found
+
     @classmethod
     def audit(cls, synthesized_text: str, retrieved_contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -106,8 +122,19 @@ class GroundingGuardrail:
             has_exception = any(kw in norm_synth for kw in ["ข้อยกเว้น", "จำเป็นเร่งด่วน", "ฉุกเฉิน", "มีรายเดียว", "วรรคสอง", "(๒)"])
             budget_matches = [int(b.replace(",", "")) for b in re.findall(r"(?:วงเงิน|งบประมาณ)\s*([\d,]+)\s*บาท", norm_synth)]
             for b in budget_matches:
-                if b > 500000 and not has_exception:
-                    warnings.append(f"วงเงิน {b:,} บาท เกิน 500,000 บาทสำหรับวิธีเฉพาะเจาะจง แต่คำตอบไม่ได้ระบุเงื่อนไขข้อยกเว้นอย่างชัดเจน")
+                if b > SPECIFIC_METHOD_CEILING_THB and not has_exception:
+                    warnings.append(f"วงเงิน {b:,} บาท เกิน {fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาทสำหรับวิธีเฉพาะเจาะจง แต่คำตอบไม่ได้ระบุเงื่อนไขข้อยกเว้นอย่างชัดเจน")
+
+            # A ceiling other than the general one is only valid for a special case (e.g. MoE schools: 1,000,000)
+            stated = cls.extract_stated_ceilings(norm_synth)
+            # lower amounts are other legit thresholds (e.g. มาตรา 96: 100,000), so only higher ones are suspect
+            wrong = sorted(c for c in stated if c > SPECIFIC_METHOD_CEILING_THB)
+            if wrong and not any(q in norm_synth for q in SPECIAL_CASE_QUALIFIERS):
+                is_passed = False
+                warnings.append(
+                    f"คำตอบระบุเพดานวิธีเฉพาะเจาะจง {', '.join(fmt_thb(c) for c in wrong)} บาท ซึ่งสูงกว่าเพดานทั่วไป "
+                    f"{fmt_thb(SPECIFIC_METHOD_CEILING_THB)} บาท และไม่ได้ระบุว่าเป็นกรณีเฉพาะ (เช่น สถานศึกษาสังกัดกระทรวงศึกษาธิการ)"
+                )
 
         # Grounding Score Calculation
         total_cited = len(cited["sections"]) + len(cited["clauses"])
