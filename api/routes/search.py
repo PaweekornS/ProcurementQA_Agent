@@ -5,7 +5,7 @@ api/routes/search.py
 Direct statutory retrieval endpoint using Dense Vector + Thai BM25 + Cross-Encoder reranking.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Request, APIRouter, Depends, HTTPException, status
 from api.errors import internal_error
 from api.dependencies import get_service, get_tenant_org_id
 from api.schemas import StatutorySearchRequest, StatutorySearchResponse
@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/v1", tags=["Statutory Hybrid Search"])
     status_code=status.HTTP_200_OK
 )
 def search_statutory_clauses(
+    request: Request,
     payload: StatutorySearchRequest,
     service: ProcurementService = Depends(get_service),
     default_tenant_id: str = Depends(get_tenant_org_id)
@@ -34,7 +35,10 @@ def search_statutory_clauses(
             detail="The 'query' field cannot be empty."
         )
 
-    resolved_org_id = payload.org_id.strip() if payload.org_id and payload.org_id.strip() else default_tenant_id
+    # X-Organization-Id (set by the calling platform) wins over the body, matching the MCP adapter
+    header_org = request.headers.get("x-organization-id", "").strip()
+    body_org = payload.org_id.strip() if payload.org_id else ""
+    resolved_org_id = header_org or body_org or default_tenant_id
 
     try:
         results = service.search_clauses(
