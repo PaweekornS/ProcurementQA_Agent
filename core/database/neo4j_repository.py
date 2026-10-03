@@ -186,24 +186,26 @@ class Neo4jRepository:
                     session.run(query, batch=chunk)
             logger.info(f"Synced {len(edge_list)} relationships of type ':{rel_type}' to Neo4j.")
 
-    def clear_derived_relationships(self, rel_types: List[str], batch_size: int = 10000) -> int:
+    def clear_derived_relationships(self, rel_types: List[str], org_id: str = "PUBLIC", batch_size: int = 10000) -> int:
         """
-        Delete corpus-derived relationships of the given types between PUBLIC nodes so a re-link
-        starts clean. Tenant-private edges (either endpoint non-PUBLIC) are left untouched.
+        Delete corpus-derived relationships of the given types between corpus nodes (PUBLIC or the
+        corpus tenant `org_id`) so a re-link starts clean. Tenant document edges are left untouched.
         """
         self.connect()
         removed = 0
         for rel_type in rel_types:
             query = f"""
             MATCH (a)-[r:{rel_type}]->(b)
-            WHERE coalesce(a.org_id, 'PUBLIC') = 'PUBLIC' AND coalesce(b.org_id, 'PUBLIC') = 'PUBLIC'
+            WHERE NOT a:TenantChunk AND NOT a:TenantDocument
+              AND coalesce(a.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+              AND coalesce(b.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
             WITH r LIMIT $limit
             DELETE r
             RETURN count(*) AS n
             """
             with self.driver.session() as session:
                 while True:
-                    n = session.run(query, limit=batch_size).single()["n"]
+                    n = session.run(query, limit=batch_size, org_id=org_id).single()["n"]
                     removed += n
                     if n < batch_size:
                         break
