@@ -38,25 +38,10 @@ LEGACY_ALIASES: Dict[str, Tuple[str, ...]] = {
     "RERANKER_THRESHOLD": ("reranker_threshold",),
     "RERANK_POOL_SIZE": ("rerank_pool_size",),
     # Retrieval
-    "DIRECT_RETRIEVE": ("direct_retrieve",),
-    "DIRECT_RETRIEVE_TOP_K": ("direct_retrieve_top_k",),
-    "TOP_RETRIEVE": ("top_retrieve",),
-    "TOP_RETRIEVE_TOP_K": ("top_retrieve_top_k",),
-    "AUGMENT_RETRIEVE": ("augment_retrieve",),
-    "HYBRID_RETRIEVAL": ("hybrid_retrieval",),
-    "BM25_TOP_K": ("bm25_top_k",),
-    "DENSE_TOP_K": ("dense_top_k",),
     "RRF_K": ("rrf_k",),
-    # Corpus & local (.pkl) graph
-    "LAW_TO_CRIME_PATH": ("law_to_crime_path",),
-    "CASE_DB_PATH": ("case_db_path",),
+    # Corpus & datasets
     "DATASETS_PATH": ("datasets_path",),
     "OUTPUT_DIR": ("output_dir",),
-    "GRAPH_DB_PATH": ("graph_db_path",),
-    "AUTO_BUILD": ("auto_build",),
-    "AUTO_SAVE": ("auto_save",),
-    "CRAG_ENABLED": ("crag_enabled",),
-    "CRAG_MAX_RETRY": ("crag_max_retry",),
     # Serving
     "EXPOSE_INTERNAL_TOOLS": ("expose_internal_tools",),
 }

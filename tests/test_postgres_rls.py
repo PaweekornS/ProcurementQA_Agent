@@ -76,7 +76,7 @@ class TestPostgresRLS(unittest.TestCase):
 
     def test_04_public_corpus_visible_to_every_tenant(self):
         with self.pg.tenant_connection("RLS_ORG_A") as conn:
-            public = conn.execute(text("SELECT count(*) FROM statute_clauses WHERE org_id = 'PUBLIC'")).scalar()
+            public = conn.execute(text("SELECT count(*) FROM chunks WHERE org_id = 'PUBLIC'")).scalar()
         self.assertGreater(public, 0)
 
     def test_05_tenant_cannot_write_into_another_tenant(self):
@@ -90,7 +90,7 @@ class TestPostgresRLS(unittest.TestCase):
     def test_06_tenant_cannot_modify_public_corpus(self):
         with self.pg.tenant_connection("RLS_ORG_A") as conn:
             updated = conn.execute(text(
-                "UPDATE statute_clauses SET content_thai = content_thai WHERE org_id = 'PUBLIC'"
+                "UPDATE chunks SET content = content WHERE org_id = 'PUBLIC'"
             )).rowcount
         self.assertEqual(updated, 0)
 

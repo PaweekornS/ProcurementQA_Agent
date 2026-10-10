@@ -45,7 +45,7 @@ class TestHealthcheck(unittest.TestCase):
 
     def test_03_service_prewarmed(self):
         """Validates that the singleton service has an initialized graph and section index."""
-        self.assertIsNotNone(self.service.rag, "LegalGraphRAG instance is None")
+        self.assertIsNotNone(self.service.rag, "ProcurementQA Agent instance is None")
         self.assertGreater(len(self.service._section_index), 0, "Section index is empty")
 
 

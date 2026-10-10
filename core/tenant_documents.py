@@ -3,7 +3,7 @@
 core/tenant_documents.py
 
 Ingestion of tenant-private documents (OCR markdown: TOR, BOQ, contracts...) into the Tri-Store.
-Each document is split into page-aware chunks, embedded, and written to PostgreSQL
+Each document is split into structure-aware chunks (core/chunking), embedded, and written to PostgreSQL
 (tenant_documents / tenant_chunks, RLS-scoped) and the Qdrant `tenant_documents` collection.
 Only the owning tenant can retrieve these chunks; they are never PUBLIC.
 """
@@ -13,18 +13,15 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from core.chunking import chunk_document
 from core.utils.settings import env
-from core.graph_construct.citation_linker import ACT_TITLE, TH_TO_AR, _names_other_year, _refers_elsewhere
+from core.graph.citation_linker import ACT_TITLE, TH_TO_AR, _names_other_year, _refers_elsewhere
 
 logger = logging.getLogger(__name__)
 
 # Same alphabet the OCR service accepts, so a tenant id maps 1:1 across both services
 ORG_ID_PATTERN = re.compile(r"^[A-Za-z0-9\u0E00-\u0E7F_-]{1,64}$")
 TENANT_CHUNK_PREFIX = "tdoc:"
-
-_PAGE_MARKER = re.compile(r"<!--\s*Page\s+(\d+)\s+of\s+(\d+)\s*-->", re.IGNORECASE)
-_MAX_CHARS = 1200
-_HARD_LIMIT = 1800
 
 # A TOR has its own "ข้อ 1, ข้อ 2..." numbering, so a bare "ข้อ N" is only linked to the MoF
 # regulation when the regulation is named just before it; "มาตรา N" defaults to the Act.
@@ -44,44 +41,16 @@ def make_doc_id(org_id: str, source_id: str) -> str:
     return f"{TENANT_CHUNK_PREFIX}{org_id}:{digest}"
 
 
-def split_pages(markdown: str) -> List[Dict[str, Any]]:
-    """[(page, text)] using the OCR '<!-- Page N of M -->' markers; unmarked text is page None."""
-    markers = list(_PAGE_MARKER.finditer(markdown))
-    if not markers:
-        return [{"page": None, "total": None, "text": markdown}]
-    pages = []
-    head = markdown[:markers[0].start()]
-    if head.strip():
-        pages.append({"page": None, "total": None, "text": head})
-    for i, m in enumerate(markers):
-        end = markers[i + 1].start() if i + 1 < len(markers) else len(markdown)
-        pages.append({"page": int(m.group(1)), "total": int(m.group(2)), "text": markdown[m.end():end]})
-    return pages
-
-
-def chunk_markdown(markdown: str) -> Dict[str, Any]:
-    """Paragraph-packed chunks of ~_MAX_CHARS that never cross a page boundary."""
-    chunks: List[Dict[str, Any]] = []
-    total_pages = None
-    for page in split_pages(markdown):
-        total_pages = page["total"] or total_pages
-        buf = ""
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", page["text"]) if p.strip()]
-        pieces = []
-        for p in paragraphs:
-            while len(p) > _HARD_LIMIT:
-                pieces.append(p[:_MAX_CHARS])
-                p = p[_MAX_CHARS:]
-            pieces.append(p)
-        for p in pieces:
-            if buf and len(buf) + len(p) + 2 > _MAX_CHARS:
-                chunks.append({"content": buf, "page_start": page["page"], "page_end": page["page"]})
-                buf = p
-            else:
-                buf = f"{buf}\n\n{p}" if buf else p
-        if buf:
-            chunks.append({"content": buf, "page_start": page["page"], "page_end": page["page"]})
-    return {"chunks": chunks, "total_pages": total_pages}
+def chunk_markdown(markdown: str, title: str = "") -> Dict[str, Any]:
+    """Structure-aware chunks (core/chunking): clause units for regulation-like documents,
+    heading sections and standalone tables for TOR/BOQ/contracts. Chunks may span pages."""
+    doc_type, parsed = chunk_document(markdown, title or "document", doc_title=title or "document")
+    chunks = [
+        {"content": c.content, "embed_text": c.embed_text, "page_start": c.page_start, "page_end": c.page_end}
+        for c in parsed
+    ]
+    total_pages = next((c.total_pages for c in parsed if c.total_pages), None)
+    return {"chunks": chunks, "total_pages": total_pages, "doc_type": doc_type}
 
 
 def extract_statute_refs(text: str) -> List[Dict[str, Any]]:
@@ -118,10 +87,10 @@ def _sync_graph(storage, org_id: str, doc: Dict[str, Any], chunks: List[Dict[str
         resolved = storage.neo4j.resolve_statute_refs(
             [{"title": t, "kind": k, "num": n} for t, k, n in wanted])
         citations = [
-            {"chunk_id": cid, "clause_id": clause_id, "quote": r["quote"]}
+            {"chunk_id": cid, "chunk_id": chunk_id, "quote": r["quote"]}
             for cid, refs in per_chunk
             for r in refs
-            for clause_id in resolved.get((r["title"], r["kind"], r["num"]), [])
+            for chunk_id in resolved.get((r["title"], r["kind"], r["num"]), [])
         ]
         linked = storage.neo4j.replace_tenant_document(org_id, doc, chunks, citations)
         return {"graph_status": "synced", "graph_citations": linked}
@@ -131,7 +100,7 @@ def _sync_graph(storage, org_id: str, doc: Dict[str, Any], chunks: List[Dict[str
 
 
 def _embed(texts: List[str]) -> List[List[float]]:
-    from core.graph_construct.feature_graph import batch_embed_tokenmind, get_embedding
+    from core.retrieval.embedding import batch_embed_tokenmind, get_embedding
     if env("EMBEDDING_PROVIDER", "local").lower() == "tokenmind":
         vectors = batch_embed_tokenmind(texts)
     else:
@@ -152,7 +121,7 @@ def ingest_document(
     """Create or replace one tenant document. Re-sending the same source_id replaces it."""
     from core.database import StorageManager
 
-    parsed = chunk_markdown(markdown)
+    parsed = chunk_markdown(markdown, title)
     if not parsed["chunks"]:
         raise ValueError("Document has no text to index")
 

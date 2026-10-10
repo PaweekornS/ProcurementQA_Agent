@@ -20,5 +20,8 @@ outputs/
 .cache
 
 # Raw source data stays out of the image too (page metadata is embedded in law_to_crime.json)
-datas/typhoon_ocr/
-datas/*.xlsx
+# Corpus data is mounted at runtime, never baked into the image
+datas/
+data_ocr/
+corpus/
+*.zip

@@ -2,7 +2,7 @@
 """
 api/app.py
 
-Main FastAPI Application for LegalGraphRAG Thai Procurement Law.
+Main FastAPI Application for ProcurementQA Agent.
 Provides dual-protocol serving:
   1. Standard REST API (/api/v1/qa, /api/v1/search, /api/v1/documents, /healthz, /ready)
   2. FastMCP Protocol over Streamable HTTP (/mcp)
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="LegalGraphRAG Thai Procurement Law API",
+    title="ProcurementQA Agent API",
     description=(
         "Production-grade Multi-Agent RAG Backend for Thai Government Procurement Law & Regulations.\n\n"
         "Exposes:\n"

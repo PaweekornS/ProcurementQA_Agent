@@ -3,7 +3,7 @@
 """
 server.py
 
-Production entrypoint for the LegalGraphRAG Thai Procurement Law Service.
+Production entrypoint for the ProcurementQA Agent Service.
 Supports:
   1. Default ASGI HTTP Mode: Runs FastAPI + mounted MCP on Uvicorn
   2. Legacy MCP Stdio Mode: Runs FastMCP over standard input/output for local desktop clients
@@ -33,12 +33,8 @@ def main():
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", os.getenv("MCP_PORT", "8000"))), help="Bind port")
     parser.add_argument("--workers", type=int, default=int(os.getenv("WEB_CONCURRENCY", "1")), help="Number of uvicorn workers")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
-    parser.add_argument("--no-auto-build", action="store_true", help="Disable auto-building graph database on startup")
 
     args = parser.parse_args()
-
-    if args.no_auto_build:
-        os.environ["AUTO_BUILD"] = "False"
 
     if args.transport == "stdio":
         from api.mcp.server import mcp

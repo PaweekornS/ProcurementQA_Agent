@@ -7,7 +7,7 @@
 
 ## 📌 1. บริบทปัจจุบันของระบบ (Current Multi-Tenancy Baseline)
 
-ระบบ **ProcurementQA_Agent (LegalGraphRAG)** รองรับการแบ่งแยกข้อมูล (Tenant Isolation) ในทั้ง 3 ฐานข้อมูล (Tri-Store) ดังนี้:
+ระบบ **ProcurementQA_Agent (ProcurementQAPipeline)** รองรับการแบ่งแยกข้อมูล (Tenant Isolation) ในทั้ง 3 ฐานข้อมูล (Tri-Store) ดังนี้:
 
 | ฐานข้อมูล | บทบาทในระบบ | รูปแบบ Isolation ปัจจุบัน | สถานะ |
 | :--- | :--- | :--- | :--- |

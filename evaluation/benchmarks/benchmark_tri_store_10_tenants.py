@@ -6,7 +6,7 @@ Tri-Store Production Architecture Multi-Tenant Benchmark:
 - Ingests mock regulations for 10 distinct Thai Agencies into PostgreSQL, Qdrant, and Neo4j
 - Validates strict tenant isolation (Zero Cross-Agency Data Leakage)
 - Measures latency across Qdrant HNSW+RRF (Payload Index), Neo4j Traversal (Property Index), and Postgres Hydration
-- Captures and reports per-query retrieved chunks (clause_id, entry, score, org_id, content snippet)
+- Captures and reports per-query retrieved chunks (chunk_id, entry, score, org_id, content snippet)
 - Measures Docker container resource usage (RAM/CPU) for Postgres, Qdrant, Neo4j, and Python process
 - Emits structured JSON and Markdown audit reports
 - Removes the mock tenant data from all three stores afterwards (pass --keep-data to inspect it)
@@ -82,7 +82,7 @@ def get_base_public_embedding(storage: StorageManager) -> Tuple[List[float], Lis
     from qdrant_client.http import models
 
     pts, _ = storage.qdrant.client.scroll(
-        collection_name=storage.qdrant.STATUTES_COLLECTION,
+        collection_name=storage.qdrant.CHUNKS_COLLECTION,
         scroll_filter=models.Filter(
             must=[models.FieldCondition(key="org_id", match=models.MatchValue(value="PUBLIC"))]
         ),
@@ -93,7 +93,7 @@ def get_base_public_embedding(storage: StorageManager) -> Tuple[List[float], Lis
     if not pts:
         # Fallback to general scroll
         pts, _ = storage.qdrant.client.scroll(
-            collection_name=storage.qdrant.STATUTES_COLLECTION,
+            collection_name=storage.qdrant.CHUNKS_COLLECTION,
             limit=10,
             with_vectors=True,
             with_payload=True,
@@ -105,7 +105,7 @@ def get_base_public_embedding(storage: StorageManager) -> Tuple[List[float], Lis
             base_vec = vec_data.get("dense_bge_m3", list(np.random.randn(1024)))
         else:
             base_vec = list(vec_data)
-        base_ids = [p.payload.get("clause_id") for p in pts if p.payload]
+        base_ids = [p.payload.get("chunk_id") for p in pts if p.payload]
         return base_vec, base_ids
 
     # Synthetic fallback vector
@@ -146,7 +146,7 @@ def inject_tri_store_tenant_data(storage: StorageManager, clauses_per_tenant: in
         embeddings = []
 
         for i in range(1, clauses_per_tenant + 1):
-            clause_id = f"{org_id}_CLAUSE_{i:04d}"
+            chunk_id = f"{org_id}_CLAUSE_{i:04d}"
             entry = f"ระเบียบเฉพาะ {org_name} ข้อ {i}"
             content = (
                 f"ข้อกำหนดและแนวปฏิบัติพัสดุเฉพาะของ {org_name} ว่าด้วยเรื่อง {domain} รายการที่ {i} "
@@ -161,7 +161,7 @@ def inject_tri_store_tenant_data(storage: StorageManager, clauses_per_tenant: in
             synth_emb = synth_emb / np.linalg.norm(synth_emb)
 
             c_dict = {
-                "clause_id": clause_id,
+                "chunk_id": chunk_id,
                 "doc_id": doc_id,
                 "org_id": org_id,
                 "entry": entry,
@@ -170,35 +170,35 @@ def inject_tri_store_tenant_data(storage: StorageManager, clauses_per_tenant: in
                 "clause_num": i,
                 "page_start": 1 + (i // 5),
                 "page_end": 1 + (i // 5),
-                "content_thai": content,
-                "judge_dep": [org_name],
-                "related_laws": [f"พ.ร.บ. จัดซื้อจัดจ้างฯ มาตรา {50 + (i % 50)}"],
-                "topics": [f"ระเบียบเฉพาะ_{org_id}", domain],
+                "content": content,
+                "kind": "statute_unit",
+                "label": f"ข้อ {i}",
+                "section_path": [f"ระเบียบเฉพาะ_{org_id}", domain],
             }
             clauses.append(c_dict)
             embeddings.append(synth_emb.tolist())
 
         # 1. PostgreSQL (SSOT)
         storage.pg.upsert_documents([doc], org_id=org_id)
-        storage.pg.upsert_clauses(clauses, org_id=org_id)
+        storage.pg.upsert_chunks(clauses, org_id=org_id)
 
         # 2. Qdrant (Vector DB with Payload Index)
-        storage.qdrant.upsert_statute_points(clauses, embeddings, org_id=org_id, batch_size=100)
+        storage.qdrant.upsert_chunk_points(clauses, embeddings, org_id=org_id, batch_size=100)
 
         # 3. Neo4j (Graph DB with Property Index & Edges)
         storage.neo4j.sync_documents([doc], org_id=org_id)
-        storage.neo4j.sync_statute_clauses(clauses, org_id=org_id, batch_size=200)
+        storage.neo4j.sync_chunks(clauses, org_id=org_id, batch_size=200)
 
         # Cross-cite public base laws if available
         if base_cids:
             with storage.neo4j.driver.session() as session:
                 cite_query = """
                 UNWIND $cids AS cid
-                MATCH (priv:StatuteClause {clause_id: cid})
-                MATCH (pub:StatuteClause {clause_id: $pub_id})
+                MATCH (priv:Chunk {chunk_id: cid})
+                MATCH (pub:Chunk {chunk_id: $pub_id})
                 MERGE (priv)-[:CITES_CLAUSE {quote: 'อ้างอิงพระราชบัญญัติแม่บท'}]->(pub)
                 """
-                session.run(cite_query, cids=[c["clause_id"] for c in clauses[:5]], pub_id=base_cids[0])
+                session.run(cite_query, cids=[c["chunk_id"] for c in clauses[:5]], pub_id=base_cids[0])
 
         total_docs += 1
         total_clauses += len(clauses)
@@ -211,7 +211,7 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
     """
     Audits 10 tenants:
     - Runs Public Query and Private Query for each tenant
-    - Captures per-query retrieved chunks (clause_id, entry, score, org_id, content preview)
+    - Captures per-query retrieved chunks (chunk_id, entry, score, org_id, content preview)
     - Verifies zero cross-tenant leakage
     - Measures latencies across Qdrant, Postgres, and Neo4j
     """
@@ -254,7 +254,7 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
 
             # 2. Qdrant Hybrid Search + Postgres Hydration
             t_search_start = time.perf_counter()
-            retrieved = storage.hybrid_search_clauses(
+            retrieved = storage.hybrid_search_chunks(
                 query_text=q_text,
                 query_dense=q_dense,
                 top_k=5,
@@ -265,9 +265,9 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
             # 3. Neo4j Traversal Context for top hit
             traversal_result = {}
             if retrieved:
-                top_cid = retrieved[0].get("clause_id")
+                top_cid = retrieved[0].get("chunk_id")
                 t_trav_start = time.perf_counter()
-                traversal_result = storage.traverse_clause_graph(top_cid, org_id=org_id)
+                traversal_result = storage.traverse_chunk_graph(top_cid, org_id=org_id)
                 t_trav_end = time.perf_counter()
                 trav_ms = (t_trav_end - t_trav_start) * 1000.0
             else:
@@ -289,12 +289,12 @@ def audit_and_benchmark_tri_store(storage: StorageManager) -> Tuple[List[Dict[st
                     total_leaks += 1
                     leaked_orgs.add(item_org)
 
-                content_raw = r.get("content_thai", "")
+                content_raw = r.get("content", "")
                 snippet = (content_raw[:160] + "...") if len(content_raw) > 160 else content_raw
 
                 chunks_for_this_query.append({
                     "rank": rank,
-                    "clause_id": r.get("clause_id"),
+                    "chunk_id": r.get("chunk_id"),
                     "entry": r.get("entry"),
                     "org_id": item_org,
                     "score": round(float(r.get("score", 0.0)), 4),
@@ -353,10 +353,10 @@ def cleanup_tenant_data(storage: StorageManager) -> None:
 
     org_ids = [t["org_id"] for t in TENANTS]
     with storage.pg.engine.begin() as conn:
-        clauses = conn.execute(text("DELETE FROM statute_clauses WHERE org_id IN :ids"), {"ids": tuple(org_ids)}).rowcount
-        conn.execute(text("DELETE FROM legal_documents WHERE org_id IN :ids"), {"ids": tuple(org_ids)})
+        clauses = conn.execute(text("DELETE FROM chunks WHERE org_id IN :ids"), {"ids": tuple(org_ids)}).rowcount
+        conn.execute(text("DELETE FROM documents WHERE org_id IN :ids"), {"ids": tuple(org_ids)})
     storage.qdrant.client.delete(
-        collection_name=storage.qdrant.STATUTES_COLLECTION,
+        collection_name=storage.qdrant.CHUNKS_COLLECTION,
         points_selector=models.FilterSelector(filter=models.Filter(must=[
             models.FieldCondition(key="org_id", match=models.MatchAny(any=org_ids))
         ])),
@@ -403,9 +403,9 @@ def run_benchmark(storage: StorageManager, clauses_per_tenant: int = 50) -> None
     # 3. Verify Stats
     stats = storage.get_stats()
     print("\n[*] Tri-Store Current Global Counts:")
-    print(f"    - PostgreSQL Clauses: {stats['postgres']['statute_clauses']}")
-    print(f"    - Qdrant Points:      {stats['qdrant']['statutes_points']}")
-    print(f"    - Neo4j Clauses:      {stats['neo4j']['clauses']}")
+    print(f"    - PostgreSQL Clauses: {stats['postgres']['chunks']}")
+    print(f"    - Qdrant Points:      {stats['qdrant']['chunk_points']}")
+    print(f"    - Neo4j Clauses:      {stats['neo4j']['chunks']}")
     print(f"    - Neo4j Relationships:{stats['neo4j']['relationships']}")
 
     # 4. Audit & Benchmark
@@ -490,7 +490,7 @@ def run_benchmark(storage: StorageManager, clauses_per_tenant: int = 50) -> None
             f.write("| Rank | Clause ID | Entry / มาตรา | สิทธิ์ (Org) | Score | เนื้อหาโดยย่อ (Content Snippet) |\n")
             f.write("| :---: | :--- | :--- | :---: | :---: | :--- |\n")
             for c in q_item["chunks"]:
-                f.write(f"| {c['rank']} | `{c['clause_id']}` | {c['entry']} | `{c['org_id']}` | {c['score']:.4f} | {c['snippet']} |\n")
+                f.write(f"| {c['rank']} | `{c['chunk_id']}` | {c['entry']} | `{c['org_id']}` | {c['score']:.4f} | {c['snippet']} |\n")
             f.write("\n---\n\n")
 
     print(f"[+] Saved executive report to: {out_md}")

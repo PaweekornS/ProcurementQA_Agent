@@ -2,8 +2,8 @@
 """
 core/database/pg_repository.py
 
-PostgreSQL Data Access Layer (SSOT) for Thai Procurement LegalGraphRAG.
-Provides transactional persistence for legal documents, statutory macro-clauses,
+PostgreSQL Data Access Layer (SSOT) for ProcurementQA Agent.
+Provides transactional persistence for corpus documents, chunks,
 Comptroller General FAQ cases, and QA audit logs.
 
 Tenant isolation is enforced by the database with Row-Level Security (RLS):
@@ -37,7 +37,7 @@ _ROLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 # Tables holding tenant data; each carries an org_id column ('PUBLIC' = shared corpus)
 RLS_TABLES = (
-    "legal_documents", "statute_clauses", "faq_cases", "query_audit_logs",
+    "documents", "chunks", "faq_cases", "query_audit_logs",
     "tenant_documents", "tenant_chunks",
 )
 
@@ -160,7 +160,7 @@ class PostgresRepository:
         CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
         CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
-        CREATE TABLE IF NOT EXISTS legal_documents (
+        CREATE TABLE IF NOT EXISTS documents (
             doc_id VARCHAR(128) PRIMARY KEY,
             org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC',
             title TEXT NOT NULL,
@@ -172,9 +172,9 @@ class PostgresRepository:
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS statute_clauses (
-            clause_id VARCHAR(255) PRIMARY KEY,
-            doc_id VARCHAR(128) NOT NULL REFERENCES legal_documents(doc_id) ON DELETE CASCADE,
+        CREATE TABLE IF NOT EXISTS chunks (
+            chunk_id VARCHAR(255) PRIMARY KEY,
+            doc_id VARCHAR(128) NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
             org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC',
             entry TEXT NOT NULL,
             chapter_num INT,
@@ -182,10 +182,10 @@ class PostgresRepository:
             clause_num INT,
             page_start INT,
             page_end INT,
-            content_thai TEXT NOT NULL,
-            judge_dep JSONB DEFAULT '[]'::jsonb,
-            related_laws JSONB DEFAULT '[]'::jsonb,
-            topics JSONB DEFAULT '[]'::jsonb,
+            content TEXT NOT NULL,
+            kind VARCHAR(32),
+            label TEXT,
+            section_path JSONB DEFAULT '[]'::jsonb,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -195,7 +195,6 @@ class PostgresRepository:
             source VARCHAR(64) DEFAULT 'FAQ_CGD',
             question TEXT NOT NULL,
             answer TEXT NOT NULL,
-            features JSONB NOT NULL,
             cited_laws JSONB DEFAULT '[]'::jsonb,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
@@ -212,22 +211,8 @@ class PostgresRepository:
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- Add org_id column if tables were created previously without it
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='legal_documents' AND column_name='org_id') THEN
-                ALTER TABLE legal_documents ADD COLUMN org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statute_clauses' AND column_name='org_id') THEN
-                ALTER TABLE statute_clauses ADD COLUMN org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='faq_cases' AND column_name='org_id') THEN
-                ALTER TABLE faq_cases ADD COLUMN org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='query_audit_logs' AND column_name='org_id') THEN
-                ALTER TABLE query_audit_logs ADD COLUMN org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC';
-            END IF;
-        END $$;
+        -- Audit log predates multi-tenancy on some databases
+        ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS org_id VARCHAR(64) NOT NULL DEFAULT 'PUBLIC';
 
         -- Audit trail columns added after the initial schema (idempotent for existing databases)
         ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS status VARCHAR(64);
@@ -236,14 +221,14 @@ class PostgresRepository:
         ALTER TABLE query_audit_logs ADD COLUMN IF NOT EXISTS error TEXT;
         CREATE INDEX IF NOT EXISTS idx_audit_org_created ON query_audit_logs(org_id, created_at DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_doc_org_id ON legal_documents(org_id);
-        CREATE INDEX IF NOT EXISTS idx_statute_org_id ON statute_clauses(org_id);
+        CREATE INDEX IF NOT EXISTS idx_document_org_id ON documents(org_id);
+        CREATE INDEX IF NOT EXISTS idx_chunk_org_id ON chunks(org_id);
         CREATE INDEX IF NOT EXISTS idx_faq_org_id ON faq_cases(org_id);
 
-        CREATE INDEX IF NOT EXISTS idx_statute_doc_sec ON statute_clauses(doc_id, section_num);
-        CREATE INDEX IF NOT EXISTS idx_statute_doc_cls ON statute_clauses(doc_id, clause_num);
-        CREATE INDEX IF NOT EXISTS idx_statute_chapter ON statute_clauses(doc_id, chapter_num);
-        CREATE INDEX IF NOT EXISTS idx_statute_content_trgm ON statute_clauses USING gin (content_thai gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_chunk_doc_sec ON chunks(doc_id, section_num);
+        CREATE INDEX IF NOT EXISTS idx_chunk_doc_cls ON chunks(doc_id, clause_num);
+        CREATE INDEX IF NOT EXISTS idx_chunk_chapter ON chunks(doc_id, chapter_num);
+        CREATE INDEX IF NOT EXISTS idx_chunk_content_trgm ON chunks USING gin (content gin_trgm_ops);
 
         -- Tenant-private documents (TOR, BOQ, contracts...) ingested from the OCR service
         CREATE TABLE IF NOT EXISTS tenant_documents (
@@ -276,12 +261,29 @@ class PostgresRepository:
         self._init_rls()
         logger.info("PostgreSQL schema successfully initialized with multi-tenancy.")
 
+    def drop_legacy_schema(self) -> None:
+        """Drop the pre-rename corpus tables (legal_documents / statute_clauses). They only held the
+        seeded corpus, which the migration rebuilds from data_ocr/; tenant uploads and audit logs
+        live in other tables."""
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS statute_clauses CASCADE; DROP TABLE IF EXISTS legal_documents CASCADE;"))
+            conn.execute(text("ALTER TABLE faq_cases DROP COLUMN IF EXISTS features"))
+
+    def delete_corpus(self, org_id: str) -> Dict[str, int]:
+        """Remove one tenant's seeded corpus (documents, chunks, FAQ cases) before a re-ingest.
+        Tenant-uploaded documents live in other tables and are not touched."""
+        with self.engine.begin() as conn:
+            faq = conn.execute(text("DELETE FROM faq_cases WHERE org_id = :o"), {"o": org_id}).rowcount
+            chunks = conn.execute(text("DELETE FROM chunks WHERE org_id = :o"), {"o": org_id}).rowcount
+            docs = conn.execute(text("DELETE FROM documents WHERE org_id = :o"), {"o": org_id}).rowcount
+        return {"documents": docs, "chunks": chunks, "faq_cases": faq}
+
     def upsert_documents(self, documents: List[Dict[str, Any]], org_id: str = "PUBLIC"):
         """Batch upsert legal documents."""
         if not documents:
             return
         query = text("""
-            INSERT INTO legal_documents (doc_id, org_id, title, doc_type, year_be, source_file, total_pages, metadata)
+            INSERT INTO documents (doc_id, org_id, title, doc_type, year_be, source_file, total_pages, metadata)
             VALUES (:doc_id, :org_id, :title, :doc_type, :year_be, :source_file, :total_pages, :metadata)
             ON CONFLICT (doc_id) DO UPDATE SET
                 org_id = EXCLUDED.org_id,
@@ -307,20 +309,20 @@ class PostgresRepository:
         with self.engine.begin() as conn:
             conn.execute(query, formatted)
 
-    def upsert_clauses(self, clauses: List[Dict[str, Any]], org_id: str = "PUBLIC", batch_size: int = 250):
-        """Batch upsert statutory clauses."""
-        if not clauses:
+    def upsert_chunks(self, chunks: List[Dict[str, Any]], org_id: str = "PUBLIC", batch_size: int = 250):
+        """Batch upsert corpus chunks (statute units, sections, tables, FAQ pairs)."""
+        if not chunks:
             return
         query = text("""
-            INSERT INTO statute_clauses (
-                clause_id, doc_id, org_id, entry, chapter_num, section_num, clause_num,
-                page_start, page_end, content_thai, judge_dep, related_laws, topics
+            INSERT INTO chunks (
+                chunk_id, doc_id, org_id, entry, chapter_num, section_num, clause_num,
+                page_start, page_end, content, kind, label, section_path
             )
             VALUES (
-                :clause_id, :doc_id, :org_id, :entry, :chapter_num, :section_num, :clause_num,
-                :page_start, :page_end, :content_thai, :judge_dep, :related_laws, :topics
+                :chunk_id, :doc_id, :org_id, :entry, :chapter_num, :section_num, :clause_num,
+                :page_start, :page_end, :content, :kind, :label, :section_path
             )
-            ON CONFLICT (clause_id) DO UPDATE SET
+            ON CONFLICT (chunk_id) DO UPDATE SET
                 doc_id = EXCLUDED.doc_id,
                 org_id = EXCLUDED.org_id,
                 entry = EXCLUDED.entry,
@@ -329,17 +331,17 @@ class PostgresRepository:
                 clause_num = EXCLUDED.clause_num,
                 page_start = EXCLUDED.page_start,
                 page_end = EXCLUDED.page_end,
-                content_thai = EXCLUDED.content_thai,
-                judge_dep = EXCLUDED.judge_dep,
-                related_laws = EXCLUDED.related_laws,
-                topics = EXCLUDED.topics;
+                content = EXCLUDED.content,
+                kind = EXCLUDED.kind,
+                label = EXCLUDED.label,
+                section_path = EXCLUDED.section_path;
         """)
-        for i in range(0, len(clauses), batch_size):
-            chunk = clauses[i:i + batch_size]
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
             formatted = []
-            for c in chunk:
+            for c in batch:
                 formatted.append({
-                    "clause_id": str(c["clause_id"]),
+                    "chunk_id": str(c["chunk_id"]),
                     "doc_id": str(c["doc_id"]),
                     "org_id": str(c.get("org_id", org_id)),
                     "entry": str(c["entry"]),
@@ -348,10 +350,10 @@ class PostgresRepository:
                     "clause_num": c.get("clause_num"),
                     "page_start": c.get("page_start"),
                     "page_end": c.get("page_end"),
-                    "content_thai": str(c["content_thai"]),
-                    "judge_dep": json.dumps(c.get("judge_dep", []), ensure_ascii=False),
-                    "related_laws": json.dumps(c.get("related_laws", []), ensure_ascii=False),
-                    "topics": json.dumps(c.get("topics", []), ensure_ascii=False)
+                    "content": str(c["content"]),
+                    "kind": c.get("kind"),
+                    "label": c.get("label"),
+                    "section_path": json.dumps(c.get("section_path", []), ensure_ascii=False),
                 })
             with self.engine.begin() as conn:
                 conn.execute(query, formatted)
@@ -361,14 +363,13 @@ class PostgresRepository:
         if not cases:
             return
         query = text("""
-            INSERT INTO faq_cases (case_id, org_id, source, question, answer, features, cited_laws)
-            VALUES (:case_id, :org_id, :source, :question, :answer, :features, :cited_laws)
+            INSERT INTO faq_cases (case_id, org_id, source, question, answer, cited_laws)
+            VALUES (:case_id, :org_id, :source, :question, :answer, :cited_laws)
             ON CONFLICT (case_id) DO UPDATE SET
                 org_id = EXCLUDED.org_id,
                 source = EXCLUDED.source,
                 question = EXCLUDED.question,
                 answer = EXCLUDED.answer,
-                features = EXCLUDED.features,
                 cited_laws = EXCLUDED.cited_laws;
         """)
         formatted = []
@@ -379,46 +380,58 @@ class PostgresRepository:
                 "source": str(cs.get("source", "FAQ_CGD")),
                 "question": str(cs["question"]),
                 "answer": str(cs["answer"]),
-                "features": json.dumps(cs.get("features", {}), ensure_ascii=False),
                 "cited_laws": json.dumps(cs.get("cited_laws", []), ensure_ascii=False)
             })
         with self.engine.begin() as conn:
             conn.execute(query, formatted)
 
-    def get_clause_by_id(self, clause_id: str, org_id: str = "DGA") -> Optional[Dict[str, Any]]:
-        """Fetch full statutory clause record by clause_id with tenant filtering."""
+    def get_chunk_by_id(self, chunk_id: str, org_id: str = "DGA") -> Optional[Dict[str, Any]]:
+        """Fetch full statutory clause record by chunk_id with tenant filtering."""
         query = text("""
             SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
-            FROM statute_clauses sc
-            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
-            WHERE sc.clause_id = :cid AND sc.org_id IN ('PUBLIC', :org_id)
+            FROM chunks sc
+            JOIN documents ld ON sc.doc_id = ld.doc_id
+            WHERE sc.chunk_id = :cid AND sc.org_id IN ('PUBLIC', :org_id)
         """)
         with self.tenant_connection(org_id) as conn:
-            row = conn.execute(query, {"cid": clause_id, "org_id": org_id}).mappings().first()
+            row = conn.execute(query, {"cid": chunk_id, "org_id": org_id}).mappings().first()
             if row:
                 return dict(row)
         return None
 
-    def get_clauses_by_ids(self, clause_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
+    def get_chunks_by_ids(self, chunk_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fetch multiple statutory clauses by their IDs with tenant filtering."""
-        if not clause_ids:
+        if not chunk_ids:
             return []
         query = text("""
             SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
-            FROM statute_clauses sc
-            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
-            WHERE sc.clause_id IN :cids AND sc.org_id IN ('PUBLIC', :org_id)
+            FROM chunks sc
+            JOIN documents ld ON sc.doc_id = ld.doc_id
+            WHERE sc.chunk_id IN :cids AND sc.org_id IN ('PUBLIC', :org_id)
         """)
         with self.tenant_connection(org_id) as conn:
-            rows = conn.execute(query, {"cids": tuple(clause_ids), "org_id": org_id}).mappings().all()
+            rows = conn.execute(query, {"cids": tuple(chunk_ids), "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
+
+    def get_faq_cases_by_ids(self, case_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
+        if not case_ids:
+            return []
+        query = text("SELECT case_id, question, answer, cited_laws FROM faq_cases "
+                     "WHERE case_id IN :ids AND org_id IN ('PUBLIC', :org_id)")
+        with self.tenant_connection(org_id) as conn:
+            return [dict(r) for r in conn.execute(query, {"ids": tuple(case_ids), "org_id": org_id}).mappings().all()]
+
+    def list_document_titles(self, org_id: str = "DGA") -> List[str]:
+        query = text("SELECT title FROM documents WHERE org_id IN ('PUBLIC', :org_id) ORDER BY title")
+        with self.tenant_connection(org_id) as conn:
+            return [r[0] for r in conn.execute(query, {"org_id": org_id}).all()]
 
     def lookup_section(self, doc_id_or_keyword: str, section_num: int, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fast relational lookup for a section number in a statute with tenant filtering."""
         query = text("""
             SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
-            FROM statute_clauses sc
-            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
+            FROM chunks sc
+            JOIN documents ld ON sc.doc_id = ld.doc_id
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)
               AND sc.section_num = :sec
               AND sc.org_id IN ('PUBLIC', :org_id)
@@ -434,8 +447,8 @@ class PostgresRepository:
         """Fast relational lookup for a regulation clause number (ข้อ) with tenant filtering."""
         query = text("""
             SELECT sc.*, ld.title AS doc_title, ld.source_file, ld.total_pages
-            FROM statute_clauses sc
-            JOIN legal_documents ld ON sc.doc_id = ld.doc_id
+            FROM chunks sc
+            JOIN documents ld ON sc.doc_id = ld.doc_id
             WHERE (sc.doc_id ILIKE :kw OR ld.title ILIKE :kw)
               AND sc.clause_num = :cls
               AND sc.org_id IN ('PUBLIC', :org_id)
@@ -443,7 +456,7 @@ class PostgresRepository:
             -- over ministerial rules / circulars, then the most comprehensive document (most clauses),
             -- then continuation parts in reading order.
             ORDER BY CASE ld.doc_type WHEN 'REGULATION' THEN 0 WHEN 'MINISTERIAL_RULE' THEN 1 ELSE 2 END,
-                     (SELECT count(*) FROM statute_clauses s2 WHERE s2.doc_id = sc.doc_id) DESC,
+                     (SELECT count(*) FROM chunks s2 WHERE s2.doc_id = sc.doc_id) DESC,
                      sc.page_start ASC NULLS LAST, length(sc.entry), sc.entry;
         """)
         kw = f"%{doc_id_or_keyword.strip()}%"
@@ -509,6 +522,17 @@ class PostgresRepository:
         with self.tenant_connection(org_id) as conn:
             return [dict(r) for r in conn.execute(query, {"o": org_id}).mappings().all()]
 
+    def all_tenant_chunks(self) -> List[Dict[str, Any]]:
+        """Every tenant chunk with its document title, in document order (owner role, all tenants).
+        Used only to rebuild the vector index; never exposed to a request."""
+        query = text("""
+            SELECT c.chunk_id, c.org_id, c.doc_id, c.chunk_index, c.page_start, c.page_end, c.content, d.title
+            FROM tenant_chunks c JOIN tenant_documents d ON c.doc_id = d.doc_id
+            ORDER BY c.org_id, c.doc_id, c.chunk_index
+        """)
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(query).mappings().all()]
+
     def get_tenant_chunks_by_ids(self, chunk_ids: List[str], org_id: str) -> List[Dict[str, Any]]:
         if not chunk_ids:
             return []
@@ -525,12 +549,12 @@ class PostgresRepository:
     def count_stats(self) -> Dict[str, Any]:
         """Return counts of all tables (owner role: totals across every tenant)."""
         with self.engine.connect() as conn:
-            doc_cnt = conn.execute(text("SELECT count(*) FROM legal_documents")).scalar() or 0
-            cls_cnt = conn.execute(text("SELECT count(*) FROM statute_clauses")).scalar() or 0
+            doc_cnt = conn.execute(text("SELECT count(*) FROM documents")).scalar() or 0
+            cls_cnt = conn.execute(text("SELECT count(*) FROM chunks")).scalar() or 0
             faq_cnt = conn.execute(text("SELECT count(*) FROM faq_cases")).scalar() or 0
             return {
-                "legal_documents": int(doc_cnt),
-                "statute_clauses": int(cls_cnt),
+                "documents": int(doc_cnt),
+                "chunks": int(cls_cnt),
                 "faq_cases": int(faq_cnt),
                 "rls_enforced": self.rls_enforced,
             }

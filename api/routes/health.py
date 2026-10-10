@@ -31,7 +31,7 @@ def readiness(response: Response, service: ProcurementService = Depends(get_serv
         model_name = service.rag.config.model.model_name
         sections_indexed = len(service._section_index)
 
-        from core.graph_construct.hybrid_reranker import reranker_status
+        from core.retrieval.reranker import reranker_status
         reranker = reranker_status()
         if not reranker["loaded"]:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -47,7 +47,7 @@ def readiness(response: Response, service: ProcurementService = Depends(get_serv
             from core.database import StorageManager
             # Raises if any of PostgreSQL / Qdrant / Neo4j is unreachable
             tri_store_stats = StorageManager.get_instance().get_stats()
-            if tri_store_stats["postgres"]["statute_clauses"] == 0 or tri_store_stats["qdrant"]["statutes_points"] == 0:
+            if tri_store_stats["postgres"]["chunks"] == 0 or tri_store_stats["qdrant"]["chunk_points"] == 0:
                 response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
                 return ReadinessStatus(
                     ready=False,

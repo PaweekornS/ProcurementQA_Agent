@@ -1,6 +1,6 @@
 # Dual-Protocol Architecture: REST API & FastMCP Serving Layer
 
-> **Production Serving Architecture for Thai Government Procurement Law LegalGraphRAG**  
+> **Production Serving Architecture for Thai Government Procurement Law ProcurementQAPipeline**  
 > Exposes Pure LangGraph Agentic RAG over both **REST API** (FastAPI) and **Model Context Protocol** (FastMCP) on a unified port.
 
 ---
@@ -102,7 +102,7 @@ The same contract is returned by the MCP tool `ask_procurement_law(query, org_id
 | `status` | `COMPLIANT`, `PARTIALLY_RESOLVED`, `NO_LAW_FOUND` or `OUT_OF_LEGAL_SCOPE` |
 | `answer` | Direct legal answer covering every resolved sub-question |
 | `conditions` | Exceptions, thresholds or prerequisites qualifying the answer; `null` if none |
-| `citations[]` | Laws relied on. `quote` is verbatim statutory text. `filename` is the OCR document path under `datas/typhoon_ocr/` and `page` its page range (`start-end/total`); both are `null` when the cited law is not in the corpus (e.g. a repealed regulation) or its page could not be recovered |
+| `citations[]` | Laws relied on. `quote` is verbatim statutory text. `filename` is the OCR document path under `data_ocr/` and `page` its page range (`start-end/total`); both are `null` when the cited law is not in the corpus (e.g. a repealed regulation) or its page could not be recovered |
 | `unresolved_issues[]` | Only sub-questions that were **not** answered (`NO_LAW_FOUND` / `OUT_OF_LEGAL_SCOPE`), with `missing_aspect`, so the orchestrator can delegate them to another agent |
 | `grounded` | `true` when every cited section appears in the retrieved evidence (guardrail); `false` means treat the answer with caution; `null` if not evaluated |
 | `org_id` | Tenant the answer was scoped to |

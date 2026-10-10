@@ -12,7 +12,6 @@ from typing import Optional
 from fastapi import Header, Request
 
 from core.service import ProcurementService
-from core.utils.settings import env
 
 _service_instance: Optional[ProcurementService] = None
 
@@ -25,10 +24,8 @@ def get_service() -> ProcurementService:
     global _service_instance
     if _service_instance is None:
         dotenv_path = os.getenv("DOTENV_PATH", ".env")
-        auto_build_env = env("AUTO_BUILD")
-        auto_build = auto_build_env.lower() in ("true", "1", "yes") if auto_build_env is not None else None
         print(f"[api.dependencies] Initializing ProcurementService singleton (config: {dotenv_path})", file=sys.stderr)
-        _service_instance = ProcurementService.get_instance(dotenv_path=dotenv_path, auto_build=auto_build)
+        _service_instance = ProcurementService.get_instance(dotenv_path=dotenv_path)
         print("[api.dependencies] ProcurementService singleton ready.", file=sys.stderr)
     return _service_instance
 

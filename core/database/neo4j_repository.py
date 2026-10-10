@@ -2,7 +2,7 @@
 """
 core/database/neo4j_repository.py
 
-Neo4j Graph Database Repository for Thai Procurement LegalGraphRAG.
+Neo4j Graph Database Repository for ProcurementQA Agent.
 Manages topological relationships: document hierarchies, sequential clause adjacency
 (ADJACENT_SECTION), cross-statutory citations (CITES_CLAUSE), and precedent links (RELATES_TO_LAW).
 """
@@ -73,14 +73,14 @@ class Neo4jRepository:
         """Idempotently create uniqueness constraints, indexes, and register relationship types."""
         self.connect()
         constraints = [
-            "CREATE CONSTRAINT unique_doc_id IF NOT EXISTS FOR (d:LegalDocument) REQUIRE d.doc_id IS UNIQUE",
-            "CREATE CONSTRAINT unique_clause_id IF NOT EXISTS FOR (c:StatuteClause) REQUIRE c.clause_id IS UNIQUE",
+            "CREATE CONSTRAINT unique_doc_id IF NOT EXISTS FOR (d:Document) REQUIRE d.doc_id IS UNIQUE",
+            "CREATE CONSTRAINT unique_chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE",
             "CREATE CONSTRAINT unique_case_id IF NOT EXISTS FOR (f:FAQCase) REQUIRE f.case_id IS UNIQUE",
             "CREATE CONSTRAINT unique_topic_name IF NOT EXISTS FOR (t:LegalTopic) REQUIRE t.name IS UNIQUE",
-            "CREATE INDEX clause_section_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.doc_id, c.section_num)",
-            "CREATE INDEX clause_number_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.doc_id, c.clause_num)",
-            "CREATE INDEX doc_org_id_lookup IF NOT EXISTS FOR (d:LegalDocument) ON (d.org_id)",
-            "CREATE INDEX clause_org_id_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.org_id)",
+            "CREATE INDEX chunk_section_lookup IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id, c.section_num)",
+            "CREATE INDEX chunk_number_lookup IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id, c.clause_num)",
+            "CREATE INDEX doc_org_id_lookup IF NOT EXISTS FOR (d:Document) ON (d.org_id)",
+            "CREATE INDEX chunk_org_id_lookup IF NOT EXISTS FOR (c:Chunk) ON (c.org_id)",
             "CREATE INDEX case_org_id_lookup IF NOT EXISTS FOR (f:FAQCase) ON (f.org_id)",
             "CREATE CONSTRAINT unique_tenant_doc_id IF NOT EXISTS FOR (t:TenantDocument) REQUIRE t.doc_id IS UNIQUE",
             "CREATE CONSTRAINT unique_tenant_chunk_id IF NOT EXISTS FOR (t:TenantChunk) REQUIRE t.chunk_id IS UNIQUE",
@@ -107,11 +107,11 @@ class Neo4jRepository:
         logger.info("Neo4j constraints and indexes successfully initialized.")
 
     def sync_documents(self, documents: List[Dict[str, Any]], org_id: str = "PUBLIC"):
-        """Batch upsert :LegalDocument nodes with tenant org_id."""
+        """Batch upsert :Document nodes with tenant org_id."""
         self.connect()
         query = """
         UNWIND $batch AS doc
-        MERGE (d:LegalDocument {doc_id: doc.doc_id})
+        MERGE (d:Document {doc_id: doc.doc_id})
         SET d.title = doc.title,
             d.doc_type = doc.doc_type,
             d.year_be = doc.year_be,
@@ -121,12 +121,12 @@ class Neo4jRepository:
         with self.driver.session() as session:
             session.run(query, batch=documents, default_org_id=org_id)
 
-    def sync_statute_clauses(self, clauses: List[Dict[str, Any]], org_id: str = "PUBLIC", batch_size: int = 500):
-        """Batch upsert :StatuteClause nodes and connect them to their parent :LegalDocument."""
+    def sync_chunks(self, chunks: List[Dict[str, Any]], org_id: str = "PUBLIC", batch_size: int = 500):
+        """Batch upsert :Chunk nodes and connect them to their parent :Document."""
         self.connect()
         query = """
         UNWIND $batch AS item
-        MERGE (c:StatuteClause {clause_id: item.clause_id})
+        MERGE (c:Chunk {chunk_id: item.chunk_id})
         SET c.doc_id = item.doc_id,
             c.entry = item.entry,
             c.chapter_num = item.chapter_num,
@@ -134,16 +134,18 @@ class Neo4jRepository:
             c.clause_num = item.clause_num,
             c.page_start = item.page_start,
             c.page_end = item.page_end,
+            c.kind = item.kind,
+            c.label = item.label,
             c.org_id = coalesce(item.org_id, $default_org_id, 'PUBLIC')
         WITH c, item
-        MATCH (d:LegalDocument {doc_id: item.doc_id})
+        MATCH (d:Document {doc_id: item.doc_id})
         MERGE (d)-[:CONTAINS]->(c)
         """
-        for i in range(0, len(clauses), batch_size):
-            chunk = clauses[i:i + batch_size]
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
             with self.driver.session() as session:
-                session.run(query, batch=chunk, default_org_id=org_id)
-            logger.info(f"Synced {len(chunk)} StatuteClause nodes to Neo4j.")
+                session.run(query, batch=batch, default_org_id=org_id)
+            logger.info(f"Synced {len(batch)} Chunk nodes to Neo4j.")
 
     def sync_faq_cases(self, cases: List[Dict[str, Any]], org_id: str = "PUBLIC", batch_size: int = 200):
         """Batch upsert :FAQCase nodes with tenant org_id."""
@@ -175,8 +177,8 @@ class Neo4jRepository:
         for rel_type, edge_list in rel_groups.items():
             query = f"""
             UNWIND $batch AS e
-            MATCH (src {{clause_id: e.source_id}})
-            MATCH (tgt {{clause_id: e.target_id}})
+            MATCH (src {{chunk_id: e.source_id}})
+            MATCH (tgt {{chunk_id: e.target_id}})
             MERGE (src)-[r:{rel_type}]->(tgt)
             SET r += coalesce(e.props, {{}})
             """
@@ -185,6 +187,27 @@ class Neo4jRepository:
                 with self.driver.session() as session:
                     session.run(query, batch=chunk)
             logger.info(f"Synced {len(edge_list)} relationships of type ':{rel_type}' to Neo4j.")
+
+    def delete_corpus(self, org_id: str, batch_size: int = 5000) -> int:
+        """Detach-delete one tenant's seeded corpus nodes (documents, chunks, FAQ cases) before a
+        re-ingest, including nodes under the pre-rename labels (LegalDocument / StatuteClause).
+        Tenant-uploaded TenantDocument/TenantChunk nodes are not touched."""
+        self.connect()
+        query = """
+        MATCH (n) WHERE (n:Document OR n:Chunk OR n:FAQCase OR n:LegalDocument OR n:StatuteClause)
+          AND n.org_id = $org_id
+        WITH n LIMIT $limit
+        DETACH DELETE n
+        RETURN count(*) AS n
+        """
+        removed = 0
+        with self.driver.session() as session:
+            while True:
+                n = session.run(query, org_id=org_id, limit=batch_size).single()["n"]
+                removed += n
+                if n < batch_size:
+                    break
+        return removed
 
     def clear_derived_relationships(self, rel_types: List[str], org_id: str = "PUBLIC", batch_size: int = 10000) -> int:
         """
@@ -225,24 +248,24 @@ class Neo4jRepository:
             session.run("MERGE (m:_GraphMeta {id: 'corpus'}) SET m[$key] = $value", key=key, value=value)
 
     def link_case_to_documents(self, links: List[Dict[str, str]]):
-        """Links :FAQCase to the :LegalDocument it is answered under via :REFERENCES_DOCUMENT."""
+        """Links :FAQCase to the :Document it is answered under via :REFERENCES_DOCUMENT."""
         self.connect()
         query = """
         UNWIND $batch AS link
         MATCH (f:FAQCase {case_id: link.case_id})
-        MATCH (d:LegalDocument {doc_id: link.doc_id})
+        MATCH (d:Document {doc_id: link.doc_id})
         MERGE (f)-[:REFERENCES_DOCUMENT]->(d)
         """
         with self.driver.session() as session:
             session.run(query, batch=links)
 
     def link_case_to_laws(self, links: List[Dict[str, str]]):
-        """Links :FAQCase to :StatuteClause via :RELATES_TO_LAW."""
+        """Links :FAQCase to :Chunk via :RELATES_TO_LAW."""
         self.connect()
         query = """
         UNWIND $batch AS link
         MATCH (f:FAQCase {case_id: link.case_id})
-        MATCH (c:StatuteClause {clause_id: link.clause_id})
+        MATCH (c:Chunk {chunk_id: link.chunk_id})
         MERGE (f)-[:RELATES_TO_LAW]->(c)
         """
         with self.driver.session() as session:
@@ -252,7 +275,7 @@ class Neo4jRepository:
     # Graph Traversal Queries (For CRAG Engine)
     # ==========================================
 
-    def get_adjacent_sections(self, clause_id: str, direction: str = "both", org_id: str = "DGA") -> List[Dict[str, Any]]:
+    def get_adjacent_sections(self, chunk_id: str, direction: str = "both", org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Traverse sequential adjacent sections (ADJACENT_SECTION) with tenant filtering."""
         self.connect()
         if direction == "next":
@@ -263,27 +286,52 @@ class Neo4jRepository:
             rel_pattern = "-[:ADJACENT_SECTION]-"
 
         query = f"""
-        MATCH (c:StatuteClause {{clause_id: $cid}}){rel_pattern}(adj:StatuteClause)
+        MATCH (c:Chunk {{chunk_id: $cid}}){rel_pattern}(adj:Chunk)
         WHERE coalesce(adj.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        RETURN DISTINCT adj.clause_id AS clause_id, adj.entry AS entry, adj.section_num AS section_num
+        RETURN DISTINCT adj.chunk_id AS chunk_id, adj.entry AS entry, adj.section_num AS section_num
         """
         with self.driver.session() as session:
-            result = session.run(query, cid=clause_id, org_id=org_id)
+            result = session.run(query, cid=chunk_id, org_id=org_id)
             return [dict(r) for r in result]
 
-    def get_cited_clauses(self, clause_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
+    def get_cited_clauses(self, chunk_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fetch all clauses cited by, or empowering, this clause (CITES_CLAUSE | EMPOWERED_BY) with tenant filtering."""
         self.connect()
         query = """
-        MATCH (c:StatuteClause {clause_id: $cid})-[r:CITES_CLAUSE|EMPOWERED_BY]->(cited:StatuteClause)
+        MATCH (c:Chunk {chunk_id: $cid})-[r:CITES_CLAUSE|EMPOWERED_BY]->(cited:Chunk)
         WHERE coalesce(cited.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        RETURN cited.clause_id AS clause_id, cited.entry AS entry, r.quote AS quote
+        RETURN cited.chunk_id AS chunk_id, cited.entry AS entry, r.quote AS quote
         """
         with self.driver.session() as session:
-            result = session.run(query, cid=clause_id, org_id=org_id)
+            result = session.run(query, cid=chunk_id, org_id=org_id)
             return [dict(r) for r in result]
 
-    def get_subordinate_laws(self, clause_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
+    def get_cited_clauses_batch(self, chunk_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
+        """get_cited_clauses for many clauses in one round trip: [{source_id, target_id, rel_type}]."""
+        self.connect()
+        query = """
+        UNWIND $cids AS cid
+        MATCH (c:Chunk {chunk_id: cid})-[r:CITES_CLAUSE|EMPOWERED_BY]->(cited:Chunk)
+        WHERE coalesce(cited.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        RETURN cid AS source_id, cited.chunk_id AS target_id, type(r) AS rel_type
+        ORDER BY source_id, CASE type(r) WHEN 'EMPOWERED_BY' THEN 0 ELSE 1 END
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(query, cids=list(chunk_ids), org_id=org_id)]
+
+    def get_tenant_chunk_citations_batch(self, chunk_ids: List[str], org_id: str) -> List[Dict[str, Any]]:
+        """Statute clauses cited by several tenant chunks: [{source_id, target_id, rel_type}]."""
+        self.connect()
+        query = """
+        UNWIND $cids AS cid
+        MATCH (t:TenantChunk {chunk_id: cid})-[r:CITES_CLAUSE]->(c:Chunk)
+        WHERE t.org_id = $org_id AND coalesce(c.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        RETURN cid AS source_id, c.chunk_id AS target_id, 'CITES_CLAUSE' AS rel_type
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(query, cids=list(chunk_ids), org_id=org_id)]
+
+    def get_subordinate_laws(self, chunk_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """
         Traverses from an Act section to subordinate Ministerial Regulations/Rules
         that cite or derive from this section with tenant filtering.
@@ -292,37 +340,37 @@ class Neo4jRepository:
         # Subordinate = a clause in *another* document that derives authority from (EMPOWERED_BY)
         # or cites (CITES_CLAUSE) this section; same-document citations are not subordinates.
         query = """
-        MATCH (act:StatuteClause {clause_id: $cid})<-[r:EMPOWERED_BY|CITES_CLAUSE]-(reg:StatuteClause)
+        MATCH (act:Chunk {chunk_id: $cid})<-[r:EMPOWERED_BY|CITES_CLAUSE]-(reg:Chunk)
         WHERE reg.doc_id <> act.doc_id
           AND coalesce(reg.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        MATCH (reg)<-[:CONTAINS]-(doc:LegalDocument)
+        MATCH (reg)<-[:CONTAINS]-(doc:Document)
         WHERE coalesce(doc.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
         WITH reg, doc, collect(DISTINCT type(r)) AS rels
-        RETURN reg.clause_id AS clause_id, reg.entry AS entry, doc.title AS document_title,
+        RETURN reg.chunk_id AS chunk_id, reg.entry AS entry, doc.title AS document_title,
                CASE WHEN 'EMPOWERED_BY' IN rels THEN 'EMPOWERED_BY' ELSE 'CITES_CLAUSE' END AS relation
         ORDER BY relation DESC, document_title
         """
         with self.driver.session() as session:
-            result = session.run(query, cid=clause_id, org_id=org_id)
+            result = session.run(query, cid=chunk_id, org_id=org_id)
             return [dict(r) for r in result]
 
-    def get_related_cases(self, clause_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
+    def get_related_cases(self, chunk_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fetch FAQ cases interpreting or relating to this statutory clause with tenant filtering."""
         self.connect()
         query = """
-        MATCH (f:FAQCase)-[:RELATES_TO_LAW]->(c:StatuteClause {clause_id: $cid})
+        MATCH (f:FAQCase)-[:RELATES_TO_LAW]->(c:Chunk {chunk_id: $cid})
         WHERE coalesce(f.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
         RETURN f.case_id AS case_id, f.question_preview AS question
         """
         with self.driver.session() as session:
-            result = session.run(query, cid=clause_id, org_id=org_id)
+            result = session.run(query, cid=chunk_id, org_id=org_id)
             return [dict(r) for r in result]
 
     def get_document_clusters(self, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fetch high-level document clusters with clause counts with tenant filtering."""
         self.connect()
         query = """
-        MATCH (d:LegalDocument)-[:CONTAINS]->(c:StatuteClause)
+        MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
         WHERE coalesce(d.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
           AND coalesce(c.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
         RETURN d.doc_id AS cluster_id, d.title AS title, count(c) AS clause_count
@@ -339,16 +387,16 @@ class Neo4jRepository:
     # (never PUBLIC), so a CITES_CLAUSE edge into a shared statute leaks nothing across tenants.
 
     def resolve_statute_refs(self, refs: List[Dict[str, Any]]) -> Dict[Tuple[str, str, int], List[str]]:
-        """{(doc_title, kind, num): [clause_id, ...]} for ('section'|'clause') references by document title."""
+        """{(doc_title, kind, num): [chunk_id, ...]} for ('section'|'clause') references by document title."""
         if not refs:
             return {}
         self.connect()
         query = """
         UNWIND $refs AS ref
-        MATCH (d:LegalDocument {title: ref.title})-[:CONTAINS]->(c:StatuteClause)
+        MATCH (d:Document {title: ref.title})-[:CONTAINS]->(c:Chunk)
         WHERE (ref.kind = 'section' AND c.section_num = ref.num)
            OR (ref.kind = 'clause' AND c.clause_num = ref.num)
-        RETURN ref.title AS title, ref.kind AS kind, ref.num AS num, collect(c.clause_id) AS ids
+        RETURN ref.title AS title, ref.kind AS kind, ref.num AS num, collect(c.chunk_id) AS ids
         """
         with self.driver.session() as session:
             result = session.run(query, refs=refs)
@@ -362,7 +410,7 @@ class Neo4jRepository:
         citations: List[Dict[str, Any]],
     ) -> int:
         """Drop any previous version, then write TenantDocument -CONTAINS-> TenantChunk -NEXT_CHUNK->
-        and TenantChunk -CITES_CLAUSE-> StatuteClause. Returns the number of citation edges."""
+        and TenantChunk -CITES_CLAUSE-> Chunk. Returns the number of citation edges."""
         self.connect()
         with self.driver.session() as session:
             return session.execute_write(self._replace_tenant_document_tx, org_id, doc, chunks, citations)
@@ -407,7 +455,7 @@ class Neo4jRepository:
             """
             UNWIND $cites AS ct
             MATCH (t:TenantChunk {chunk_id: ct.chunk_id}) WHERE t.org_id = $org_id
-            MATCH (c:StatuteClause {clause_id: ct.clause_id})
+            MATCH (c:Chunk {chunk_id: ct.chunk_id})
             MERGE (t)-[r:CITES_CLAUSE]->(c)
             SET r.quote = ct.quote
             RETURN count(r) AS n
@@ -432,9 +480,9 @@ class Neo4jRepository:
         """Statute clauses cited by a tenant chunk, limited to clauses this tenant may see."""
         self.connect()
         query = """
-        MATCH (t:TenantChunk {chunk_id: $cid})-[r:CITES_CLAUSE]->(c:StatuteClause)
+        MATCH (t:TenantChunk {chunk_id: $cid})-[r:CITES_CLAUSE]->(c:Chunk)
         WHERE t.org_id = $org_id AND coalesce(c.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
-        RETURN c.clause_id AS clause_id, c.entry AS entry, r.quote AS quote
+        RETURN c.chunk_id AS chunk_id, c.entry AS entry, r.quote AS quote
         """
         with self.driver.session() as session:
             result = session.run(query, cid=chunk_id, org_id=org_id)
@@ -445,10 +493,10 @@ class Neo4jRepository:
         self.connect()
         query = """
         CALL () {
-            MATCH (d:LegalDocument) RETURN count(d) AS docs
+            MATCH (d:Document) RETURN count(d) AS docs
         }
         CALL () {
-            MATCH (c:StatuteClause) RETURN count(c) AS clauses
+            MATCH (c:Chunk) RETURN count(c) AS chunks
         }
         CALL () {
             MATCH (f:FAQCase) RETURN count(f) AS cases
@@ -456,14 +504,14 @@ class Neo4jRepository:
         CALL () {
             MATCH ()-[r]->() RETURN count(r) AS rels
         }
-        RETURN docs, clauses, cases, rels
+        RETURN docs, chunks, cases, rels
         """
         with self.driver.session() as session:
             rec = session.run(query).single()
             if rec:
                 return {
                     "documents": rec["docs"],
-                    "clauses": rec["clauses"],
+                    "chunks": rec["chunks"],
                     "cases": rec["cases"],
                     "relationships": rec["rels"],
                 }

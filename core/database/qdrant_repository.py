@@ -2,14 +2,13 @@
 """
 core/database/qdrant_repository.py
 
-Qdrant Vector Database Repository for Thai Procurement LegalGraphRAG.
+Qdrant Vector Database Repository for ProcurementQA Agent.
 Provides 1024-dim dense vector search (BGE-M3) and native sparse vector search (BM25)
 with server-side Reciprocal Rank Fusion (RRF) and metadata payload filtering.
 """
 
 import os
 import re
-import math
 import hashlib
 import logging
 from collections import Counter
@@ -25,53 +24,64 @@ logger = logging.getLogger("qdrant_repository")
 
 class ThaiSparseVectorizer:
     """
-    Computes sparse vector representations for Thai text using PyThaiNLP.
-    Produces deterministic (indices, values) pairs compatible with Qdrant Sparse Vectors.
+    BM25 as Qdrant sparse vectors, with the same Thai tokenization as the in-memory index.
+
+    Qdrant scores a sparse query as  sum_t  q(t) * d(t) * idf(t)  when the collection uses
+    Modifier.IDF, with idf(t) = ln(1 + (N - n_t + 0.5) / (n_t + 0.5)) computed by Qdrant over the
+    collection. With
+        d(t) = tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(doc) / avg_len))      (document side)
+        q(t) = 1 for every distinct query term                                    (query side)
+    that sum is exactly Okapi BM25. avg_len is the corpus average in tokens (measured by the
+    migration; BM25_AVG_DOC_LEN otherwise).
     """
 
-    def __init__(self, max_vocab_hash: int = 1000000):
+    K1 = 1.2
+    B = 0.75
+    DEFAULT_AVG_DOC_LEN = 170.0  # outputs/corpus average (tokens per chunk, header included)
+
+    def __init__(self, max_vocab_hash: int = 1000000, avg_doc_len: Optional[float] = None):
         self.max_vocab_hash = max_vocab_hash
-        try:
-            from pythainlp.tokenize import word_tokenize
-            self._tokenize = lambda t: word_tokenize(t, engine="newmm")
-        except ImportError:
-            self._tokenize = lambda t: re.findall(r"\w+", t)
+        self.avg_doc_len = float(avg_doc_len or os.getenv("BM25_AVG_DOC_LEN", self.DEFAULT_AVG_DOC_LEN))
 
     def _token_to_idx(self, token: str) -> int:
         """Deterministic hash to a positive 32-bit integer index."""
         h = int(hashlib.md5(token.encode("utf-8")).hexdigest()[:8], 16)
         return (h % self.max_vocab_hash) + 1
 
-    def vectorize(self, text: str) -> Tuple[List[int], List[float]]:
-        """Converts Thai text into sparse index and TF-IDF weighted values."""
-        if not text or not str(text).strip():
-            return [], []
-        
-        tokens = [t.strip() for t in self._tokenize(str(text)) if len(t.strip()) > 1]
-        if not tokens:
-            return [], []
+    @staticmethod
+    def tokens(text: str) -> List[str]:
+        from core.retrieval.tokenize import thai_tokens
+        return thai_tokens(text)
 
-        counts = Counter(tokens)
-        total_tokens = len(tokens)
-
-        # Term frequency with sub-linear scaling (1 + log(tf))
-        idx_val_map: Dict[int, float] = {}
-        for token, count in counts.items():
+    def _sparse(self, weights: Dict[str, float]) -> Tuple[List[int], List[float]]:
+        by_idx: Dict[int, float] = {}
+        for token, w in weights.items():
             idx = self._token_to_idx(token)
-            tf = 1.0 + math.log(count) if count > 0 else 0.0
-            idx_val_map[idx] = idx_val_map.get(idx, 0.0) + tf
+            by_idx[idx] = by_idx.get(idx, 0.0) + w
+        indices = sorted(by_idx)  # Qdrant requires ascending indices
+        return indices, [round(by_idx[i], 5) for i in indices]
 
-        # Sort indices ascending as required by sparse vector specifications
-        sorted_indices = sorted(idx_val_map.keys())
-        values = [round(idx_val_map[idx], 4) for idx in sorted_indices]
-        return sorted_indices, values
+    def vectorize_document(self, text: str) -> Tuple[List[int], List[float]]:
+        """BM25 term weights (saturated tf, length-normalised) for an indexed text."""
+        toks = self.tokens(text)
+        if not toks:
+            return [], []
+        norm = self.K1 * (1 - self.B + self.B * len(toks) / self.avg_doc_len)
+        weights = {t: tf * (self.K1 + 1) / (tf + norm) for t, tf in Counter(toks).items()}
+        return self._sparse(weights)
+
+    def vectorize_query(self, text: str) -> Tuple[List[int], List[float]]:
+        """Weight 1 per distinct query term; Qdrant multiplies in the IDF."""
+        return self._sparse({t: 1.0 for t in set(self.tokens(text))})
 
 
 class QdrantRepository:
     """Manages Qdrant collections, vector indexing, and hybrid searches."""
 
-    STATUTES_COLLECTION = "procurement_statutes"
-    CASES_COLLECTION = "procurement_cases"
+    CHUNKS_COLLECTION = "procurement_chunks"
+    CASES_COLLECTION = "procurement_faq"
+    # Collections from before the chunk/FAQ rename; dropped by drop_legacy_collections()
+    LEGACY_COLLECTIONS = ("procurement_statutes", "procurement_cases")
     TENANT_DOCS_COLLECTION = "tenant_documents"
 
     def __init__(
@@ -102,10 +112,10 @@ class QdrantRepository:
         """Idempotently create collections and payload indexes."""
         existing = [c.name for c in self.client.get_collections().collections]
 
-        # 1. Procurement Statutes Collection
-        if self.STATUTES_COLLECTION not in existing:
+        # 1. Corpus chunks
+        if self.CHUNKS_COLLECTION not in existing:
             self.client.create_collection(
-                collection_name=self.STATUTES_COLLECTION,
+                collection_name=self.CHUNKS_COLLECTION,
                 vectors_config={
                     "dense_bge_m3": models.VectorParams(
                         size=self.dense_dim,
@@ -114,14 +124,15 @@ class QdrantRepository:
                     )
                 },
                 sparse_vectors_config={
+                    # Qdrant applies IDF at query time; ThaiSparseVectorizer supplies the BM25 tf and length weights
                     "sparse_bm25": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
+                        index=models.SparseIndexParams(on_disk=False), modifier=models.Modifier.IDF
                     )
                 },
             )
-            logger.info(f"Created Qdrant collection '{self.STATUTES_COLLECTION}'.")
+            logger.info(f"Created Qdrant collection '{self.CHUNKS_COLLECTION}'.")
 
-        # 2. Procurement Cases Collection
+        # 2. FAQ pairs
         if self.CASES_COLLECTION not in existing:
             self.client.create_collection(
                 collection_name=self.CASES_COLLECTION,
@@ -134,7 +145,7 @@ class QdrantRepository:
                 },
                 sparse_vectors_config={
                     "sparse_bm25": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
+                        index=models.SparseIndexParams(on_disk=False), modifier=models.Modifier.IDF
                     )
                 },
             )
@@ -153,7 +164,7 @@ class QdrantRepository:
                 },
                 sparse_vectors_config={
                     "sparse_bm25": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
+                        index=models.SparseIndexParams(on_disk=False), modifier=models.Modifier.IDF
                     )
                 },
             )
@@ -164,19 +175,19 @@ class QdrantRepository:
 
     def _ensure_payload_indexes(self):
         """Create payload indexes on frequently filtered fields, including tenant org_id."""
-        fields_statutes = [
+        fields_chunks = [
             ("org_id", models.PayloadSchemaType.KEYWORD),
             ("doc_id", models.PayloadSchemaType.KEYWORD),
             ("entry", models.PayloadSchemaType.KEYWORD),
             ("section_num", models.PayloadSchemaType.INTEGER),
             ("clause_num", models.PayloadSchemaType.INTEGER),
             ("chapter_num", models.PayloadSchemaType.INTEGER),
-            ("topics", models.PayloadSchemaType.KEYWORD),
+            ("kind", models.PayloadSchemaType.KEYWORD),
         ]
-        for f_name, f_type in fields_statutes:
+        for f_name, f_type in fields_chunks:
             try:
                 self.client.create_payload_index(
-                    collection_name=self.STATUTES_COLLECTION,
+                    collection_name=self.CHUNKS_COLLECTION,
                     field_name=f_name,
                     field_schema=f_type,
                 )
@@ -208,21 +219,19 @@ class QdrantRepository:
             except Exception:
                 pass
 
-    def upsert_statute_points(
+    def upsert_chunk_points(
         self,
-        clauses: List[Dict[str, Any]],
+        chunks: List[Dict[str, Any]],
         dense_embeddings: List[List[float]],
         org_id: str = "PUBLIC",
         batch_size: int = 100,
     ):
-        """Upsert statutory clause points with both dense and sparse vectors and org_id payload."""
+        """Upsert chunk points with both dense and sparse vectors and org_id payload."""
         points = []
-        for clause, dense_emb in zip(clauses, dense_embeddings):
-            cid = str(clause["clause_id"])
-            text_content = str(clause.get("content_thai", ""))
-            sparse_indices, sparse_values = self.vectorizer.vectorize(
-                f"{clause.get('entry', '')} {text_content}"
-            )
+        for clause, dense_emb in zip(chunks, dense_embeddings):
+            cid = str(clause["chunk_id"])
+            text_content = str(clause.get("content", ""))
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(text_content)
 
             # Convert string ID to a deterministic UUID string for Qdrant compatibility if needed
             point_id = hashlib.md5(cid.encode("utf-8")).hexdigest()
@@ -236,14 +245,14 @@ class QdrantRepository:
                 )
 
             payload = {
-                "clause_id": cid,
+                "chunk_id": cid,
                 "org_id": str(clause.get("org_id", org_id)),
                 "doc_id": str(clause.get("doc_id", "")),
                 "entry": str(clause.get("entry", "")),
                 "section_num": clause.get("section_num"),
                 "clause_num": clause.get("clause_num"),
                 "chapter_num": clause.get("chapter_num"),
-                "topics": clause.get("topics", []),
+                "kind": clause.get("kind"),
                 "preview_text": text_content[:300],
             }
 
@@ -253,8 +262,8 @@ class QdrantRepository:
 
         for i in range(0, len(points), batch_size):
             chunk = points[i:i + batch_size]
-            self.client.upsert(collection_name=self.STATUTES_COLLECTION, points=chunk)
-            logger.info(f"Upserted {len(chunk)} statute points to Qdrant ({i + len(chunk)}/{len(points)}).")
+            self.client.upsert(collection_name=self.CHUNKS_COLLECTION, points=chunk)
+            logger.info(f"Upserted {len(chunk)} chunk points to Qdrant ({i + len(chunk)}/{len(points)}).")
 
     def upsert_case_points(
         self,
@@ -270,7 +279,7 @@ class QdrantRepository:
             q_text = str(case.get("question", ""))
             a_text = str(case.get("answer", ""))
             combined = f"{q_text} {a_text}"
-            sparse_indices, sparse_values = self.vectorizer.vectorize(combined)
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(combined)
 
             point_id = hashlib.md5(cs_id.encode("utf-8")).hexdigest()
 
@@ -298,7 +307,7 @@ class QdrantRepository:
             self.client.upsert(collection_name=self.CASES_COLLECTION, points=chunk)
             logger.info(f"Upserted {len(chunk)} case points to Qdrant.")
 
-    def hybrid_search_statutes(
+    def hybrid_search_chunks(
         self,
         query_text: str,
         query_dense: List[float],
@@ -306,6 +315,8 @@ class QdrantRepository:
         doc_filter: Optional[str] = None,
         section_filter: Optional[int] = None,
         org_id: str = "DGA",
+        include_kinds: Optional[List[str]] = None,
+        exclude_kinds: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executes server-side Reciprocal Rank Fusion (RRF) between dense and sparse vectors in Qdrant,
@@ -331,15 +342,18 @@ class QdrantRepository:
                     key="section_num", match=models.MatchValue(value=section_filter)
                 )
             )
-        query_filter = models.Filter(must=must_conditions)
+        if include_kinds:
+            must_conditions.append(models.FieldCondition(key="kind", match=models.MatchAny(any=list(include_kinds))))
+        must_not = [models.FieldCondition(key="kind", match=models.MatchAny(any=list(exclude_kinds)))] if exclude_kinds else None
+        query_filter = models.Filter(must=must_conditions, must_not=must_not)
 
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
 
         # Attempt server-side fusion if sparse query has terms
         if sparse_indices and len(sparse_indices) > 0:
             try:
                 response = self.client.query_points(
-                    collection_name=self.STATUTES_COLLECTION,
+                    collection_name=self.CHUNKS_COLLECTION,
                     prefetch=[
                         models.Prefetch(
                             query=query_dense,
@@ -363,7 +377,7 @@ class QdrantRepository:
                 results = []
                 for pt in response.points:
                     results.append({
-                        "clause_id": pt.payload.get("clause_id"),
+                        "chunk_id": pt.payload.get("chunk_id"),
                         "score": pt.score,
                         "payload": pt.payload,
                     })
@@ -373,7 +387,7 @@ class QdrantRepository:
 
         # Fallback to pure dense search (client.search() was removed in qdrant-client 1.16)
         response = self.client.query_points(
-            collection_name=self.STATUTES_COLLECTION,
+            collection_name=self.CHUNKS_COLLECTION,
             query=query_dense,
             using="dense_bge_m3",
             query_filter=query_filter,
@@ -382,7 +396,7 @@ class QdrantRepository:
         )
         return [
             {
-                "clause_id": pt.payload.get("clause_id"),
+                "chunk_id": pt.payload.get("chunk_id"),
                 "score": pt.score,
                 "payload": pt.payload,
             }
@@ -403,7 +417,7 @@ class QdrantRepository:
                 models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id)),
             ]
         )
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
         if sparse_indices:
             try:
                 response = self.client.query_points(
@@ -470,7 +484,7 @@ class QdrantRepository:
         self.delete_tenant_document(org_id, doc_id)
         points = []
         for chunk, dense_emb in zip(chunks, dense_embeddings):
-            sparse_indices, sparse_values = self.vectorizer.vectorize(f"{title} {chunk['content']}")
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(f"{title} {chunk['content']}")
             vector_dict = {"dense_bge_m3": [float(x) for x in dense_emb]}
             if sparse_indices:
                 vector_dict["sparse_bm25"] = models.SparseVector(indices=sparse_indices, values=sparse_values)
@@ -489,6 +503,32 @@ class QdrantRepository:
         for i in range(0, len(points), batch_size):
             self.client.upsert(collection_name=self.TENANT_DOCS_COLLECTION, points=points[i:i + batch_size])
 
+    def tenant_collection_has_idf(self) -> bool:
+        info = self.client.get_collection(self.TENANT_DOCS_COLLECTION)
+        sparse = info.config.params.sparse_vectors or {}
+        return getattr(sparse.get("sparse_bm25"), "modifier", None) == models.Modifier.IDF
+
+    def recreate_tenant_collection(self) -> None:
+        """Drop and recreate the tenant collection with the current configuration (all tenants'
+        points are removed; scripts/rebuild_tenant_index.py re-indexes them from PostgreSQL)."""
+        existing = {c.name for c in self.client.get_collections().collections}
+        if self.TENANT_DOCS_COLLECTION in existing:
+            self.client.delete_collection(self.TENANT_DOCS_COLLECTION)
+        self.init_collections()
+
+    def drop_legacy_collections(self) -> None:
+        existing = {c.name for c in self.client.get_collections().collections}
+        for name in self.LEGACY_COLLECTIONS:
+            if name in existing:
+                self.client.delete_collection(name)
+                logger.info("Dropped legacy Qdrant collection '%s'.", name)
+
+    def delete_corpus(self, org_id: str) -> None:
+        """Remove one tenant's seeded chunk and FAQ points before a re-ingest."""
+        own = models.Filter(must=[models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id))])
+        for collection in (self.CHUNKS_COLLECTION, self.CASES_COLLECTION):
+            self.client.delete(collection_name=collection, points_selector=models.FilterSelector(filter=own), wait=True)
+
     def delete_tenant_document(self, org_id: str, doc_id: str):
         self.client.delete(
             collection_name=self.TENANT_DOCS_COLLECTION,
@@ -505,7 +545,7 @@ class QdrantRepository:
     ) -> List[Dict[str, Any]]:
         """RRF over dense + sparse vectors, restricted to the tenant's own documents."""
         tenant_filter = self._own_tenant_filter(org_id)
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
         prefetch = [models.Prefetch(query=query_dense, using="dense_bge_m3", limit=max(30, top_k * 3), filter=tenant_filter)]
         if sparse_indices:
             prefetch.append(models.Prefetch(
@@ -526,14 +566,14 @@ class QdrantRepository:
     def count_stats(self) -> Dict[str, int]:
         """Count total points in each collection."""
         try:
-            statutes_cnt = self.client.count(collection_name=self.STATUTES_COLLECTION).count
+            chunk_cnt = self.client.count(collection_name=self.CHUNKS_COLLECTION).count
         except Exception:
-            statutes_cnt = 0
+            chunk_cnt = 0
         try:
             cases_cnt = self.client.count(collection_name=self.CASES_COLLECTION).count
         except Exception:
             cases_cnt = 0
         return {
-            "statutes_points": statutes_cnt,
+            "chunk_points": chunk_cnt,
             "cases_points": cases_cnt,
         }

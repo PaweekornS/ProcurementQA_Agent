@@ -1,8 +1,8 @@
-# Technical Architecture Report: Pure Agentic LegalGraphRAG
+# Technical Architecture Report: Pure Agentic ProcurementQAPipeline
 
 ## 1. Overview & Evolution
 
-**ProcurementQA_Agent (LegalGraphRAG)** is a state-of-the-art legal reasoning and statutory retrieval system tailored for Thai Public Procurement Law (พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 and Ministry of Finance Regulations).
+**ProcurementQA_Agent (ProcurementQAPipeline)** is a state-of-the-art legal reasoning and statutory retrieval system tailored for Thai Public Procurement Law (พระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 and Ministry of Finance Regulations).
 
 The system has evolved from a linear Corrective RAG (CRAG) pipeline into a **Pure Agentic RAG workflow powered by LangGraph**. It features iterative self-reflection, multi-issue query decomposition, reciprocal rank fusion hybrid search, knowledge graph traversal, and verbatim evidence extraction.
 
@@ -24,7 +24,7 @@ flowchart TD
     REFL -- "Gaps found & retries < max_retries" --> REF["Query Refiner\n(refiner.py)\nSharp re-querying for missing aspects"]
     REF --> RET
     
-    REFL -- "Complete or max retries reached" --> SYN["Legal Synthesizer\n(synthesizer.py + judge_crime.py)\nDrafts direct_answer & issues_breakdown"]
+    REFL -- "Complete or max retries reached" --> SYN["Legal Synthesizer\n(synthesizer.py + select_applicable_laws.py)\nDrafts direct_answer & issues_breakdown"]
     
     SYN --> GUARD["Grounding Guardrail\n(guardrail.py)\nValidates against hallucination & extracts decisive quotes"]
     
@@ -38,7 +38,7 @@ flowchart TD
 ### 1) Issue Decomposer (`core/agent/decomposer.py`)
 Decomposes complex, multi-faceted inquiries into atomic sub-questions (`Q1`, `Q2`, etc.) to prevent dominant legal topics from overshadowing secondary topics during retrieval.
 
-### 2) Hybrid Multi-Aspect Retrieval (`core/graph_construct/feature_graph.py`)
+### 2) Hybrid Multi-Aspect Retrieval (`core/retrieval/search.py`)
 Combines:
 - **Dense Semantic Embeddings:** Tokenmind BGE-M3 (1024-dim)
 - **Sparse Lexical Search:** Tokenized Thai BM25 (PyThaiNLP newmm)

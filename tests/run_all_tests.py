@@ -4,7 +4,7 @@
 tests/run_all_tests.py
 
 Unified Container Verification & CI/CD Test Runner:
-Executes the comprehensive suite of LegalGraphRAG tests:
+Executes the comprehensive suite of ProcurementQA Agent tests:
   1. Healthcheck & Liveness Probe
   2. All Retrieval Strategies (Exact, Hybrid, Graph)
   3. Multi-Tenant Data Isolation & Tenant Resolution
@@ -93,7 +93,7 @@ def run_suites(skip_qa: bool = False) -> bool:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run complete test suite for LegalGraphRAG container")
+    parser = argparse.ArgumentParser(description="Run complete test suite for ProcurementQA Agent container")
     parser.add_argument("--skip-qa", action="store_true", help="Skip generative LLM QA test for offline CI/CD")
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 """
 api/mcp/server.py
 
-FastMCP Server Adapter for LegalGraphRAG Thai Procurement Law.
+FastMCP Server Adapter for ProcurementQA Agent.
 Exposes specialized tools, resources, and prompt templates for MCP clients
 (e.g., Claude Desktop, Cursor, Super-Orchestrator MCP clients).
 """
@@ -37,7 +37,7 @@ def _transport_security() -> TransportSecuritySettings:
 
 
 mcp = FastMCP(
-    "legalgraphrag-procurement",
+    "procurement-qa-agent",
     instructions=(
         "Thai public procurement law service (พ.ร.บ.การจัดซื้อจัดจ้างฯ 2560, ระเบียบกระทรวงการคลังฯ, "
         "กฎกระทรวง, หนังสือเวียน). Use ask_procurement_law for full legal answers, "
@@ -227,15 +227,15 @@ async def ask_procurement_law(
 if _expose_internal:
     @mcp.tool()
     async def healthcheck() -> Dict[str, Any]:
-        """Report whether the LegalGraphRAG pipeline and services are loaded and ready."""
+        """Report whether the ProcurementQA Agent pipeline and services are loaded and ready."""
         try:
             service = await _run(get_service)
             rag = service.rag
             return {
                 "ready": True,
-                "graph_db_path": rag.config.graph.graph_db_path,
+                "store": "tri-store" if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes") else "in-memory",
                 "model": rag.config.model.model_name,
-                "indexed_sections_count": len(service._section_index)
+                "indexed_chunks": service.get_catalog_resource()["total_chunks"]
             }
         except Exception as e:
             return {"ready": False, "error": _error_ref(e)}

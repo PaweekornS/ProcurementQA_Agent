@@ -17,54 +17,36 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
+from core.pipeline import ProcurementQAPipeline, PipelineConfig
 from evaluation.evaluate_rag_triad import compute_retrieval_metrics
 
 
+DATASET_ALIASES = {
+    "statute": "statute_qa.json",
+    "statute_sample": "statute_qa_sample.json",
+    "general": "general_docs_qa.json",
+}
+
+
 def sanitize_dataset_name(dataset_input: str) -> str:
-    """
-    Extracts a clean dataset name by stripping folder paths (e.g. 'datasets/'),
-    'crime_data_' prefix, and '_small.json' / '.json' extensions.
-    Examples:
-      '.\\datasets\\crime_data_THAI_small.json' -> 'THAI'
-      'datasets/crime_data_thai_procurement_small.json' -> 'thai_procurement'
-      'crime_data_THAI_small.json' -> 'THAI'
-      'THAI' -> 'THAI'
-    """
+    """Output-folder name for a dataset: 'datasets/statute_qa.json' -> 'statute_qa', 'general' -> 'general_docs_qa'."""
     if not dataset_input:
-        return "THAI"
-    base = os.path.basename(dataset_input.replace("\\", "/").rstrip("/"))
-    clean = re.sub(r"^crime_data_", "", base, flags=re.IGNORECASE)
-    clean = re.sub(r"_small\.json$", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\.json$", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"_small$", "", clean, flags=re.IGNORECASE)
-    return clean or "THAI"
+        return "statute_qa"
+    base = DATASET_ALIASES.get(dataset_input, os.path.basename(dataset_input.replace("\\", "/").rstrip("/")))
+    return re.sub(r"\.json$", "", base, flags=re.IGNORECASE) or "statute_qa"
 
 
 def load_test_cases(datasets: str, datasets_path: str = "./datasets") -> List[Dict[str, Any]]:
-    clean_name = sanitize_dataset_name(datasets)
-    if os.path.exists(datasets) and os.path.isfile(datasets):
+    """A dataset path, a file name under datasets_path, or an alias (statute, statute_sample, general)."""
+    if os.path.isfile(datasets):
         case_file = datasets
     else:
-        candidates = [
-            os.path.join(datasets_path, f"crime_data_{clean_name}_small.json"),
-            os.path.join(datasets_path, f"crime_data_{datasets}_small.json"),
-            os.path.join(datasets_path, f"{clean_name}.json"),
-            os.path.join(datasets_path, datasets),
-            os.path.join(datasets_path, f"crime_data_{clean_name}.json"),
-        ]
-        case_file = None
-        for cand in candidates:
-            if os.path.exists(cand) and os.path.isfile(cand):
-                case_file = cand
-                break
-        if not case_file:
-            raise FileNotFoundError(f"Test dataset not found for '{datasets}'. Checked: {candidates}")
-    
+        name = DATASET_ALIASES.get(datasets, datasets if datasets.endswith(".json") else f"{datasets}.json")
+        case_file = os.path.join(datasets_path, name)
+        if not os.path.isfile(case_file):
+            raise FileNotFoundError(f"Test dataset not found: {case_file} (aliases: {', '.join(DATASET_ALIASES)})")
     with open(case_file, "r", encoding="utf-8") as f:
-        cases = json.load(f)
-    
-    return cases
+        return json.load(f)
 
 
 TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
@@ -162,12 +144,8 @@ def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 20
     first_res = case_res[0]
     raw_feature = first_res.get("feature", {})
     
-    extracted_features = {
-        "stakeholders": raw_feature.get("defendant_info", []),
-        "procurement_topics": raw_feature.get("criminal_acts", []),
-        "scope_and_budget": raw_feature.get("victim_property_details", []),
-        "conditions_or_exceptions": raw_feature.get("intent_remorse", []),
-    }
+    from core.agent.decomposer import FEATURE_FIELDS
+    extracted_features = {field: raw_feature.get(field, []) for field in FEATURE_FIELDS}
     
     evidence_list = []
     candidate_laws = first_res.get("used_laws") or first_res.get("retrieved_laws") or []
@@ -214,15 +192,12 @@ def process_cases_worker(
         except Exception:
             pass
 
-    config = LegalGraphRAGConfig.from_dict(config_dict)
+    config = PipelineConfig.from_dict(config_dict)
     
     config.model.device = device
     config.model.model_name = model_name
-    # Workers load the graph read-only; the parent process owns persistence.
-    config.graph.auto_build = False
-    config.graph.auto_save = False
-    
-    rag = LegalGraphRAG(config=config)
+
+    rag = ProcurementQAPipeline(config=config)
     
     results = []
     section_hits = 0
@@ -231,8 +206,8 @@ def process_cases_worker(
     
     try:
         for case in tqdm(cases, desc=f"Processing on {device} with {model_name}"):
-            question = case.get("fact", "")
-            true_section = case.get("laws", [])
+            question = case.get("question", "")
+            true_section = case.get("expected_sections", [])
             ground_truth = case.get("ground_truth", "")
             
             case_res = rag.analyze_case(case)
@@ -245,12 +220,12 @@ def process_cases_worker(
             pred_quotes = []
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
-                judge_result = case_res[0].get("judge_result", {})
-                pred_status = judge_result.get("status", "COMPLIANT")
-                pred_direct_answer = judge_result.get("direct_answer", "")
-                pred_quotes = judge_result.get("decisive_quotes", [])
-                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                exceptions = judge_result.get("exceptions_or_conditions", "")
+                answer_result = case_res[0].get("answer_result", {})
+                pred_status = answer_result.get("status", "COMPLIANT")
+                pred_direct_answer = answer_result.get("direct_answer", "")
+                pred_quotes = answer_result.get("decisive_quotes", [])
+                pred_laws = list(answer_result.get("applicable_laws", answer_result.get("law_article", [])))
+                exceptions = answer_result.get("exceptions_or_conditions", "")
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
@@ -384,75 +359,28 @@ def process_cases_worker(
 
 def run_evaluation(
     model_name: str,
-    datasets: str = "THAI",
+    datasets: str = "statute",
     dotenv_path: str = "configs/thai_procurement.env",
     devices: Optional[List[str]] = None,
     datasets_path: str = "./datasets",
-    build_graph: bool = True,
-    force_rebuild: bool = False,
     limit: Optional[int] = None,
     workers: int = 4,
     rag_mode: str = "agentic"
 ):
-    config = LegalGraphRAGConfig.from_env_file(dotenv_path)
-    config.rag_mode = (rag_mode or "agentic").lower()
-    os.environ["RAG_MODE"] = config.rag_mode
+    config = PipelineConfig.from_env_file(dotenv_path)
+    os.environ["RAG_MODE"] = (rag_mode or "agentic").lower()
     clean_dataset = sanitize_dataset_name(datasets)
     output_dir = os.path.join(config.data.output_dir, clean_dataset)
     os.makedirs(output_dir, exist_ok=True)
     if datasets_path == "./datasets" and config.data.datasets_path:
         datasets_path = config.data.datasets_path
-    use_tri_store = os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
-    if not config.graph.graph_db_path:
-        config.graph.graph_db_path = os.path.join(output_dir, f"{model_name}_graph_db.pkl")
-        print(f"graph_db_path not configured; using {config.graph.graph_db_path}")
+    # Retrieval needs no preparation here: the tri-store is seeded by the migration, and local mode
+    # builds its in-memory index from outputs/corpus (data_ocr/) on first use.
+    if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+        print("USE_TRI_STORE=true: evaluating against the tri-store.")
+    else:
+        print("Local mode: evaluating against the in-memory store built from data_ocr/.")
 
-    # Tri-store mode retrieves from PostgreSQL/Qdrant/Neo4j (seeded by the migration), exactly like
-    # the served API, so the local .pkl graph is neither built nor required.
-    if use_tri_store:
-        print("USE_TRI_STORE=true: evaluating against the tri-store; skipping local graph build.")
-    # Build graph before starting parallel processes
-    elif build_graph:
-        print("="*60)
-        print("Building graph database...")
-        print("="*60)
-        
-        # Use first device for graph construction (if devices specified), otherwise use config device
-        if devices and len(devices) > 0:
-            build_device = devices[0]
-        else:
-            build_device = config.model.device
-        
-        # Create configuration for graph construction (using first device)
-        build_config = LegalGraphRAGConfig.from_dict(config.to_dict())
-        build_config.model.device = build_device
-        build_config.model.model_name = model_name
-        # run_evaluation controls graph construction explicitly below.
-        build_config.graph.auto_build = False
-        build_config.graph.auto_save = False
-        
-        # Create LegalGraphRAG instance and build graph
-        print(f"Using device {build_device} for graph construction...")
-        rag_builder = LegalGraphRAG(config=build_config)
-        rag_builder.build_graph(force_rebuild=force_rebuild)
-        
-        # Release model resources used for graph construction
-        if hasattr(rag_builder, 'model') and hasattr(rag_builder.model, 'release_model'):
-            try:
-                rag_builder.model.release_model()
-            except:
-                pass
-        
-        print("="*60)
-        print("Graph database ready!")
-        print("="*60)
-        print()
-    elif not os.path.exists(config.graph.graph_db_path):
-        raise FileNotFoundError(
-            f"Graph database not found: {config.graph.graph_db_path}. "
-            "Run without --no-build-graph first."
-        )
-    
     test_cases = load_test_cases(datasets, datasets_path)
     print(f"Loaded {len(test_cases)} test cases from {datasets} dataset")
     if limit is not None and limit > 0:
@@ -506,24 +434,22 @@ def run_evaluation(
                 os.remove(part_file)
     else:
         # High-efficiency ThreadPool concurrent execution:
-        # Shares single graph DB in memory and single GPU CrossEncoder (Lock-guarded, ~1.2GB VRAM).
+        # Shares one retriever (store + GPU CrossEncoder, lock-guarded, ~1.2GB VRAM) across threads.
         # OpenRouter API calls run in parallel, cutting total inference time by 4x-10x!
         device = devices[0] if (devices and len(devices) > 0) else (config.model.device or "cpu")
         print(f"Starting concurrent inference with {workers} worker threads on {device} (model: {model_name})...")
         
         config.model.device = device
         config.model.model_name = model_name
-        config.graph.auto_build = False
-        config.graph.auto_save = False
         
-        rag = LegalGraphRAG(config=config)
+        rag = ProcurementQAPipeline(config=config)
         
         # Warmup embedder and reranker in main thread to prevent multi-threaded CUDA initialization races
         try:
-            from core.graph_construct.feature_graph import get_embedding
-            from core.graph_construct.hybrid_reranker import get_reranker
+            from core.retrieval.embedding import get_embedding
+            from core.retrieval.retriever import get_retriever
             _ = get_embedding("warmup query")
-            _ = get_reranker()
+            _ = get_retriever()  # loads the store and the reranker once, before the threads start
             print("[Warmup] Local embedder and GPU reranker successfully initialized in main thread.")
         except Exception as e:
             print(f"[Warmup Warning] {e}")
@@ -538,9 +464,9 @@ def run_evaluation(
         
         def process_single_case(case):
             nonlocal total_document_hits, total_section_hits, total_both_hits, total_recall
-            question = case.get("fact", "")
-            true_category = case.get("crime", [])
-            true_section = case.get("laws", [])
+            question = case.get("question", "")
+            true_category = case.get("topics", [])
+            true_section = case.get("expected_sections", [])
             ground_truth = case.get("ground_truth", "")
             
             case_res = rag.analyze_case(case)
@@ -553,13 +479,13 @@ def run_evaluation(
             pred_quotes = []
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
-                judge_result = case_res[0].get("judge_result", {})
-                pred_status = judge_result.get("status", "COMPLIANT")
-                pred_direct_answer = judge_result.get("direct_answer", "")
-                pred_quotes = judge_result.get("decisive_quotes", [])
-                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                exceptions = judge_result.get("exceptions_or_conditions", "")
-                pred_issues_breakdown = judge_result.get("issues_breakdown", case_res[0].get("issues_breakdown", []))
+                answer_result = case_res[0].get("answer_result", {})
+                pred_status = answer_result.get("status", "COMPLIANT")
+                pred_direct_answer = answer_result.get("direct_answer", "")
+                pred_quotes = answer_result.get("decisive_quotes", [])
+                pred_laws = list(answer_result.get("applicable_laws", answer_result.get("law_article", [])))
+                exceptions = answer_result.get("exceptions_or_conditions", "")
+                pred_issues_breakdown = answer_result.get("issues_breakdown", case_res[0].get("issues_breakdown", []))
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
@@ -704,7 +630,7 @@ def run_evaluation(
     strict_hit_rate = (total_both_hits / total_cases * 100) if total_cases > 0 else 0.0
     mean_recall = (total_recall / total_cases * 100) if total_cases > 0 else 0.0
     
-    active_mode = getattr(config, "rag_mode", "crag")
+    active_mode = os.environ.get("RAG_MODE", "agentic")
     print(f"\n{'='*65}")
     print(f"Model: {model_name} | Dataset: {clean_dataset} | Mode: {active_mode}")
     print(f"Total Questions Evaluated: {total_cases}")
@@ -742,7 +668,7 @@ def run_evaluation(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Legal Case Analysis with Different Models using LegalGraphRAG"
+        description="Legal Case Analysis with Different Models using ProcurementQA Agent"
     )
     parser.add_argument(
         "--model",
@@ -760,8 +686,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--datasets",
         type=str,
-        default="THAI",
-        help="Dataset name (default: THAI)",
+        default="statute",
+        help="Dataset path or alias: statute (default), statute_sample, general",
     )
     parser.add_argument(
         "--limit",
@@ -781,16 +707,6 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         help="GPU devices to use (e.g., cuda:2 cuda:3)",
-    )
-    parser.add_argument(
-        "--no-build-graph",
-        action="store_true",
-        help="Skip graph construction (assume graph already exists)",
-    )
-    parser.add_argument(
-        "--force-rebuild",
-        action="store_true",
-        help="Force rebuild graph even if it already exists",
     )
     parser.add_argument(
         "--workers",
@@ -816,8 +732,6 @@ if __name__ == "__main__":
         dotenv_path=args.dotenv_path,
         devices=args.devices,
         datasets_path=args.datasets_path if args.datasets_path else "./datasets",
-        build_graph=not args.no_build_graph,
-        force_rebuild=args.force_rebuild,
         limit=args.limit,
         workers=args.workers,
         rag_mode=args.rag_mode

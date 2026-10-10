@@ -1,8 +1,11 @@
-"""Issue Decomposer & Intent Classifier Agent for LegalGraphRAG Agentic Workflow"""
+"""Issue Decomposer & Intent Classifier Agent for ProcurementQA Agent Agentic Workflow"""
 import json
 import re
 from typing import Dict, Any, List
-from core.prompt import get_prompt
+from core.prompts import get_prompt
+
+# Fields the decomposer extracts from a question (INTENT_DECOMPOSE_PROMPT)
+FEATURE_FIELDS = ("stakeholders", "procurement_topics", "scope_and_budget", "conditions_or_exceptions")
 
 
 class IssueDecomposer:
@@ -11,16 +14,16 @@ class IssueDecomposer:
     def __init__(self, model):
         self.model = model
 
-    def decompose(self, fact: str, name: str = "ผู้สอบถาม") -> Dict[str, Any]:
+    def decompose(self, question: str) -> Dict[str, Any]:
         """
         Decomposes the inquiry into sub-issues and extracts procurement features.
         
         Returns:
             Dict with:
                 - 'issues': List of dicts, each with 'issue_id', 'topic', 'sub_query', 'search_keywords'
-                - 'procurement_features': Dict with procurement entity categories for graph traversal
+                - 'procurement_features': {field: [values]} for FEATURE_FIELDS (trace output)
         """
-        prompt = get_prompt("INTENT_DECOMPOSE_PROMPT").replace("{fact}", fact)
+        prompt = get_prompt("INTENT_DECOMPOSE_PROMPT").replace("{question}", question)
         response = self.model.generate_response(prompt, max_length=1024)
 
         cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
@@ -47,9 +50,9 @@ class IssueDecomposer:
             raw_issues = [
                 {
                     "issue_id": "Q1",
-                    "topic": fact[:80] if fact else "ประเด็นการจัดซื้อจัดจ้าง",
-                    "sub_query": fact,
-                    "search_keywords": [fact[:60]] if fact else ["การจัดซื้อจัดจ้าง"]
+                    "topic": question[:80] if question else "ประเด็นการจัดซื้อจัดจ้าง",
+                    "sub_query": question,
+                    "search_keywords": [question[:60]] if question else ["การจัดซื้อจัดจ้าง"]
                 }
             ]
 
@@ -59,8 +62,8 @@ class IssueDecomposer:
             if not isinstance(item, dict):
                 continue
             iid = item.get("issue_id") or f"Q{idx}"
-            topic = item.get("topic") or fact[:60]
-            sq = item.get("sub_query") or fact
+            topic = item.get("topic") or question[:60]
+            sq = item.get("sub_query") or question
             kws = item.get("search_keywords")
             if not isinstance(kws, list) or len(kws) == 0:
                 kws = [sq[:50]]
@@ -74,12 +77,16 @@ class IssueDecomposer:
         if not valid_issues:
             valid_issues = [{
                 "issue_id": "Q1",
-                "topic": fact[:80] if fact else "ประเด็นการจัดซื้อจัดจ้าง",
-                "sub_query": fact,
-                "search_keywords": [fact[:60]] if fact else ["การจัดซื้อจัดจ้าง"]
+                "topic": question[:80] if question else "ประเด็นการจัดซื้อจัดจ้าง",
+                "sub_query": question,
+                "search_keywords": [question[:60]] if question else ["การจัดซื้อจัดจ้าง"]
             }]
 
-        return {
-            "issues": valid_issues,
-            "procurement_features": parsed.get("procurement_features", {})
-        }
+        raw_features = parsed.get("procurement_features")
+        raw_features = raw_features if isinstance(raw_features, dict) else {}
+        features = {}
+        for field in FEATURE_FIELDS:
+            values = raw_features.get(field, [])
+            values = values if isinstance(values, list) else [values]
+            features[field] = [str(v) for v in values if str(v).strip()]
+        return {"issues": valid_issues, "procurement_features": features}
