@@ -44,12 +44,8 @@ class ThaiBM25Index:
 
     @staticmethod
     def tokenize(text: str) -> List[str]:
-        if not text:
-            return []
-        text_clean = re.sub(r"\s+", " ", str(text)).strip()
-        # newmm is pure dictionary/C++ based: ultra-fast, robust, and zero PyTorch/meta-parameter warnings
-        tokens = word_tokenize(text_clean, engine="newmm", keep_whitespace=False)
-        return [t.strip().lower() for t in tokens if t.strip() and len(t.strip()) > 1]
+        from core.retrieval.tokenize import thai_tokens
+        return thai_tokens(text)
 
     def build_index(self, documents: List[Dict[str, Any]]):
         """

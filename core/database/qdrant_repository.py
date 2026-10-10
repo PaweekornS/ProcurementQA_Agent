@@ -9,7 +9,6 @@ with server-side Reciprocal Rank Fusion (RRF) and metadata payload filtering.
 
 import os
 import re
-import math
 import hashlib
 import logging
 from collections import Counter
@@ -25,46 +24,55 @@ logger = logging.getLogger("qdrant_repository")
 
 class ThaiSparseVectorizer:
     """
-    Computes sparse vector representations for Thai text using PyThaiNLP.
-    Produces deterministic (indices, values) pairs compatible with Qdrant Sparse Vectors.
+    BM25 as Qdrant sparse vectors, with the same Thai tokenization as the in-memory index.
+
+    Qdrant scores a sparse query as  sum_t  q(t) * d(t) * idf(t)  when the collection uses
+    Modifier.IDF, with idf(t) = ln(1 + (N - n_t + 0.5) / (n_t + 0.5)) computed by Qdrant over the
+    collection. With
+        d(t) = tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(doc) / avg_len))      (document side)
+        q(t) = 1 for every distinct query term                                    (query side)
+    that sum is exactly Okapi BM25. avg_len is the corpus average in tokens (measured by the
+    migration; BM25_AVG_DOC_LEN otherwise).
     """
 
-    def __init__(self, max_vocab_hash: int = 1000000):
+    K1 = 1.2
+    B = 0.75
+    DEFAULT_AVG_DOC_LEN = 170.0  # outputs/corpus average (tokens per chunk, header included)
+
+    def __init__(self, max_vocab_hash: int = 1000000, avg_doc_len: Optional[float] = None):
         self.max_vocab_hash = max_vocab_hash
-        try:
-            from pythainlp.tokenize import word_tokenize
-            self._tokenize = lambda t: word_tokenize(t, engine="newmm")
-        except ImportError:
-            self._tokenize = lambda t: re.findall(r"\w+", t)
+        self.avg_doc_len = float(avg_doc_len or os.getenv("BM25_AVG_DOC_LEN", self.DEFAULT_AVG_DOC_LEN))
 
     def _token_to_idx(self, token: str) -> int:
         """Deterministic hash to a positive 32-bit integer index."""
         h = int(hashlib.md5(token.encode("utf-8")).hexdigest()[:8], 16)
         return (h % self.max_vocab_hash) + 1
 
-    def vectorize(self, text: str) -> Tuple[List[int], List[float]]:
-        """Converts Thai text into sparse index and TF-IDF weighted values."""
-        if not text or not str(text).strip():
-            return [], []
-        
-        tokens = [t.strip() for t in self._tokenize(str(text)) if len(t.strip()) > 1]
-        if not tokens:
-            return [], []
+    @staticmethod
+    def tokens(text: str) -> List[str]:
+        from core.retrieval.tokenize import thai_tokens
+        return thai_tokens(text)
 
-        counts = Counter(tokens)
-        total_tokens = len(tokens)
-
-        # Term frequency with sub-linear scaling (1 + log(tf))
-        idx_val_map: Dict[int, float] = {}
-        for token, count in counts.items():
+    def _sparse(self, weights: Dict[str, float]) -> Tuple[List[int], List[float]]:
+        by_idx: Dict[int, float] = {}
+        for token, w in weights.items():
             idx = self._token_to_idx(token)
-            tf = 1.0 + math.log(count) if count > 0 else 0.0
-            idx_val_map[idx] = idx_val_map.get(idx, 0.0) + tf
+            by_idx[idx] = by_idx.get(idx, 0.0) + w
+        indices = sorted(by_idx)  # Qdrant requires ascending indices
+        return indices, [round(by_idx[i], 5) for i in indices]
 
-        # Sort indices ascending as required by sparse vector specifications
-        sorted_indices = sorted(idx_val_map.keys())
-        values = [round(idx_val_map[idx], 4) for idx in sorted_indices]
-        return sorted_indices, values
+    def vectorize_document(self, text: str) -> Tuple[List[int], List[float]]:
+        """BM25 term weights (saturated tf, length-normalised) for an indexed text."""
+        toks = self.tokens(text)
+        if not toks:
+            return [], []
+        norm = self.K1 * (1 - self.B + self.B * len(toks) / self.avg_doc_len)
+        weights = {t: tf * (self.K1 + 1) / (tf + norm) for t, tf in Counter(toks).items()}
+        return self._sparse(weights)
+
+    def vectorize_query(self, text: str) -> Tuple[List[int], List[float]]:
+        """Weight 1 per distinct query term; Qdrant multiplies in the IDF."""
+        return self._sparse({t: 1.0 for t in set(self.tokens(text))})
 
 
 class QdrantRepository:
@@ -116,7 +124,7 @@ class QdrantRepository:
                     )
                 },
                 sparse_vectors_config={
-                    # IDF is applied by Qdrant at query time; the vectorizer only supplies term frequency
+                    # Qdrant applies IDF at query time; ThaiSparseVectorizer supplies the BM25 tf and length weights
                     "sparse_bm25": models.SparseVectorParams(
                         index=models.SparseIndexParams(on_disk=False), modifier=models.Modifier.IDF
                     )
@@ -223,9 +231,7 @@ class QdrantRepository:
         for clause, dense_emb in zip(chunks, dense_embeddings):
             cid = str(clause["chunk_id"])
             text_content = str(clause.get("content", ""))
-            sparse_indices, sparse_values = self.vectorizer.vectorize(
-                f"{clause.get('entry', '')} {text_content}"
-            )
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(text_content)
 
             # Convert string ID to a deterministic UUID string for Qdrant compatibility if needed
             point_id = hashlib.md5(cid.encode("utf-8")).hexdigest()
@@ -273,7 +279,7 @@ class QdrantRepository:
             q_text = str(case.get("question", ""))
             a_text = str(case.get("answer", ""))
             combined = f"{q_text} {a_text}"
-            sparse_indices, sparse_values = self.vectorizer.vectorize(combined)
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(combined)
 
             point_id = hashlib.md5(cs_id.encode("utf-8")).hexdigest()
 
@@ -336,7 +342,7 @@ class QdrantRepository:
             )
         query_filter = models.Filter(must=must_conditions)
 
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
 
         # Attempt server-side fusion if sparse query has terms
         if sparse_indices and len(sparse_indices) > 0:
@@ -406,7 +412,7 @@ class QdrantRepository:
                 models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id)),
             ]
         )
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
         if sparse_indices:
             try:
                 response = self.client.query_points(
@@ -473,7 +479,7 @@ class QdrantRepository:
         self.delete_tenant_document(org_id, doc_id)
         points = []
         for chunk, dense_emb in zip(chunks, dense_embeddings):
-            sparse_indices, sparse_values = self.vectorizer.vectorize(f"{title} {chunk['content']}")
+            sparse_indices, sparse_values = self.vectorizer.vectorize_document(f"{title} {chunk['content']}")
             vector_dict = {"dense_bge_m3": [float(x) for x in dense_emb]}
             if sparse_indices:
                 vector_dict["sparse_bm25"] = models.SparseVector(indices=sparse_indices, values=sparse_values)
@@ -521,7 +527,7 @@ class QdrantRepository:
     ) -> List[Dict[str, Any]]:
         """RRF over dense + sparse vectors, restricted to the tenant's own documents."""
         tenant_filter = self._own_tenant_filter(org_id)
-        sparse_indices, sparse_values = self.vectorizer.vectorize(query_text)
+        sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
         prefetch = [models.Prefetch(query=query_dense, using="dense_bge_m3", limit=max(30, top_k * 3), filter=tenant_filter)]
         if sparse_indices:
             prefetch.append(models.Prefetch(

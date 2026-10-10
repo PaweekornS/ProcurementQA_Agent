@@ -313,6 +313,13 @@ def run_migration(
     # Step 4: Generate Embeddings & Upsert into Qdrant
     # ---------------------------------------------------------
     print("\n[Step 4] Generating embeddings and indexing into Qdrant VectorDB...")
+    # BM25 length normalisation needs the corpus average; tenant uploads later use BM25_AVG_DOC_LEN
+    vectorizer = storage.qdrant.vectorizer
+    lengths = [len(vectorizer.tokens(c["content"])) for c in chunks]
+    if lengths:
+        vectorizer.avg_doc_len = sum(lengths) / len(lengths)
+        print(f"BM25 average chunk length: {vectorizer.avg_doc_len:.1f} tokens "
+              f"(set BM25_AVG_DOC_LEN={vectorizer.avg_doc_len:.0f} to match for tenant uploads)")
     qdrant_stats = storage.qdrant.count_stats()
     qdrant_in_parity = (
         qdrant_stats["chunk_points"] == len(chunks)
