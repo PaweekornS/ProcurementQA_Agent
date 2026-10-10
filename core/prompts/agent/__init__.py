@@ -1,4 +1,4 @@
-"""Prompts for Multi-Agent Corrective RAG (CRAG) in Thai Procurement Domain"""
+"""Agent prompts: question decomposition, completeness audit and query refinement."""
 
 INTENT_DECOMPOSE_PROMPT = """คุณคือผู้เชี่ยวชาญการวิเคราะห์ประเด็นกฎหมายและการจัดซื้อจัดจ้างภาครัฐ
 หน้าที่ของคุณคืออ่านข้อหารือ/คำถาม แล้วแตกออกเป็น "ประเด็นคำถามย่อย (Sub-issues)" ที่ต้องตอบให้ชัดเจน
@@ -21,16 +21,16 @@ INTENT_DECOMPOSE_PROMPT = """คุณคือผู้เชี่ยวชา
     }
   ],
   "procurement_features": {
-    "defendant_info": ["หน่วยงานของรัฐ / ผู้เกี่ยวข้อง"],
-    "criminal_acts": ["ประเด็นการจัดซื้อจัดจ้าง"],
-    "victim_property_details": ["พัสดุ / วงเงิน / สัญญา"],
-    "intent_remorse": ["เงื่อนไขหรือข้อยกเว้นพิเศษ (ถ้ามี)"]
+    "stakeholders": ["หน่วยงานของรัฐ / ผู้เกี่ยวข้อง"],
+    "procurement_topics": ["ประเด็นการจัดซื้อจัดจ้าง"],
+    "scope_and_budget": ["พัสดุ / วงเงิน / สัญญา"],
+    "conditions_or_exceptions": ["เงื่อนไขหรือข้อยกเว้นพิเศษ (ถ้ามี)"]
   }
 }
 ```
 
 ข้อหารือ/คำถาม:
-{fact}
+{question}
 """
 
 AUDIT_COMPLETENESS_PROMPT = """คุณคือผู้ตรวจสอบความครบถ้วนและความถูกต้องของการให้คำปรึกษากฎหมาย (Legal QA Auditor)

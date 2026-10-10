@@ -21,7 +21,6 @@ from core.agent.decomposer import IssueDecomposer
 from core.agent.synthesizer import LegalSynthesizer
 from core.agent.refiner import QueryRefiner
 from core.retrieval.retriever import get_retriever
-from core.utils.util import concat_feature_descriptions
 
 
 def merge_and_dedup_laws(law_lists: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -113,7 +112,7 @@ class ProcurementAgenticWorkflow:
         raw_query = state.get("raw_query", "")
         name = state.get("name", "ผู้สอบถาม")
 
-        decomp = self.classifier.decompose(raw_query, name=name)
+        decomp = self.classifier.decompose(raw_query)
         issues = decomp.get("issues", [])
         features = decomp.get("procurement_features", {})
 
@@ -152,9 +151,9 @@ class ProcurementAgenticWorkflow:
         current_query = state.get("current_query") or raw_query
         org_id = state.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA")
 
-        # Query variants: the question, its feature-enriched form, every sub-question and, after a
-        # rewrite, the refined query. The retriever fuses their recall and reranks once against all.
-        queries = [raw_query, concat_feature_descriptions(features, raw_text=raw_query)]
+        # Query variants: the question, every sub-question and, after a rewrite, the refined query.
+        # The retriever fuses their recall and reranks once against all of them.
+        queries = [raw_query]
         if len(issues) > 1:
             for iss in issues:
                 sub_q = f"{iss.get('sub_query', '')} {' '.join(iss.get('search_keywords', []))}".strip()

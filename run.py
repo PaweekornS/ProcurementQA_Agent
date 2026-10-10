@@ -144,12 +144,8 @@ def extract_case_analysis(case_res: List[Dict[str, Any]], max_evidence: int = 20
     first_res = case_res[0]
     raw_feature = first_res.get("feature", {})
     
-    extracted_features = {
-        "stakeholders": raw_feature.get("defendant_info", []),
-        "procurement_topics": raw_feature.get("criminal_acts", []),
-        "scope_and_budget": raw_feature.get("victim_property_details", []),
-        "conditions_or_exceptions": raw_feature.get("intent_remorse", []),
-    }
+    from core.agent.decomposer import FEATURE_FIELDS
+    extracted_features = {field: raw_feature.get(field, []) for field in FEATURE_FIELDS}
     
     evidence_list = []
     candidate_laws = first_res.get("used_laws") or first_res.get("retrieved_laws") or []
