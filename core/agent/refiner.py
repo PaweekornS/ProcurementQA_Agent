@@ -3,7 +3,6 @@ import json
 import re
 from typing import Dict, Any, List
 from core.prompts import get_prompt
-from core.graph.local_graph import GraphDBManager
 
 
 class QueryRefiner:
@@ -89,35 +88,3 @@ class QueryRefiner:
             "target_topics": [str(t) for t in target_topics if t],
             "neighbor_laws": []
         }
-
-    def expand_via_graph(
-        self,
-        db: GraphDBManager,
-        existing_laws: List[Dict[str, Any]],
-        max_expand: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Traverses the Tri-Store / Neo4j knowledge graph to fetch related regulations and exceptions."""
-        expanded_chunks: List[Dict[str, Any]] = []
-        seen_entries = {l.get("entry") for l in existing_laws if l.get("entry")}
-
-        for law in existing_laws[:3]:
-            entry = law.get("entry")
-            if not entry or not hasattr(db, "get_related_clauses"):
-                continue
-
-            try:
-                related = db.get_related_clauses(entry, max_hops=1, limit=max_expand)
-                for r in related:
-                    r_entry = r.get("entry")
-                    if r_entry and r_entry not in seen_entries:
-                        seen_entries.add(r_entry)
-                        expanded_chunks.append({
-                            "entry": r_entry,
-                            "content": r.get("content", ""),
-                            "source": r.get("source", "Graph Expansion"),
-                            "score": 0.85
-                        })
-            except Exception:
-                pass
-
-        return expanded_chunks[:max_expand]

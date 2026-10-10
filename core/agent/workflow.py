@@ -20,7 +20,7 @@ from core.utils.agent_logger import AgentTraceLogger
 from core.agent.decomposer import IssueDecomposer
 from core.agent.synthesizer import LegalSynthesizer
 from core.agent.refiner import QueryRefiner
-from core.retrieval.search import query_similar_nodes
+from core.retrieval.retriever import get_retriever
 from core.utils.util import concat_feature_descriptions
 
 
@@ -155,117 +155,47 @@ class ProcurementAgenticWorkflow:
         case_id = state.get("case_id", 0)
         features = state.get("features", {})
         issues = state.get("issues", [])
-        raw_query = state.get("current_query") or state.get("raw_query", "")
+        raw_query = state.get("raw_query", "")
+        current_query = state.get("current_query") or raw_query
         org_id = state.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA")
 
-        retrieved_batches = []
-        feature_query = concat_feature_descriptions(features, raw_text=raw_query)
-        _, _, init_laws = query_similar_nodes(self.model, feature_query, self.retrieve_config, org_id=org_id)
-        if init_laws:
-            retrieved_batches.append(init_laws)
-
-        # Multi-aspect sub-query retrieval
-        sub_batches = []
+        # Query variants: the question, its feature-enriched form, every sub-question and, after a
+        # rewrite, the refined query. The retriever fuses their recall and reranks once against all.
+        queries = [raw_query, concat_feature_descriptions(features, raw_text=raw_query)]
         if len(issues) > 1:
             for iss in issues:
-                sub_q = iss.get("sub_query", "")
-                kws = " ".join(iss.get("search_keywords", []))
-                q_text = f"{sub_q} {kws}".strip()
-                if len(q_text) > 5:
-                    _, _, sub_laws = query_similar_nodes(self.model, q_text, self.retrieve_config, org_id=org_id)
-                    if sub_laws:
-                        retrieved_batches.append(sub_laws)
-                        sub_batches.append(sub_laws)
+                sub_q = f"{iss.get('sub_query', '')} {' '.join(iss.get('search_keywords', []))}".strip()
+                if len(sub_q) > 5:
+                    queries.append(sub_q)
+        if current_query != raw_query:
+            queries.append(current_query)
 
-        # If rewritten in previous retry, retrieve using the refined query directly
-        current_q = state.get("current_query", "")
-        orig_q = state.get("raw_query", "")
-        if current_q and current_q != orig_q:
-            _, _, refined_laws = query_similar_nodes(self.model, current_q, self.retrieve_config, org_id=org_id)
-            if refined_laws:
-                retrieved_batches.append(refined_laws)
+        result = get_retriever().retrieve(queries, org_id)
+        candidate_laws = result.laws()
 
-        candidate_laws = merge_and_dedup_laws(retrieved_batches)
-
-        # Knowledge Graph Traversal & Topological Backup:
-        # 1. Deterministic statutory entity resolution
-        # 2. Multi-hop statutory citation traversal (EMPOWERS, CITED_BY, CITES, NEXT_SECTION)
-        # 3. Topic & Crime graph topology expansion
-        graph_results = []
-        # The local graph is untenanted (untagged nodes count as PUBLIC); Neo4j covers tri-store mode
-        tri_store = os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
-        try:
-            if tri_store:
-                raise LookupError("legacy graph backup disabled in tri-store mode")
-            from core.graph.citation_linker import LegalCitationLinker
-            from core.graph.local_graph import GraphDBManager
-            db_inst = GraphDBManager.get_db()
-            graph_results = LegalCitationLinker.graph_search_backup(
-                db=db_inst,
-                query=raw_query,
-                features=features,
-                issues=issues,
-                seed_laws=candidate_laws,
-                top_k=4
-            )
-            if graph_results:
-                self.logger.log_step(
-                    case_id=case_id,
-                    step_num=2.5,
-                    step_name="Knowledge Graph Search & Relationship Traversal",
-                    message=f"Discovered {len(graph_results)} section(s) via Graph Citations & Entity Lookup",
-                    details={"Graph Results": [g.get("entry", "")[:70] for g in graph_results[:3]]},
-                    emoji="🕸️"
-                )
-                candidate_laws = merge_and_dedup_laws([candidate_laws, graph_results])
-        except Exception as e:
-            pass
-
-        existing_cands = state.get("retrieved_candidates", [])
-        all_candidates = merge_and_dedup_laws([existing_cands, candidate_laws])
-
-        # Cross-encoder late-stage rerank over all merged candidates against raw_query
-        try:
-            from core.retrieval.reranker import get_reranker, is_reranker_enabled
-            if is_reranker_enabled() and all_candidates:
-                reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-                reranker_device = os.getenv("RERANKER_DEVICE", "cuda:0")
-                reranker = get_reranker(model_name=reranker_model, device=reranker_device)
-                if reranker and reranker.model is not None:
-                    for cand in all_candidates:
-                        if not cand.get("text"):
-                            entry = cand.get("entry", "")
-                            desc = cand.get("description", "")
-                            cand["text"] = f"[{entry}]\n{desc}".strip() if entry else desc
-                    reranked_pool = reranker.rerank(
-                        query=raw_query,
-                        candidates=all_candidates,
-                        top_k=len(all_candidates),
-                        threshold=-999.0
-                    )
-                    if reranked_pool:
-                        all_candidates = reranked_pool
-        except Exception as e:
-            pass
+        # Retries add to what earlier rounds found instead of replacing it
+        all_candidates = merge_and_dedup_laws([state.get("retrieved_candidates", []), candidate_laws])
 
         self.logger.log_step(
             case_id=case_id,
             step_num=2,
-            step_name="Hybrid Retrieval & Late Reranker",
-            message=f"Retrieved and reranked {len(candidate_laws)} candidate chunks (Total accumulated: {len(all_candidates)})",
+            step_name="Hybrid Retrieval, Graph Expansion & Rerank",
+            message=(f"{len(result.queries)} query variant(s): {result.stats.get('kept', 0)} reranked chunk(s) "
+                     f"+ {result.stats.get('graph_carried', 0)} cited by them (total accumulated: {len(all_candidates)})"),
             emoji="🔍"
         )
 
         trace_event = {
             "step": "retrieve_and_rerank",
             "candidates_count": len(all_candidates),
+            "retrieval": result.stats,
             "top_candidates": [c.get("entry", "") for c in all_candidates[:5]]
         }
 
         tools = list(state.get("tools_used", []))
         if "Hybrid" not in tools:
             tools.append("Hybrid")
-        if graph_results and "Graph" not in tools:
+        if result.stats.get("graph_carried") and "Graph" not in tools:
             tools.append("Graph")
 
         return {

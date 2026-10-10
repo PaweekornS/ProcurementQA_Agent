@@ -302,6 +302,31 @@ class Neo4jRepository:
             result = session.run(query, cid=clause_id, org_id=org_id)
             return [dict(r) for r in result]
 
+    def get_cited_clauses_batch(self, clause_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
+        """get_cited_clauses for many clauses in one round trip: [{source_id, target_id, rel_type}]."""
+        self.connect()
+        query = """
+        UNWIND $cids AS cid
+        MATCH (c:StatuteClause {clause_id: cid})-[r:CITES_CLAUSE|EMPOWERED_BY]->(cited:StatuteClause)
+        WHERE coalesce(cited.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        RETURN cid AS source_id, cited.clause_id AS target_id, type(r) AS rel_type
+        ORDER BY source_id, CASE type(r) WHEN 'EMPOWERED_BY' THEN 0 ELSE 1 END
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(query, cids=list(clause_ids), org_id=org_id)]
+
+    def get_tenant_chunk_citations_batch(self, chunk_ids: List[str], org_id: str) -> List[Dict[str, Any]]:
+        """Statute clauses cited by several tenant chunks: [{source_id, target_id, rel_type}]."""
+        self.connect()
+        query = """
+        UNWIND $cids AS cid
+        MATCH (t:TenantChunk {chunk_id: cid})-[r:CITES_CLAUSE]->(c:StatuteClause)
+        WHERE t.org_id = $org_id AND coalesce(c.org_id, 'PUBLIC') IN ['PUBLIC', $org_id]
+        RETURN cid AS source_id, c.clause_id AS target_id, 'CITES_CLAUSE' AS rel_type
+        """
+        with self.driver.session() as session:
+            return [dict(r) for r in session.run(query, cids=list(chunk_ids), org_id=org_id)]
+
     def get_subordinate_laws(self, clause_id: str, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """
         Traverses from an Act section to subordinate Ministerial Regulations/Rules

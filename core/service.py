@@ -315,17 +315,12 @@ class ProcurementService:
         if not query or not query.strip():
             return []
 
-        from core.retrieval.search import search_similar_nodes_direct, get_embedding
+        from core.retrieval.retriever import get_retriever
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        query_emb = get_embedding(query.strip())
-        cases, laws = search_similar_nodes_direct(
-            self.rag.model,
-            query_emb,
-            query.strip(),
-            top_k=top_k * 2 if doc_filter else top_k,
-            org_id=active_org
-        )
+        laws = get_retriever().retrieve(
+            [query.strip()], active_org, top_k=top_k * 2 if doc_filter else top_k
+        ).laws()
 
         results = []
         for law in laws:
