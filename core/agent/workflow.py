@@ -351,10 +351,8 @@ class ProcurementAgenticWorkflow:
     def invoke(self, case: Dict[str, Any]) -> Dict[str, Any]:
         """Entrypoint for executing the LangGraph Agentic Workflow on a case item."""
         start_time = time.time()
-        raw_fact = case.get("fact") or case.get("description") or case.get("question", "")
-        name = case.get("name", ["ผู้สอบถาม"])
-        if isinstance(name, list) and len(name) > 0:
-            name = name[0]
+        raw_fact = case.get("question", "")
+        name = case.get("asker", "ผู้สอบถาม")
 
         active_org = str(case.get("org_id") or os.getenv("DEFAULT_ORG_ID", "DGA"))
         initial_state: AgenticRAGState = {

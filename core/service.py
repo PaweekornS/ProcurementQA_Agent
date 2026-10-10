@@ -308,7 +308,7 @@ class ProcurementService:
                                   int((time.monotonic() - started) * 1000))
 
     def _run_qa(self, question: str, active_org: str) -> Dict[str, Any]:
-        case = {"fact": question, "name": "ผู้สอบถาม", "org_id": active_org}
+        case = {"question": question, "org_id": active_org}
 
         from core.agent import ProcurementAgenticWorkflow
         workflow = ProcurementAgenticWorkflow(self.rag.model, max_retries=self.rag.config.agentic_max_retries)

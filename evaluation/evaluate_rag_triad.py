@@ -455,8 +455,8 @@ def run_rag_triad_evaluation(
     for idx, c in enumerate(test_cases):
         cid = str(c.get("id", idx))
         gt_map[cid] = c
-        if c.get("fact"):
-            gt_map[c["fact"].strip()] = c
+        if c.get("question"):
+            gt_map[c["question"].strip()] = c
 
     chunk_by_entry: Dict[str, Dict[str, str]] = {}
     if corpus_chunks:
@@ -483,11 +483,11 @@ def run_rag_triad_evaluation(
 
     def process_item(item_tuple: Tuple[int, Dict[str, Any]]) -> Dict[str, Any]:
         idx, pred = item_tuple
-        q_text = pred.get("question", "") or pred.get("fact", "")
+        q_text = pred.get("question", "")
         cid = str(pred.get("caseId") or pred.get("id", idx))
         gt_case = gt_map.get(cid) or gt_map.get(q_text.strip()) or {}
 
-        gt_sections = gt_case.get("laws", gt_case.get("law", []))
+        gt_sections = gt_case.get("expected_sections", [])
         gt_answer = gt_case.get("ground_truth", "") or gt_case.get("answer", "")
         cand_answer = pred.get("pred_direct_answer", "") or pred.get("direct_answer", "") or pred.get("response", "")
 
@@ -744,7 +744,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate RAG Triad: Retrieval & Generation Layers")
     parser.add_argument("results_pos", nargs="?", default=None, help="Optional positional path to predictions JSON from run.py")
     parser.add_argument("--results", default=None, help="Path to predictions JSON from run.py")
-    parser.add_argument("--datasets", default="./datasets/crime_data_THAI_small.json", help="Path to ground truth dataset JSON")
+    parser.add_argument("--datasets", default="./datasets/statute_qa.json", help="Path to ground truth dataset JSON")
     parser.add_argument("--output", default=None, help="Output path for evaluation report (defaults to outputs/<dataset>/<mode>_rag_triad_report.json)")
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit for quick smoke test")
     parser.add_argument("--workers", type=int, default=8, help="Number of concurrent workers for LLM Judge evaluation")

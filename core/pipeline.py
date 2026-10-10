@@ -173,11 +173,11 @@ class ProcurementQAPipeline:
         )
 
     def analyze_case(self, case: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Run the agent workflow on one question ({'question'|'fact', 'id', ...})."""
+        """Run the agent workflow on one question ({'question', 'id', 'org_id'?})."""
         from core.agent import ProcurementAgenticWorkflow
         workflow = ProcurementAgenticWorkflow(self.model, max_retries=self.config.agentic_max_retries)
         return [workflow.invoke(case)]
 
     def analyze_cases(self, cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [{"case_id": c.get("id"), "question": c.get("question") or c.get("fact"), "analysis": self.analyze_case(c)}
+        return [{"case_id": c.get("id"), "question": c.get("question"), "analysis": self.analyze_case(c)}
                 for c in cases]

@@ -46,7 +46,7 @@ from evaluation.evidence import evidence_metrics  # noqa: E402
 
 KS = (5, 10, 15, 20)
 DATASETS = {
-    "statute": "datasets/crime_data_THAI_small.json",
+    "statute": "datasets/statute_qa.json",
     "general": "datasets/general_docs_qa.json",
 }
 
@@ -85,7 +85,7 @@ def score_question(q: dict, laws: List[dict]) -> Dict[str, dict]:
     else:
         items = [{"law_entry": l.get("entry", ""), "snippet": l.get("description", "")[:300]} for l in laws]
         for k in KS:
-            m = compute_retrieval_metrics(items, q.get("expected_pairs", []), q.get("laws"), k=k)
+            m = compute_retrieval_metrics(items, q.get("expected_pairs", []), q.get("expected_sections"), k=k)
             out[k] = {"recall": m["recall_at_k"], "hit": m["hit_at_k"], "mrr": m["mrr_at_k"]}
     return out
 
@@ -107,7 +107,7 @@ def main():
             rows, latencies, sizes = [], [], []
             for q in questions:
                 t0 = time.time()
-                laws = fn(q["fact"])
+                laws = fn(q["question"])
                 latencies.append(time.time() - t0)
                 sizes.append(len(laws))
                 rows.append({"id": q.get("id"), "type": q.get("question_type", "statute"), **score_question(q, laws),

@@ -196,7 +196,7 @@ class GPUReranker:
         pairs = []
         valid_candidates = []
         for c in candidates:
-            text = c.get("text") or c.get("description") or c.get("fact") or ""
+            text = c.get("text") or c.get("description") or ""
             if text:
                 pairs.append((query, str(text)[:1200]))
                 valid_candidates.append(c)
@@ -296,7 +296,7 @@ class OpperAPIReranker:
         valid_candidates = []
         documents = []
         for c in candidates:
-            text = c.get("text") or c.get("description") or c.get("fact") or ""
+            text = c.get("text") or c.get("description") or ""
             if text:
                 valid_candidates.append(c)
                 # Cap each document preview to 2,000 characters for optimal latency and token economy

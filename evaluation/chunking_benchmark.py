@@ -175,7 +175,7 @@ def evidence_intact(corpus: List[Dict[str, str]], questions: List[dict]) -> floa
 def evaluate(corpus, scorer, questions) -> Dict[str, dict]:
     per_q = []
     for q in questions:
-        order = np.argsort(-scorer(q["fact"]))[:max(KS)]
+        order = np.argsort(-scorer(q["question"]))[:max(KS)]
         ranked = [corpus[i] for i in order]
         row = {"id": q["id"], "type": q["question_type"]}
         for k in KS:

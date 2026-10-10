@@ -21,50 +21,32 @@ from core.pipeline import ProcurementQAPipeline, PipelineConfig
 from evaluation.evaluate_rag_triad import compute_retrieval_metrics
 
 
+DATASET_ALIASES = {
+    "statute": "statute_qa.json",
+    "statute_sample": "statute_qa_sample.json",
+    "general": "general_docs_qa.json",
+}
+
+
 def sanitize_dataset_name(dataset_input: str) -> str:
-    """
-    Extracts a clean dataset name by stripping folder paths (e.g. 'datasets/'),
-    'crime_data_' prefix, and '_small.json' / '.json' extensions.
-    Examples:
-      '.\\datasets\\crime_data_THAI_small.json' -> 'THAI'
-      'datasets/crime_data_thai_procurement_small.json' -> 'thai_procurement'
-      'crime_data_THAI_small.json' -> 'THAI'
-      'THAI' -> 'THAI'
-    """
+    """Output-folder name for a dataset: 'datasets/statute_qa.json' -> 'statute_qa', 'general' -> 'general_docs_qa'."""
     if not dataset_input:
-        return "THAI"
-    base = os.path.basename(dataset_input.replace("\\", "/").rstrip("/"))
-    clean = re.sub(r"^crime_data_", "", base, flags=re.IGNORECASE)
-    clean = re.sub(r"_small\.json$", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\.json$", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"_small$", "", clean, flags=re.IGNORECASE)
-    return clean or "THAI"
+        return "statute_qa"
+    base = DATASET_ALIASES.get(dataset_input, os.path.basename(dataset_input.replace("\\", "/").rstrip("/")))
+    return re.sub(r"\.json$", "", base, flags=re.IGNORECASE) or "statute_qa"
 
 
 def load_test_cases(datasets: str, datasets_path: str = "./datasets") -> List[Dict[str, Any]]:
-    clean_name = sanitize_dataset_name(datasets)
-    if os.path.exists(datasets) and os.path.isfile(datasets):
+    """A dataset path, a file name under datasets_path, or an alias (statute, statute_sample, general)."""
+    if os.path.isfile(datasets):
         case_file = datasets
     else:
-        candidates = [
-            os.path.join(datasets_path, f"crime_data_{clean_name}_small.json"),
-            os.path.join(datasets_path, f"crime_data_{datasets}_small.json"),
-            os.path.join(datasets_path, f"{clean_name}.json"),
-            os.path.join(datasets_path, datasets),
-            os.path.join(datasets_path, f"crime_data_{clean_name}.json"),
-        ]
-        case_file = None
-        for cand in candidates:
-            if os.path.exists(cand) and os.path.isfile(cand):
-                case_file = cand
-                break
-        if not case_file:
-            raise FileNotFoundError(f"Test dataset not found for '{datasets}'. Checked: {candidates}")
-    
+        name = DATASET_ALIASES.get(datasets, datasets if datasets.endswith(".json") else f"{datasets}.json")
+        case_file = os.path.join(datasets_path, name)
+        if not os.path.isfile(case_file):
+            raise FileNotFoundError(f"Test dataset not found: {case_file} (aliases: {', '.join(DATASET_ALIASES)})")
     with open(case_file, "r", encoding="utf-8") as f:
-        cases = json.load(f)
-    
-    return cases
+        return json.load(f)
 
 
 TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
@@ -228,8 +210,8 @@ def process_cases_worker(
     
     try:
         for case in tqdm(cases, desc=f"Processing on {device} with {model_name}"):
-            question = case.get("fact", "")
-            true_section = case.get("laws", [])
+            question = case.get("question", "")
+            true_section = case.get("expected_sections", [])
             ground_truth = case.get("ground_truth", "")
             
             case_res = rag.analyze_case(case)
@@ -381,7 +363,7 @@ def process_cases_worker(
 
 def run_evaluation(
     model_name: str,
-    datasets: str = "THAI",
+    datasets: str = "statute",
     dotenv_path: str = "configs/thai_procurement.env",
     devices: Optional[List[str]] = None,
     datasets_path: str = "./datasets",
@@ -486,9 +468,9 @@ def run_evaluation(
         
         def process_single_case(case):
             nonlocal total_document_hits, total_section_hits, total_both_hits, total_recall
-            question = case.get("fact", "")
-            true_category = case.get("crime", [])
-            true_section = case.get("laws", [])
+            question = case.get("question", "")
+            true_category = case.get("topics", [])
+            true_section = case.get("expected_sections", [])
             ground_truth = case.get("ground_truth", "")
             
             case_res = rag.analyze_case(case)
@@ -708,8 +690,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--datasets",
         type=str,
-        default="THAI",
-        help="Dataset name (default: THAI)",
+        default="statute",
+        help="Dataset path or alias: statute (default), statute_sample, general",
     )
     parser.add_argument(
         "--limit",
