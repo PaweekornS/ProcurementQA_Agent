@@ -29,26 +29,6 @@ def format_fact(facts):
     return res
 
 
-def select_applicable_laws(chatbot, law_used, retrieved_facts, case_description):
-    response = chatbot.generate_response(
-        get_prompt("SELECT_LAWS_PROMPT").format(
-            law=format_law(law_used),
-            case=case_description
-        ),
-        max_length=4096
-    )
-    try:
-        first = response.rfind('[')
-        last = response.rfind(']') + 1
-        response = response.replace('，', ',')
-        response = list(set(eval(response[first:last])))
-    except Exception as e:
-        print(f"Error parsing response: {e}")
-        response = []
-    response = [str(x).strip() for x in response if str(x).strip()]
-    return response
-
-
 FALLBACK_NO_LAW_ANSWER = "ไม่พบข้อกฎหมาย ระเบียบ หรือประกาศที่เกี่ยวข้องกับประเด็นข้อหารือนี้ในฐานข้อมูลการจัดซื้อจัดจ้างภาครัฐ (เนื่องจากไม่อยู่ในขอบเขตของ พ.ร.บ. การจัดซื้อจัดจ้างฯ ระเบียบกระทรวงการคลัง หรือประกาศที่จัดเก็บไว้ในคลังข้อมูล)"
 
 

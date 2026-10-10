@@ -100,7 +100,7 @@ def _sync_graph(storage, org_id: str, doc: Dict[str, Any], chunks: List[Dict[str
 
 
 def _embed(texts: List[str]) -> List[List[float]]:
-    from core.retrieval.search import batch_embed_tokenmind, get_embedding
+    from core.retrieval.embedding import batch_embed_tokenmind, get_embedding
     if env("EMBEDDING_PROVIDER", "local").lower() == "tokenmind":
         vectors = batch_embed_tokenmind(texts)
     else:

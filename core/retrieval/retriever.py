@@ -110,6 +110,13 @@ class RetrievalResult:
 
 # ----------------------------------------------------------------------------- stores
 
+def _unit_record(chunk_id: str, entry: str, text: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Store-independent record for an exact มาตรา/ข้อ lookup."""
+    return {"chunk_id": chunk_id, "entry": entry, "content": text, "doc_title": row.get("doc_title"),
+            "source_file": row.get("source_file"), "page_start": row.get("page_start"),
+            "page_end": row.get("page_end"), "total_pages": row.get("total_pages")}
+
+
 class TriStore:
     """Qdrant hybrid search hydrated from PostgreSQL; citation expansion from Neo4j."""
 
@@ -119,7 +126,10 @@ class TriStore:
             storage = StorageManager.get_instance()
         self.storage = storage
 
-    def search(self, query: str, vector: List[float], org_id: str, top_k: int) -> List[Candidate]:
+    def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int) -> List[Candidate]:
+        if vector is None:
+            raise RuntimeError("No query embedding (check EMBEDDING_PROVIDER / TOKENMIND_API_KEY); "
+                               "the tri-store hybrid search needs the dense vector")
         out = []
         for r in self.storage.hybrid_search_clauses(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id):
             out.append(Candidate(chunk_id=r["clause_id"], entry=r.get("entry", ""), text=r.get("content_thai", ""),
@@ -135,6 +145,43 @@ class TriStore:
             logger.warning("Tenant document search failed for %s: %s", org_id, e)
         out.sort(key=lambda c: c.fused_score, reverse=True)
         return out
+
+    def lookup_unit(self, kind: Optional[str], num: int, doc_hint: str, org_id: str) -> List[Dict[str, Any]]:
+        """Chunks labelled 'มาตรา N' / 'ข้อ N', best match first (see PostgresRepository ordering)."""
+        pg = self.storage.pg
+        if kind == "clause":
+            rows = pg.lookup_clause(doc_hint, num, org_id=org_id)
+        else:
+            rows = pg.lookup_section(doc_hint, num, org_id=org_id)
+            if not rows and kind is None:
+                rows = pg.lookup_clause(doc_hint, num, org_id=org_id)
+        return [_unit_record(r.get("clause_id"), r.get("entry", ""), r.get("content_thai", ""), r) for r in rows]
+
+    def related(self, chunk_id: str, org_id: str) -> List[Dict[str, Any]]:
+        ctx = self.storage.traverse_clause_graph(chunk_id, org_id=org_id)
+        out = [{"node_id": a.get("clause_id"), "relation": "ADJACENT_SECTION", "entry": a.get("entry", "")}
+               for a in ctx.get("adjacent_sections", [])]
+        out += [{"node_id": c.get("clause_id"), "relation": "CITES_CLAUSE", "entry": c.get("entry", "")}
+                for c in ctx.get("cited_clauses", [])]
+        out += [{"node_id": s.get("clause_id"), "relation": "SUBORDINATE_RULE", "entry": s.get("entry", "")}
+                for s in ctx.get("subordinate_laws", [])]
+        out += [{"node_id": c.get("case_id"), "relation": "RELATES_TO_LAW", "entry": c.get("question", "")}
+                for c in ctx.get("related_cases", [])]
+        return out
+
+    def search_faq(self, query: str, vector: List[float], org_id: str, top_k: int) -> List[Dict[str, Any]]:
+        hits = self.storage.hybrid_search_cases(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id)
+        rows = {r["case_id"]: r for r in self.storage.pg.get_faq_cases_by_ids([h["case_id"] for h in hits], org_id=org_id)}
+        return [{"faq_id": h["case_id"], "question": rows.get(h["case_id"], {}).get("question", h.get("question", "")),
+                 "answer": rows.get(h["case_id"], {}).get("answer", ""),
+                 "cited": rows.get(h["case_id"], {}).get("cited_laws", []), "score": round(float(h["score"]), 4)}
+                for h in hits]
+
+    def catalog(self, org_id: str) -> Dict[str, Any]:
+        stats = self.storage.get_stats()
+        return {"documents": self.storage.pg.list_document_titles(org_id),
+                "chunks": stats["postgres"].get("statute_clauses", 0),
+                "faq_pairs": stats["postgres"].get("faq_cases", 0)}
 
     def expand(self, seeds: Sequence[Candidate], org_id: str) -> Dict[str, List[Candidate]]:
         clause_ids = [s.chunk_id for s in seeds if s.source_type == "statute"]
@@ -155,47 +202,48 @@ class TriStore:
 
 
 class InMemoryStore:
-    """Local PoC store over outputs/corpus: BM25 (+ BGE-M3 dense when an embedder is available),
-    fused with RRF; citation edges from the same linker the migration uses."""
+    """Local PoC store over outputs/corpus/chunks.jsonl: BM25 (+ BGE-M3 dense when an embedder is
+    available) fused with RRF; citation and reading-order edges from the same linker the migration
+    uses. Implements the same interface as TriStore."""
 
-    def __init__(self, laws_path: Optional[str] = None, embed_batch: Optional[Callable[[List[str]], List[List[float]]]] = None,
-                 cache_dir: str = os.path.join("outputs", "corpus")):
+    def __init__(self, chunks_path: Optional[str] = None,
+                 embed_batch: Optional[Callable[[List[str]], List[List[float]]]] = None,
+                 cache_dir: Optional[str] = None):
         import hashlib
         import json
         from rank_bm25 import BM25Okapi
-        from core.chunking.corpus import ensure_corpus
+        from core.chunking.corpus import DEFAULT_CORPUS_DIR, ensure_corpus
         from core.graph.citation_linker import ACT_TITLE, extract_legal_edges
         from core.retrieval.reranker import ThaiBM25Index
 
-        laws_path = laws_path or env("LAW_TO_CRIME_PATH", os.path.join(cache_dir, "law_to_crime.json"))
-        if not os.path.exists(laws_path):
-            ensure_corpus(env("OCR_DIR", "data_ocr"), os.path.dirname(laws_path) or ".")
-        with open(laws_path, encoding="utf-8") as f:
-            records = json.load(f)
+        corpus_dir = cache_dir or env("CORPUS_DIR", DEFAULT_CORPUS_DIR)
+        chunks_path = chunks_path or os.path.join(corpus_dir, "chunks.jsonl")
+        ensure_corpus(env("OCR_DIR", "data_ocr"), os.path.dirname(chunks_path) or ".")
+        with open(chunks_path, encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
 
         self.items: List[Candidate] = []
+        self.meta: List[Dict[str, Any]] = []
         units = []
         for r in records:
-            entry = str(r.get("id", ""))
-            text = str((r.get("items") or [{}])[0].get("text", ""))
-            cid = "clause_" + hashlib.md5(entry.encode("utf-8")).hexdigest()[:16]
-            self.items.append(Candidate(chunk_id=cid, entry=entry, text=text,
-                                        data={"entry": entry, "content_thai": text, "page_start": r.get("page_start"),
-                                              "page_end": r.get("page_end"), "source_file": r.get("source_file"),
-                                              "total_pages": r.get("total_pages")}))
-            units.append({"id": cid, "doc_name": r.get("doc_name", entry.split("|")[0].strip()),
-                          "label": entry.partition("|")[2].strip(), "text": text})
+            text = r.get("embed_text") or r["content"]
+            data = {"entry": r["entry"], "content_thai": text, "page_start": r.get("page_start"),
+                    "page_end": r.get("page_end"), "source_file": r.get("source_file"),
+                    "total_pages": r.get("total_pages"), "doc_title": r.get("doc_title"), "kind": r.get("kind")}
+            self.items.append(Candidate(chunk_id=r["chunk_id"], entry=r["entry"], text=text, data=data))
+            self.meta.append(r)
+            units.append({"id": r["chunk_id"], "doc_name": r["doc_title"], "label": r["label"], "text": text})
         self.index = {c.chunk_id: i for i, c in enumerate(self.items)}
 
         self.tokenize = ThaiBM25Index.tokenize
         self.bm25 = BM25Okapi([self.tokenize(c.text) for c in self.items])
+        self.faq_idx = [i for i, m in enumerate(self.meta) if m.get("kind") == "faq"]
 
         self.matrix = None
-        self.embed_batch = embed_batch
         if embed_batch is not None:
             texts = [c.text[:2500] for c in self.items]
             key = hashlib.md5("\x00".join(texts).encode("utf-8")).hexdigest()[:12]
-            path = os.path.join(cache_dir, f"dense_{key}.npy")
+            path = os.path.join(os.path.dirname(chunks_path) or ".", f"dense_{key}.npy")
             if os.path.exists(path):
                 self.matrix = np.load(path)
             else:
@@ -203,11 +251,75 @@ class InMemoryStore:
                 self.matrix = m / np.maximum(np.linalg.norm(m, axis=1, keepdims=True), 1e-9)
                 np.save(path, self.matrix)
 
+        # Same relations as Neo4j: CITES_CLAUSE / EMPOWERED_BY (outgoing), ADJACENT_SECTION (both ways)
         self.cites: Dict[str, List[Tuple[str, str]]] = {}
+        self.cited_by: Dict[str, List[Tuple[str, str]]] = {}
+        self.adjacent: Dict[str, List[str]] = {}
         for e in extract_legal_edges(units, act_title=ACT_TITLE):
-            if e["rel_type"] in ("CITES", "EMPOWERED_BY"):
+            src, tgt = e["source_id"], e["target_id"]
+            if e["rel_type"] == "NEXT_SECTION":
+                self.adjacent.setdefault(src, []).append(tgt)
+                self.adjacent.setdefault(tgt, []).append(src)
+            else:
                 rel = "CITES_CLAUSE" if e["rel_type"] == "CITES" else "EMPOWERED_BY"
-                self.cites.setdefault(e["source_id"], []).append((e["target_id"], rel))
+                self.cites.setdefault(src, []).append((tgt, rel))
+                self.cited_by.setdefault(tgt, []).append((src, rel))
+
+    def lookup_unit(self, kind: Optional[str], num: int, doc_hint: str, org_id: str) -> List[Dict[str, Any]]:
+        from core.graph.citation_linker import parse_unit_label
+        hint = (doc_hint or "").strip().lower()
+        units_per_doc: Dict[str, int] = {}
+        matches = []
+        for i, m in enumerate(self.meta):
+            k, n, part, _ = parse_unit_label(m.get("label", ""))
+            if k:
+                units_per_doc[m["doc_title"]] = units_per_doc.get(m["doc_title"], 0) + 1
+            if n == num and (kind is None or k == kind) and k and (not hint or hint in m["doc_title"].lower()):
+                matches.append((i, k, part))
+
+        def rank(t):
+            i, k, part = t
+            title = self.meta[i]["doc_title"]
+            # Same preferences as the PostgreSQL lookup: the Act for มาตรา, regulations for ข้อ,
+            # then the most comprehensive document, then reading order
+            doc_pref = 0 if (k == "section" and title.startswith("พระราชบัญญัติ")) or                             (k == "clause" and title.startswith("ระเบียบ")) else 1
+            return (doc_pref, -units_per_doc.get(title, 0), part)
+
+        out = []
+        for i, _, _ in sorted(matches, key=rank):
+            c, m = self.items[i], self.meta[i]
+            out.append(_unit_record(c.chunk_id, c.entry, c.text, {**c.data, "doc_title": m["doc_title"]}))
+        return out
+
+    def related(self, chunk_id: str, org_id: str) -> List[Dict[str, Any]]:
+        own_doc = self.meta[self.index[chunk_id]]["doc_title"] if chunk_id in self.index else None
+        entry = lambda cid: self.items[self.index[cid]].entry
+        out = [{"node_id": c, "relation": "ADJACENT_SECTION", "entry": entry(c)} for c in self.adjacent.get(chunk_id, [])]
+        out += [{"node_id": c, "relation": "CITES_CLAUSE", "entry": entry(c)} for c, _ in self.cites.get(chunk_id, [])]
+        for c, _ in self.cited_by.get(chunk_id, []):
+            m = self.meta[self.index[c]]
+            if m["doc_title"] == own_doc:
+                continue
+            # Same relation names as Neo4j: FAQ cases relate to the law, other documents derive from it
+            out.append({"node_id": c, "relation": "RELATES_TO_LAW" if m.get("kind") == "faq" else "SUBORDINATE_RULE",
+                        "entry": entry(c)})
+        return out
+
+    def search_faq(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int) -> List[Dict[str, Any]]:
+        if not self.faq_idx:
+            return []
+        scores = np.asarray(self.bm25.get_scores(self.tokenize(query)))[self.faq_idx]
+        out = []
+        for j in np.argsort(-scores)[:top_k]:
+            m = self.meta[self.faq_idx[j]]
+            md = m.get("metadata", {})
+            out.append({"faq_id": m["chunk_id"], "question": md.get("question", ""), "answer": md.get("answer", ""),
+                        "cited": [], "score": round(float(scores[j]), 4)})
+        return out
+
+    def catalog(self, org_id: str) -> Dict[str, Any]:
+        return {"documents": sorted({m["doc_title"] for m in self.meta}),
+                "chunks": len(self.items), "faq_pairs": len(self.faq_idx)}
 
     def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int) -> List[Candidate]:
         sparse = np.asarray(self.bm25.get_scores(self.tokenize(query)))
@@ -386,7 +498,7 @@ def get_retriever() -> Retriever:
         with _default_lock:
             if _default is None:
                 from core.retrieval.reranker import get_reranker, is_reranker_enabled
-                from core.retrieval.search import get_embedding, batch_embed_tokenmind
+                from core.retrieval.embedding import batch_embed_tokenmind, get_embedding
 
                 if tri_store_enabled():
                     store = TriStore()

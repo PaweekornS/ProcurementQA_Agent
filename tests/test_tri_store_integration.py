@@ -80,7 +80,7 @@ class TestTriStoreIntegration(unittest.TestCase):
     def test_02_hybrid_search_clauses(self):
         """Verify hybrid vector + sparse search in Qdrant with Postgres hydration."""
         query = "การจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท"
-        from core.retrieval.search import get_embedding
+        from core.retrieval.embedding import get_embedding
         q_emb = get_embedding(query)
 
         results = self.storage.hybrid_search_clauses(
@@ -153,15 +153,14 @@ class TestTriStoreIntegration(unittest.TestCase):
         The cross-encoder must actually load and score candidates. A missing runtime dependency
         once made it fail silently: retrieval ran unreranked and Hit/MRR collapsed with no error.
         """
-        from core.retrieval.search import search_similar_nodes_direct
         from core.retrieval.reranker import reranker_status
+        from core.retrieval.retriever import get_retriever
 
         status = reranker_status()
         self.assertTrue(status["loaded"], f"reranker not usable: {status}")
         if status["enabled"]:
-            _, laws = search_similar_nodes_direct(None, None, "วิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท", top_k=5)
-            scored = [l for l in laws if isinstance(l.get("rerank_score"), float) and l["rerank_score"] not in (0.8, 0.0)]
-            self.assertTrue(scored, "no candidate carries a cross-encoder score")
+            result = get_retriever().retrieve(["วิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท"], "DGA", top_k=5)
+            self.assertTrue(result.stats.get("reranked"), "retrieval ran without the cross-encoder")
 
 
 if __name__ == "__main__":

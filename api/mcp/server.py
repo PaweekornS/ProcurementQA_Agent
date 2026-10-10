@@ -233,9 +233,9 @@ if _expose_internal:
             rag = service.rag
             return {
                 "ready": True,
-                "graph_db_path": rag.config.graph.graph_db_path,
+                "store": "tri-store" if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes") else "in-memory",
                 "model": rag.config.model.model_name,
-                "indexed_sections_count": len(service._section_index)
+                "indexed_chunks": service.get_catalog_resource()["total_chunks"]
             }
         except Exception as e:
             return {"ready": False, "error": _error_ref(e)}

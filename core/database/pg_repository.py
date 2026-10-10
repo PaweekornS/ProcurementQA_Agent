@@ -422,6 +422,19 @@ class PostgresRepository:
             rows = conn.execute(query, {"cids": tuple(clause_ids), "org_id": org_id}).mappings().all()
             return [dict(r) for r in rows]
 
+    def get_faq_cases_by_ids(self, case_ids: List[str], org_id: str = "DGA") -> List[Dict[str, Any]]:
+        if not case_ids:
+            return []
+        query = text("SELECT case_id, question, answer, cited_laws FROM faq_cases "
+                     "WHERE case_id IN :ids AND org_id IN ('PUBLIC', :org_id)")
+        with self.tenant_connection(org_id) as conn:
+            return [dict(r) for r in conn.execute(query, {"ids": tuple(case_ids), "org_id": org_id}).mappings().all()]
+
+    def list_document_titles(self, org_id: str = "DGA") -> List[str]:
+        query = text("SELECT title FROM legal_documents WHERE org_id IN ('PUBLIC', :org_id) ORDER BY title")
+        with self.tenant_connection(org_id) as conn:
+            return [r[0] for r in conn.execute(query, {"org_id": org_id}).all()]
+
     def lookup_section(self, doc_id_or_keyword: str, section_num: int, org_id: str = "DGA") -> List[Dict[str, Any]]:
         """Fast relational lookup for a section number in a statute with tenant filtering."""
         query = text("""

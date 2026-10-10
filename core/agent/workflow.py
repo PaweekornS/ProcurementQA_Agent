@@ -46,15 +46,8 @@ def merge_and_dedup_laws(law_lists: List[List[Dict[str, Any]]]) -> List[Dict[str
 class ProcurementAgenticWorkflow:
     """Compiled LangGraph Agentic RAG Workflow with Adaptive Query Rewriting and Grounding Guardrail."""
 
-    def __init__(self, model, retrieve_config: Optional[Dict[str, Any]] = None, max_retries: int = 2):
+    def __init__(self, model, max_retries: int = 2):
         self.model = model
-        self.retrieve_config = retrieve_config or {
-            "top_retrieve": True,
-            "direct_retrieve": True,
-            "augment_retrieve": False,
-            "top_retrieve_top_k": 3,
-            "direct_retrieve_top_k": 5
-        }
         self.max_retries = max_retries
         self.classifier = IssueDecomposer(model)
         self.synthesizer = LegalSynthesizer(model)

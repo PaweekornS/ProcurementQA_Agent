@@ -480,7 +480,7 @@ def run_migration(
     )
     print(f"Removed {removed} previously derived relationships.")
 
-    # 5.1 Statutory edges from the shared linker (same rules as the in-memory GraphDB build)
+    # 5.1 Statutory edges from the shared linker (same rules as the in-memory store)
     print("Extracting citation, empowerment and reading-order edges (citation_linker)...")
     edges: List[Dict[str, Any]] = []
     for e in extract_legal_edges(linker_units, act_title=normalize_doc_name(ACT_TITLE)):

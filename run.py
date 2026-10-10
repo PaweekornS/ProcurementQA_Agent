@@ -218,10 +218,7 @@ def process_cases_worker(
     
     config.model.device = device
     config.model.model_name = model_name
-    # Workers load the graph read-only; the parent process owns persistence.
-    config.graph.auto_build = False
-    config.graph.auto_save = False
-    
+
     rag = ProcurementQAPipeline(config=config)
     
     results = []
@@ -388,71 +385,24 @@ def run_evaluation(
     dotenv_path: str = "configs/thai_procurement.env",
     devices: Optional[List[str]] = None,
     datasets_path: str = "./datasets",
-    build_graph: bool = True,
-    force_rebuild: bool = False,
     limit: Optional[int] = None,
     workers: int = 4,
     rag_mode: str = "agentic"
 ):
     config = PipelineConfig.from_env_file(dotenv_path)
-    config.rag_mode = (rag_mode or "agentic").lower()
-    os.environ["RAG_MODE"] = config.rag_mode
+    os.environ["RAG_MODE"] = (rag_mode or "agentic").lower()
     clean_dataset = sanitize_dataset_name(datasets)
     output_dir = os.path.join(config.data.output_dir, clean_dataset)
     os.makedirs(output_dir, exist_ok=True)
     if datasets_path == "./datasets" and config.data.datasets_path:
         datasets_path = config.data.datasets_path
-    use_tri_store = os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
-    if not config.graph.graph_db_path:
-        config.graph.graph_db_path = os.path.join(output_dir, f"{model_name}_graph_db.pkl")
-        print(f"graph_db_path not configured; using {config.graph.graph_db_path}")
+    # Retrieval needs no preparation here: the tri-store is seeded by the migration, and local mode
+    # builds its in-memory index from outputs/corpus (data_ocr/) on first use.
+    if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
+        print("USE_TRI_STORE=true: evaluating against the tri-store.")
+    else:
+        print("Local mode: evaluating against the in-memory store built from data_ocr/.")
 
-    # Tri-store mode retrieves from PostgreSQL/Qdrant/Neo4j (seeded by the migration), exactly like
-    # the served API, so the local .pkl graph is neither built nor required.
-    if use_tri_store:
-        print("USE_TRI_STORE=true: evaluating against the tri-store; skipping local graph build.")
-    # Build graph before starting parallel processes
-    elif build_graph:
-        print("="*60)
-        print("Building graph database...")
-        print("="*60)
-        
-        # Use first device for graph construction (if devices specified), otherwise use config device
-        if devices and len(devices) > 0:
-            build_device = devices[0]
-        else:
-            build_device = config.model.device
-        
-        # Create configuration for graph construction (using first device)
-        build_config = PipelineConfig.from_dict(config.to_dict())
-        build_config.model.device = build_device
-        build_config.model.model_name = model_name
-        # run_evaluation controls graph construction explicitly below.
-        build_config.graph.auto_build = False
-        build_config.graph.auto_save = False
-        
-        # Create ProcurementQA Agent instance and build graph
-        print(f"Using device {build_device} for graph construction...")
-        rag_builder = ProcurementQAPipeline(config=build_config)
-        rag_builder.build_graph(force_rebuild=force_rebuild)
-        
-        # Release model resources used for graph construction
-        if hasattr(rag_builder, 'model') and hasattr(rag_builder.model, 'release_model'):
-            try:
-                rag_builder.model.release_model()
-            except:
-                pass
-        
-        print("="*60)
-        print("Graph database ready!")
-        print("="*60)
-        print()
-    elif not os.path.exists(config.graph.graph_db_path):
-        raise FileNotFoundError(
-            f"Graph database not found: {config.graph.graph_db_path}. "
-            "Run without --no-build-graph first."
-        )
-    
     test_cases = load_test_cases(datasets, datasets_path)
     print(f"Loaded {len(test_cases)} test cases from {datasets} dataset")
     if limit is not None and limit > 0:
@@ -506,24 +456,22 @@ def run_evaluation(
                 os.remove(part_file)
     else:
         # High-efficiency ThreadPool concurrent execution:
-        # Shares single graph DB in memory and single GPU CrossEncoder (Lock-guarded, ~1.2GB VRAM).
+        # Shares one retriever (store + GPU CrossEncoder, lock-guarded, ~1.2GB VRAM) across threads.
         # OpenRouter API calls run in parallel, cutting total inference time by 4x-10x!
         device = devices[0] if (devices and len(devices) > 0) else (config.model.device or "cpu")
         print(f"Starting concurrent inference with {workers} worker threads on {device} (model: {model_name})...")
         
         config.model.device = device
         config.model.model_name = model_name
-        config.graph.auto_build = False
-        config.graph.auto_save = False
         
         rag = ProcurementQAPipeline(config=config)
         
         # Warmup embedder and reranker in main thread to prevent multi-threaded CUDA initialization races
         try:
-            from core.retrieval.search import get_embedding
-            from core.retrieval.reranker import get_reranker
+            from core.retrieval.embedding import get_embedding
+            from core.retrieval.retriever import get_retriever
             _ = get_embedding("warmup query")
-            _ = get_reranker()
+            _ = get_retriever()  # loads the store and the reranker once, before the threads start
             print("[Warmup] Local embedder and GPU reranker successfully initialized in main thread.")
         except Exception as e:
             print(f"[Warmup Warning] {e}")
@@ -704,7 +652,7 @@ def run_evaluation(
     strict_hit_rate = (total_both_hits / total_cases * 100) if total_cases > 0 else 0.0
     mean_recall = (total_recall / total_cases * 100) if total_cases > 0 else 0.0
     
-    active_mode = getattr(config, "rag_mode", "crag")
+    active_mode = os.environ.get("RAG_MODE", "agentic")
     print(f"\n{'='*65}")
     print(f"Model: {model_name} | Dataset: {clean_dataset} | Mode: {active_mode}")
     print(f"Total Questions Evaluated: {total_cases}")
@@ -783,16 +731,6 @@ if __name__ == "__main__":
         help="GPU devices to use (e.g., cuda:2 cuda:3)",
     )
     parser.add_argument(
-        "--no-build-graph",
-        action="store_true",
-        help="Skip graph construction (assume graph already exists)",
-    )
-    parser.add_argument(
-        "--force-rebuild",
-        action="store_true",
-        help="Force rebuild graph even if it already exists",
-    )
-    parser.add_argument(
         "--workers",
         type=int,
         default=8,
@@ -816,8 +754,6 @@ if __name__ == "__main__":
         dotenv_path=args.dotenv_path,
         devices=args.devices,
         datasets_path=args.datasets_path if args.datasets_path else "./datasets",
-        build_graph=not args.no_build_graph,
-        force_rebuild=args.force_rebuild,
         limit=args.limit,
         workers=args.workers,
         rag_mode=args.rag_mode

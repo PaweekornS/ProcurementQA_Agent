@@ -8,7 +8,6 @@ test sets:
   - general documents  (evidence spans, evaluation/evidence.py)
 
 Systems
-  legacy      core.retrieval.search.search_similar_nodes_direct (per-call rerank + per-candidate graph)
   new         core.retrieval.retriever.Retriever (fused recall, one rerank, carried graph neighbours)
   new_nograph Retriever with graph_per_seed=0
   new_norerank Retriever without the cross-encoder (fused order)
@@ -17,8 +16,8 @@ Every system gets the single question as its only query, so the comparison isola
 multi-query behaviour (sub-questions) is measured end-to-end by run.py + evaluate_rag_triad.py.
 
 Usage:
+    python evaluation/retrieval_benchmark.py                               # local, in-memory store
     USE_TRI_STORE=true python evaluation/retrieval_benchmark.py            # tri-store (Docker up)
-    python evaluation/retrieval_benchmark.py --systems new,new_nograph     # in-memory store
 """
 
 import argparse
@@ -53,7 +52,7 @@ DATASETS = {
 
 
 def build_systems(names: List[str], org_id: str) -> Dict[str, Callable[[str], List[dict]]]:
-    from core.retrieval.retriever import get_retriever, tri_store_enabled
+    from core.retrieval.retriever import get_retriever
 
     systems = {}
     base = get_retriever()
@@ -64,14 +63,7 @@ def build_systems(names: List[str], org_id: str) -> Dict[str, Callable[[str], Li
         return r
 
     for name in names:
-        if name == "legacy":
-            if not tri_store_enabled():
-                print("[skip] legacy needs USE_TRI_STORE=true")
-                continue
-            from core.retrieval.search import get_embedding, search_similar_nodes_direct
-            top_k = int(os.getenv("DIRECT_RETRIEVE_TOP_K", "10"))
-            systems[name] = lambda q, f=search_similar_nodes_direct, e=get_embedding, k=top_k: f(None, e(q), q, top_k=k, org_id=org_id)[1]
-        elif name == "new":
+        if name == "new":
             systems[name] = lambda q, r=base: r.retrieve([q], org_id).laws()
         elif name == "new_nograph":
             r = variant(graph_per_seed=0)
@@ -99,8 +91,8 @@ def score_question(q: dict, laws: List[dict]) -> Dict[str, dict]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Retrieval-only benchmark of legacy vs refactored retrieval")
-    ap.add_argument("--systems", default="legacy,new,new_nograph,new_norerank")
+    ap = argparse.ArgumentParser(description="Retrieval-only benchmark (no LLM)")
+    ap.add_argument("--systems", default="new,new_nograph,new_norerank")
     ap.add_argument("--datasets", default="statute,general")
     ap.add_argument("--org-id", default=os.getenv("DEFAULT_ORG_ID", "DGA"))
     ap.add_argument("--out", default="outputs/retrieval_benchmark.json")

@@ -2,11 +2,6 @@
 
 from typing import Optional
 
-# Query understanding prompts
-from .query import (
-    GET_PROCUREMENT_FEATURES_PROMPT,
-)
-
 # Answer generation prompts
 from .answer import (
     ANSWER_LEGAL_QA_PROMPT,
@@ -21,10 +16,6 @@ from .agent import (
 
 _PROMPTS = {
     "th": {
-        "QUERY_FEATURES_PROMPT": GET_PROCUREMENT_FEATURES_PROMPT,
-        "QUERY_FEATURES_INPUT_TEMPLATE": "\nคำถาม/ข้อหารือ: {fact}",
-        "SUMMARIZE_QUESTION_PROMPT": "คำถาม/ข้อหารือ:\n{fact}\n\nจงสรุปข้อเท็จจริงและประเด็นคำถามให้กระชับ ชัดเจน:",
-        "SELECT_LAWS_PROMPT": ANSWER_LEGAL_QA_PROMPT,
         "ANSWER_PROMPT": ANSWER_LEGAL_QA_PROMPT,
         "ANSWER_LEGAL_QA_PROMPT": ANSWER_LEGAL_QA_PROMPT,
         "INTENT_DECOMPOSE_PROMPT": INTENT_DECOMPOSE_PROMPT,
@@ -34,9 +25,6 @@ _PROMPTS = {
             "ข้อกฎหมายและระเบียบ:\n-----\n{law}\n-----\n"
             "คำถาม/ข้อหารือ:\n-----\n{case}\n-----\nคำตอบ (JSON):"
         ),
-        "SUMMARIZE_TEXTS_PROMPT": "จงสรุปสาระสำคัญของเอกสารและประเด็นกฎหมายต่อไปนี้:\n",
-        "RERANK_CLUSTERS_PROMPT_TEMPLATE": "จงจัดลำดับความเกี่ยวข้องของกลุ่มกฎหมายต่อไปนี้:\n{cluster_summaries}\nคำถาม: {query_text}\nลำดับ:",
-        "RERANK_PROMPT_TEMPLATE": "จงจัดลำดับความเกี่ยวข้องของข้อกฎหมายต่อไปนี้:\n{neighbor_summaries}\nคำถาม: {query_text}\nลำดับ:",
     },
 }
 
@@ -74,7 +62,6 @@ def get_prompt(name: str, language: Optional[str] = None) -> str:
 __all__ = [
     "set_prompt_language",
     "get_prompt",
-    "GET_PROCUREMENT_FEATURES_PROMPT",
     "ANSWER_LEGAL_QA_PROMPT",
     "INTENT_DECOMPOSE_PROMPT",
     "AUDIT_COMPLETENESS_PROMPT",

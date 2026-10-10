@@ -21,7 +21,7 @@ import uuid
 from typing import Dict, Any, List, Optional, Tuple
 
 from core.pipeline import ProcurementQAPipeline, PipelineConfig
-from core.graph.local_graph import GraphDBManager
+from core.retrieval.retriever import get_retriever
 from core.chunking.page_locator import format_page_range
 from core.utils.settings import env
 
@@ -70,28 +70,18 @@ class ProcurementService:
         self,
         dotenv_path: Optional[str] = None,
         config: Optional[PipelineConfig] = None,
-        auto_build: Optional[bool] = None
     ):
         self.dotenv_path = dotenv_path or os.getenv("DOTENV_PATH", ".env")
         self.config = config or PipelineConfig.from_env_file(self.dotenv_path)
-        
-        # Explicit override
-        if auto_build is not None:
-            self.config.graph.auto_build = auto_build
-        elif env("AUTO_BUILD") is not None:
-            self.config.graph.auto_build = env("AUTO_BUILD", "True").lower() in ("true", "1", "yes")
-        elif os.getenv("DISABLE_AUTO_BUILD") == "1":
-            self.config.graph.auto_build = False
-            
         self.rag = ProcurementQAPipeline(config=self.config)
-        self._section_index: Dict[str, List[Dict[str, Any]]] = {}
-        self._build_section_lookup_index()
         self._warmup_models()
 
     def _warmup_models(self):
         try:
-            from core.retrieval.search import get_embedding
+            from core.retrieval.embedding import get_embedding
             from core.retrieval.reranker import get_reranker, is_reranker_enabled
+            # Load the store (and, locally, build the BM25/dense index) before the first request
+            get_retriever()
 
             if is_reranker_enabled():
                 import torch
@@ -116,50 +106,14 @@ class ProcurementService:
         cls,
         dotenv_path: Optional[str] = None,
         config: Optional[PipelineConfig] = None,
-        auto_build: Optional[bool] = None
     ) -> "ProcurementService":
         if cls._instance is None:
-            cls._instance = cls(dotenv_path=dotenv_path, config=config, auto_build=auto_build)
+            cls._instance = cls(dotenv_path=dotenv_path, config=config)
         return cls._instance
 
     # --------------------------------------------------------------------------
     # Tier 1: Indexing & Atomic Lookup
     # --------------------------------------------------------------------------
-
-    def _build_section_lookup_index(self):
-        """Build fast in-memory index mapping section keys to statutory nodes."""
-        laws = self.rag.law_to_crime or []
-        for law in laws:
-            items = law.get("items", [])
-            entry_id = law.get("id", "")
-            for item in items:
-                related = item.get("related_laws", [])
-                text = item.get("text", "")
-                topics = item.get("crime", [])
-
-                node_entry = {
-                    "id": entry_id,
-                    "text": text,
-                    "topics": topics,
-                    "related_laws": related,
-                    "judge_dep": item.get("judge_dep", [])
-                }
-
-                # Index by exact related items (e.g. 'มาตรา ๕๖', 'ข้อ ๗๙')
-                for r in related:
-                    r_norm = normalize_digits(r.strip())
-                    if r_norm:
-                        self._section_index.setdefault(r_norm.lower(), []).append(node_entry)
-                        # Also index just the number if starts with มาตรา or ข้อ
-                        num_match = re.search(r"(\d+)", r_norm)
-                        if num_match:
-                            num = num_match.group(1)
-                            if "มาตรา" in r:
-                                self._section_index.setdefault(f"มาตรา {num}", []).append(node_entry)
-                                self._section_index.setdefault(f"sec_{num}", []).append(node_entry)
-                            elif "ข้อ" in r:
-                                self._section_index.setdefault(f"ข้อ {num}", []).append(node_entry)
-                                self._section_index.setdefault(f"rule_{num}", []).append(node_entry)
 
     def lookup_section(self, section: str, doc_title: Optional[str] = None, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -167,115 +121,34 @@ class ProcurementService:
 
         Args:
             section: Section string e.g. "มาตรา 56", "56", "ข้อ 79", "มาตรา ๕๖ (๒) (ข)"
-            doc_title: Optional filter by document title (e.g. "พระราชบัญญัติ", "ระเบียบ")
-            org_id: Tenant scope (tri-store mode); PUBLIC records are always visible
+            doc_title: Optional document title keyword (e.g. "พระราชบัญญัติ", "ระเบียบ")
+            org_id: Tenant scope; PUBLIC records are always visible
         """
         if not section or not section.strip():
             return {"found": False, "error": "section parameter is required"}
-
-        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
-            return self._lookup_section_tri_store(section, doc_title, org_id)
-
-        sec_norm = normalize_digits(section.strip()).lower()
-        candidates = self._section_index.get(sec_norm, [])
-
-        if not candidates:
-            # Try matching base section like "มาตรา 56" or "ข้อ 79" from sub-clause "มาตรา 56 (2) (ข)"
-            m_base = re.search(r"(มาตรา|ข้อ)\s*(\d+)", sec_norm)
-            if m_base:
-                base_key = f"{m_base.group(1)} {m_base.group(2)}"
-                candidates = self._section_index.get(base_key, [])
-
-        if not candidates:
-            # Try prepending มาตรา or ข้อ if user supplied just a number
-            if re.match(r"^\d+", sec_norm):
-                candidates = self._section_index.get(f"มาตรา {sec_norm}", [])
-                if not candidates:
-                    candidates = self._section_index.get(f"ข้อ {sec_norm}", [])
-
-        if not candidates:
-            # Substring scan across keys
-            for k, val in self._section_index.items():
-                if sec_norm in k or k in sec_norm:
-                    candidates.extend(val)
-                    break
-
-        if not candidates:
-            return {
-                "found": False,
-                "section": section,
-                "message": f"No statutory clause found matching section: {section}"
-            }
-
-        # Filter by doc_title if specified
-        matched_item = None
-        if doc_title:
-            doc_norm = doc_title.strip().lower()
-            for cand in candidates:
-                cand_id = cand["id"].lower()
-                cand_topics = " ".join(cand["topics"]).lower()
-                if doc_norm in cand_id or doc_norm in cand_topics:
-                    matched_item = cand
-                    break
-
-        if not matched_item:
-            matched_item = candidates[0]
-
-        # Extract focused paragraph for the specific section from the macro chunk if possible
-        full_text = matched_item["text"]
-        focused_text = self._extract_focused_section_text(full_text, section)
-
-        return {
-            "found": True,
-            "section": section,
-            "source_id": matched_item["id"],
-            "topics": matched_item["topics"],
-            "related_laws": matched_item.get("related_laws", []),
-            "judge_dep": matched_item.get("judge_dep", []),
-            "focused_content": focused_text or full_text[:1500],
-            "full_macro_chunk": full_text
-        }
-
-    def _lookup_section_tri_store(self, section: str, doc_title: Optional[str], org_id: Optional[str]) -> Dict[str, Any]:
-        """PostgreSQL-backed lookup with the same response contract as the in-memory index."""
-        from core.database import StorageManager
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         sec_norm = normalize_digits(section.strip())
         num_m = re.search(r"(\d+)", sec_norm)
         if not num_m:
             return {"found": False, "section": section, "message": f"No section/clause number in: {section}"}
-
-        pg = StorageManager.get_instance().pg
-        num = int(num_m.group(1))
-        if "ข้อ" in sec_norm:
-            records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
-        else:
-            # 'มาตรา N' or a bare number: Act sections first, then regulation clauses
-            records = pg.lookup_section(doc_title or "", num, org_id=active_org)
-            if not records and "มาตรา" not in sec_norm:
-                records = pg.lookup_clause(doc_title or "", num, org_id=active_org)
-
+        # 'มาตรา N' -> Act sections, 'ข้อ N' -> clauses, a bare number -> sections first, then clauses
+        kind = "clause" if "ข้อ" in sec_norm else ("section" if "มาตรา" in sec_norm else None)
+        records = get_retriever().store.lookup_unit(kind, int(num_m.group(1)), doc_title or "", active_org)
         if not records:
-            return {
-                "found": False,
-                "section": section,
-                "message": f"No statutory clause found matching section: {section}"
-            }
+            return {"found": False, "section": section,
+                    "message": f"No statutory clause found matching section: {section}"}
 
         top = records[0]
-        full_text = top.get("content_thai", "")
+        full_text = top["content"]
         result = {
             "found": True,
             "section": section,
-            "source_id": top.get("entry", ""),
-            "clause_id": top.get("clause_id"),
+            "source_id": top["entry"],
+            "clause_id": top["chunk_id"],
             "doc_title": top.get("doc_title"),
             "source_file": top.get("source_file"),
             "page": format_page_range(top.get("page_start"), top.get("page_end"), top.get("total_pages")),
-            "topics": top.get("topics", []),
-            "related_laws": top.get("related_laws", []),
-            "judge_dep": top.get("judge_dep", []),
             "focused_content": self._extract_focused_section_text(full_text, section) or full_text[:1500],
             "full_macro_chunk": full_text,
         }
@@ -349,47 +222,13 @@ class ProcurementService:
 
         return results
 
-    def search_faqs(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """
-        Search historical rulings and Comptroller General FAQs (cases_with_feature.json).
-        """
+    def search_faqs(self, query: str, top_k: int = 3, org_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Search the Comptroller General's Department FAQ (one question/answer pair per hit)."""
         if not query or not query.strip():
             return []
-
-        q_terms = set(re.findall(r"\w+", query.lower()))
-        cases = self.rag.cases_db or []
-        scored_cases = []
-
-        for c in cases:
-            fact = c.get("fact", "")
-            laws = c.get("law", [])
-            topics = c.get("crime", [])
-            text_to_match = f"{fact} {' '.join(laws)} {' '.join(topics)}".lower()
-
-            # Simple token overlap score + length normalization
-            match_count = sum(1 for term in q_terms if term in text_to_match)
-            if match_count > 0:
-                score = match_count / (len(q_terms) + 0.1)
-                scored_cases.append((score, c))
-
-        scored_cases.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for score, c in scored_cases[:top_k]:
-            fact = c.get("fact", "")
-            parts = fact.split("แนวทางวินิจฉัย/คำตอบ:")
-            question_part = parts[0].replace("ข้อหารือ/คำถาม:", "").strip()
-            answer_part = parts[1].strip() if len(parts) > 1 else fact
-
-            results.append({
-                "faq_id": c.get("id"),
-                "question": question_part,
-                "answer": answer_part,
-                "laws": c.get("law", []),
-                "topics": c.get("crime", []),
-                "relevance_score": round(score, 3)
-            })
-
-        return results
+        from core.retrieval.embedding import get_embedding
+        active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
+        return get_retriever().store.search_faq(query.strip(), get_embedding(query.strip()), active_org, top_k)
 
     # --------------------------------------------------------------------------
     # Tier 2: Knowledge Graph Traversal
@@ -397,102 +236,24 @@ class ProcurementService:
 
     def traverse_regulations(self, section_reference: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Traverse the Knowledge Graph to find subordinate rules, ministerial regulations,
-        or circular letters linked to a parent statutory section, filtered by organization.
+        Neighbours of a statutory section in the knowledge graph: adjacent sections, clauses it
+        cites, subordinate rules that derive from it and FAQ cases about it.
         """
         if not section_reference or not section_reference.strip():
-            return {"parent": section_reference, "related_nodes": []}
+            return {"target": section_reference, "related_nodes": []}
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        if os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes"):
-            from core.database import StorageManager
-            storage = StorageManager.get_instance()
-            norm_ref = normalize_digits(section_reference.strip()).lower()
-            num_m = re.search(r"(\d+)", norm_ref)
-            clause_records = []
-            if "ข้อ" in norm_ref and num_m:
-                clause_records = storage.pg.lookup_clause("", int(num_m.group(1)), org_id=active_org)
-            elif num_m:
-                clause_records = storage.pg.lookup_section("", int(num_m.group(1)), org_id=active_org)
-
-            related_results = []
-            matched_cid = None
-            if clause_records:
-                matched_cid = clause_records[0]["clause_id"]
-                graph_ctx = storage.traverse_clause_graph(matched_cid, org_id=active_org)
-                for adj in graph_ctx.get("adjacent_sections", []):
-                    related_results.append({
-                        "node_id": adj.get("clause_id"),
-                        "type": "Laws",
-                        "relation": "ADJACENT_SECTION",
-                        "description": f"Adjacent: {adj.get('entry', '')}"
-                    })
-                for cited in graph_ctx.get("cited_clauses", []):
-                    related_results.append({
-                        "node_id": cited.get("clause_id"),
-                        "type": "Laws",
-                        "relation": "CITES_CLAUSE",
-                        "description": f"Cited: {cited.get('quote', '')}"
-                    })
-                for sub in graph_ctx.get("subordinate_laws", []):
-                    related_results.append({
-                        "node_id": sub.get("clause_id"),
-                        "type": "Laws",
-                        "relation": "SUBORDINATE_RULE",
-                        "description": f"{sub.get('document_title', '')}: {sub.get('entry', '')}"
-                    })
-                for cs in graph_ctx.get("related_cases", []):
-                    related_results.append({
-                        "node_id": cs.get("case_id"),
-                        "type": "Cases",
-                        "relation": "RELATES_TO_LAW",
-                        "description": cs.get("question", "")
-                    })
-
-            return {
-                "target": section_reference,
-                "matched_graph_node": matched_cid,
-                "graph_neighbors_count": len(related_results),
-                "related_nodes": related_results,
-                "associated_topics": clause_records[0].get("topics", []) if clause_records else []
-            }
-
-        db = GraphDBManager.get_db()
-        norm_ref = normalize_digits(section_reference.strip()).lower()
-
-        # 1. Search for matching node in the graph
-        matched_node_id = None
-        for node_id in db.nodes_data:
-            if norm_ref in normalize_digits(node_id).lower():
-                matched_node_id = node_id
-                break
-
-        related_results = []
-        if matched_node_id:
-            # Get neighbors from graph
-            neighbors = list(db.graph.neighbors(matched_node_id))
-            for n_id in neighbors:
-                n_info = db.nodes_data.get(n_id, {})
-                edge_data = db.graph.get_edge_data(matched_node_id, n_id) or {}
-                related_results.append({
-                    "node_id": n_id,
-                    "type": n_info.get("type", "Unknown"),
-                    "relation": list(edge_data.keys())[0] if isinstance(edge_data, dict) and edge_data else "RELATED",
-                    "description": n_info.get("data", {}).get("description", "")[:400]
-                })
-
-        # 2. Also retrieve related items from section lookup index
-        lookup_res = self.lookup_section(section_reference)
-        cross_laws = []
-        if lookup_res.get("found"):
-            cross_laws = lookup_res.get("topics", [])
-
+        found = self.lookup_section(section_reference, org_id=active_org)
+        if not found.get("found"):
+            return {"target": section_reference, "matched_graph_node": None,
+                    "graph_neighbors_count": 0, "related_nodes": []}
+        related = get_retriever().store.related(found["clause_id"], active_org)
         return {
             "target": section_reference,
-            "matched_graph_node": matched_node_id,
-            "graph_neighbors_count": len(related_results),
-            "related_nodes": related_results,
-            "associated_topics": cross_laws
+            "matched_graph_node": found["clause_id"],
+            "matched_entry": found["source_id"],
+            "graph_neighbors_count": len(related),
+            "related_nodes": related,
         }
 
     def get_related_clauses(self, section_reference: str, org_id: Optional[str] = None, max_hops: int = 1) -> List[Dict[str, Any]]:
@@ -550,13 +311,7 @@ class ProcurementService:
         case = {"fact": question, "name": "ผู้สอบถาม", "org_id": active_org}
 
         from core.agent import ProcurementAgenticWorkflow
-        retrieve_config = self.rag.config.retrieve.to_dict()
-        max_retries = int(os.getenv("AGENTIC_MAX_RETRIES", "2"))
-        workflow = ProcurementAgenticWorkflow(
-            self.rag.model,
-            retrieve_config=retrieve_config,
-            max_retries=max_retries
-        )
+        workflow = ProcurementAgenticWorkflow(self.rag.model, max_retries=self.rag.config.agentic_max_retries)
         agent_res = workflow.invoke(case)
         judge = agent_res.get("judge_result", {})
         used_laws = agent_res.get("used_laws", [])
@@ -790,20 +545,13 @@ class ProcurementService:
 """
 
     def get_catalog_resource(self) -> Dict[str, Any]:
-        """Catalog of indexed statutes, regulations, and cases."""
-        laws = self.rag.law_to_crime or []
-        cases = self.rag.cases_db or []
-        doc_titles = set()
-        for law in laws:
-            topics = law.get("items", [{}])[0].get("crime", [])
-            for t in topics:
-                if len(t) > 5:
-                    doc_titles.add(t)
-
+        """Catalog of indexed documents, chunks and FAQ pairs."""
+        cat = get_retriever().store.catalog(os.getenv("DEFAULT_ORG_ID", "DGA"))
         return {
-            "total_statute_macro_nodes": len(laws),
-            "total_faq_cases": len(cases),
-            "indexed_documents": sorted(list(doc_titles))[:30],
-            "embedding_model": self.rag.config.graph.embedding_model,
-            "llm_model": self.rag.config.model.model_name
+            "total_chunks": cat["chunks"],
+            "total_faq_pairs": cat["faq_pairs"],
+            "indexed_documents": cat["documents"],
+            "embedding_model": self.rag.config.embedding.tokenmind_model
+            if self.rag.config.embedding.provider == "tokenmind" else self.rag.config.embedding.model,
+            "llm_model": self.rag.config.model.model_name,
         }
