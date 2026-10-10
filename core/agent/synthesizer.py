@@ -1,8 +1,8 @@
-"""Legal Synthesizer & Adjudicator Agent for LegalGraphRAG Agentic Workflow"""
+"""Legal Synthesizer & Adjudicator Agent for ProcurementQA Agent Agentic Workflow"""
 import json
 import re
 from typing import Dict, Any, List, Optional
-from core.judge.judge_crime import judge_crime_all, FALLBACK_NO_LAW_ANSWER
+from core.generation.answer import generate_answer, FALLBACK_NO_LAW_ANSWER
 
 
 class LegalSynthesizer:
@@ -49,7 +49,7 @@ class LegalSynthesizer:
                 f"ประเด็นที่ต้องตอบให้ครบถ้วนทุกข้อ:\n{issue_list_str}"
             )
 
-        result = judge_crime_all(self.model, law_used, retrieved_facts, enriched_case)
+        result = generate_answer(self.model, law_used, retrieved_facts, enriched_case)
 
         # Clean direct_answer: ensure no section citations are inside direct_answer
         if result.get("direct_answer"):

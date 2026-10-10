@@ -31,7 +31,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 from core.service import ProcurementService
-from core.graph_construct.graph_db import GraphDBManager
+from core.graph.local_graph import GraphDBManager
 
 # 10 Simulated Organizations
 TENANTS = [
@@ -301,7 +301,7 @@ def test_concurrency(service, num_workers=10, queries_per_worker=3):
 
 def main():
     print("=" * 90)
-    print(" LegalGraphRAG 10x Multi-Tenant Scale & Isolation Benchmark (Executive PoC)")
+    print(" ProcurementQA Agent 10x Multi-Tenant Scale & Isolation Benchmark (Executive PoC)")
     print("=" * 90)
 
     ram_initial = get_process_memory_mb()
@@ -373,14 +373,14 @@ def main():
         f.write(f"""# Executive PoC Report: 10x Multi-Tenant Scale & Security Isolation
 
 **Date:** {time.strftime("%Y-%m-%d %H:%M:%S")}  
-**Project:** ProcurementQA_Agent (LegalGraphRAG)  
+**Project:** ProcurementQA Agent  
 **Evaluated Systems:** 10 Distinct Government Agencies & State Enterprises + Central Public Law  
 
 ---
 
 ## 1. Executive Summary
 
-This benchmark proves that **LegalGraphRAG successfully scales to 10x data volume (~26,600+ legal clauses, ~38,000+ graph nodes)** while maintaining:
+This benchmark proves that **ProcurementQA Agent successfully scales to 10x data volume (~26,600+ legal clauses, ~38,000+ graph nodes)** while maintaining:
 1. **100% Strict Tenant Data Isolation (Zero Cross-Agency Leaks)**
 2. **Sub-millisecond Graph Traversal (< 0.01 ms)**
 3. **Sub-second Hybrid Retrieval (~400–600 ms)**

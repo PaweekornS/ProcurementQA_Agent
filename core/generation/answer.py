@@ -1,6 +1,6 @@
 import json
 import re
-from core.prompt import get_prompt
+from core.prompts import get_prompt
 
 
 TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
@@ -29,9 +29,9 @@ def format_fact(facts):
     return res
 
 
-def judge_crime(chatbot, law_used, retrieved_facts, case_description):
+def select_applicable_laws(chatbot, law_used, retrieved_facts, case_description):
     response = chatbot.generate_response(
-        get_prompt("JUDGE_CRIME_PROMPT").format(
+        get_prompt("SELECT_LAWS_PROMPT").format(
             law=format_law(law_used),
             case=case_description
         ),
@@ -52,7 +52,7 @@ def judge_crime(chatbot, law_used, retrieved_facts, case_description):
 FALLBACK_NO_LAW_ANSWER = "ไม่พบข้อกฎหมาย ระเบียบ หรือประกาศที่เกี่ยวข้องกับประเด็นข้อหารือนี้ในฐานข้อมูลการจัดซื้อจัดจ้างภาครัฐ (เนื่องจากไม่อยู่ในขอบเขตของ พ.ร.บ. การจัดซื้อจัดจ้างฯ ระเบียบกระทรวงการคลัง หรือประกาศที่จัดเก็บไว้ในคลังข้อมูล)"
 
 
-def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
+def generate_answer(chatbot, law_used, retrieved_facts, case_description):
     if not law_used and not retrieved_facts:
         return {
             "status": "NO_LAW_FOUND",
@@ -63,7 +63,7 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
             "law_article": []
         }
 
-    prompt_str = get_prompt("JUDGE_CRIME_ALL_PROMPT")
+    prompt_str = get_prompt("ANSWER_PROMPT")
     formatted_law = format_law(law_used)
     formatted_facts = format_fact(retrieved_facts) if retrieved_facts else ""
 
@@ -80,7 +80,7 @@ def judge_crime_all(chatbot, law_used, retrieved_facts, case_description):
                 case=case_description
             )
     else:
-        input_template = get_prompt("JUDGE_CRIME_ALL_INPUT_TEMPLATE")
+        input_template = get_prompt("ANSWER_INPUT_TEMPLATE")
         full_prompt = prompt_str + input_template.format(
             law=formatted_law,
             case=case_description

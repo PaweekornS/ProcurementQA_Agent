@@ -2,7 +2,7 @@
 """
 core/mcp_service.py
 
-Domain service providing decoupled access to LegalGraphRAG capabilities:
+Domain service providing decoupled access to ProcurementQA Agent capabilities:
 - Exact statutory clause lookup (0-LLM, ~10ms)
 - Hybrid search over statutory clauses without synthesis (~100-300ms)
 - FAQ precedent search over Comptroller General cases (~50ms)
@@ -20,9 +20,9 @@ import time
 import uuid
 from typing import Dict, Any, List, Optional, Tuple
 
-from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
-from core.graph_construct.graph_db import GraphDBManager
-from core.preprocess.page_locator import format_page_range
+from core.pipeline import ProcurementQAPipeline, PipelineConfig
+from core.graph.local_graph import GraphDBManager
+from core.chunking.page_locator import format_page_range
 from core.utils.settings import env
 
 
@@ -61,7 +61,7 @@ class ServiceBusyError(RuntimeError):
 
 class ProcurementService:
     """
-    Singleton service managing LegalGraphRAG components, cached statutory lookups,
+    Singleton service managing ProcurementQA Agent components, cached statutory lookups,
     and compliance rule-checking.
     """
     _instance: Optional["ProcurementService"] = None
@@ -69,11 +69,11 @@ class ProcurementService:
     def __init__(
         self,
         dotenv_path: Optional[str] = None,
-        config: Optional[LegalGraphRAGConfig] = None,
+        config: Optional[PipelineConfig] = None,
         auto_build: Optional[bool] = None
     ):
         self.dotenv_path = dotenv_path or os.getenv("DOTENV_PATH", ".env")
-        self.config = config or LegalGraphRAGConfig.from_env_file(self.dotenv_path)
+        self.config = config or PipelineConfig.from_env_file(self.dotenv_path)
         
         # Explicit override
         if auto_build is not None:
@@ -83,15 +83,15 @@ class ProcurementService:
         elif os.getenv("DISABLE_AUTO_BUILD") == "1":
             self.config.graph.auto_build = False
             
-        self.rag = LegalGraphRAG(config=self.config)
+        self.rag = ProcurementQAPipeline(config=self.config)
         self._section_index: Dict[str, List[Dict[str, Any]]] = {}
         self._build_section_lookup_index()
         self._warmup_models()
 
     def _warmup_models(self):
         try:
-            from core.graph_construct.feature_graph import get_embedding
-            from core.graph_construct.hybrid_reranker import get_reranker, is_reranker_enabled
+            from core.retrieval.search import get_embedding
+            from core.retrieval.reranker import get_reranker, is_reranker_enabled
 
             if is_reranker_enabled():
                 import torch
@@ -115,7 +115,7 @@ class ProcurementService:
     def get_instance(
         cls,
         dotenv_path: Optional[str] = None,
-        config: Optional[LegalGraphRAGConfig] = None,
+        config: Optional[PipelineConfig] = None,
         auto_build: Optional[bool] = None
     ) -> "ProcurementService":
         if cls._instance is None:
@@ -315,7 +315,7 @@ class ProcurementService:
         if not query or not query.strip():
             return []
 
-        from core.graph_construct.feature_graph import search_similar_nodes_direct, get_embedding
+        from core.retrieval.search import search_similar_nodes_direct, get_embedding
 
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         query_emb = get_embedding(query.strip())
@@ -681,7 +681,7 @@ class ProcurementService:
         A quote is attributed to a source only when both the document and the มาตรา/ข้อ number
         match; unknown metadata is None (never a same-numbered clause of another document).
         """
-        from core.graph_construct.citation_linker import parse_unit_label
+        from core.graph.citation_linker import parse_unit_label
 
         def split_law(law: str):
             """'ระเบียบ... พ.ศ. 2560 ข้อ 86' -> ('ระเบียบ... พ.ศ. 2560', 'clause', 86)."""

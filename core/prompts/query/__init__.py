@@ -1,4 +1,4 @@
-"""Preprocessing related prompts for Thai Procurement LegalGraphRAG"""
+"""Preprocessing related prompts for ProcurementQA Agent"""
 
 GET_PROCUREMENT_FEATURES_PROMPT = """
 คุณคือผู้ช่วยวิเคราะห์คำถามและข้อหารือด้านการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ

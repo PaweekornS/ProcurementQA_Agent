@@ -2,7 +2,7 @@
 """
 evaluation/evaluate_rag_triad.py
 
-Production Evaluation Suite for Thai Procurement LegalGraphRAG.
+Production Evaluation Suite for ProcurementQA Agent.
 Evaluates both Retrieval and Generation layers:
 
 1. Retrieval Layer Metrics:
@@ -41,6 +41,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 load_dotenv()
+
+from evaluation.evidence import evidence_metrics  # noqa: E402
 
 TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 
@@ -423,9 +425,15 @@ def run_rag_triad_evaluation(
     use_llm_judge: bool = True,
     workers: int = 5,
     top_k: int = 5,
-    skip_no_law_found: bool = True
+    skip_no_law_found: bool = True,
+    corpus_chunks: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Runs end-to-end evaluation on output results JSON from run.py."""
+    """Runs end-to-end evaluation on output results JSON from run.py.
+
+    corpus_chunks: chunks.jsonl written by scripts/build_corpus.py. Result files only keep chunk
+    labels, so the corpus is needed to (a) score datasets whose ground truth is given as evidence
+    spans (general documents, tables) and (b) give the LLM judge full chunk text instead of
+    250-character snippets."""
     if not os.path.exists(results_file):
         raise FileNotFoundError(f"Results file not found: {results_file}")
     if not os.path.exists(test_cases_file):
@@ -449,6 +457,24 @@ def run_rag_triad_evaluation(
         gt_map[cid] = c
         if c.get("fact"):
             gt_map[c["fact"].strip()] = c
+
+    chunk_by_entry: Dict[str, Dict[str, str]] = {}
+    if corpus_chunks:
+        with open(corpus_chunks, "r", encoding="utf-8") as f:
+            for line in f:
+                c = json.loads(line)
+                chunk_by_entry[c["entry"]] = {"doc": c["doc_title"], "text": c["content"]}
+        print(f"[*] Loaded {len(chunk_by_entry)} corpus chunks for evidence matching and judge context")
+    if any(c.get("evidence") for c in test_cases) and not chunk_by_entry:
+        print("[!] Dataset has evidence spans but no --corpus-chunks: evidence metrics fall back to 250-char snippets")
+
+    def hydrate(item: Any) -> Dict[str, str]:
+        entry = (item.get("law_entry") or item.get("entry") or "") if isinstance(item, dict) else str(item)
+        hit = chunk_by_entry.get(entry)
+        if hit:
+            return hit
+        doc = entry.partition("|")[0].strip()
+        return {"doc": doc, "text": f"{entry} {item.get('snippet', '') if isinstance(item, dict) else ''}"}
 
     evaluator = GenerationEvaluator()
     items_to_eval = pred_results[:sample_limit] if sample_limit else pred_results
@@ -512,6 +538,16 @@ def run_rag_triad_evaluation(
         )["recall_at_k"]
         ret_metrics["full_context_available"] = bool(pred.get("analysis", {}).get("retrieved_context"))
 
+        # Evidence-span relevance (general documents / tables): chunker-independent
+        gt_evidence = gt_case.get("evidence") or []
+        if gt_evidence:
+            ranked_chunks = [hydrate(item) for item in ranked_context]
+            ret_metrics["evidence"] = {
+                str(k): evidence_metrics(gt_evidence, ranked_chunks, k) for k in eval_cutoffs
+            }
+            ret_metrics["evidence"]["context"] = evidence_metrics(gt_evidence, ranked_chunks, max(len(ranked_chunks), 1))
+        ret_metrics["question_type"] = gt_case.get("question_type")
+
         # If NO_LAW_FOUND and skipping is enabled: skip LLM Judge & exclude from aggregate scoring
         if is_no_law_found and skip_no_law_found:
             return {
@@ -544,7 +580,7 @@ def run_rag_triad_evaluation(
         for e in evidence:
             if isinstance(e, dict):
                 entry = e.get("law_entry", "")
-                snip = e.get("snippet", "")
+                snip = chunk_by_entry.get(entry, {}).get("text", "")[:2000] or e.get("snippet", "")
                 if entry and not any(entry in jc for jc in judge_contexts):
                     judge_contexts.append(f"[{entry}]: {snip}")
 
@@ -593,7 +629,7 @@ def run_rag_triad_evaluation(
             else:
                 ret_metrics = res["retrieval"]
                 gen_metrics = res["generation"]
-                print(f"  [{idx+1}/{total_count}] Prec@{top_k}: {ret_metrics['precision_at_k']:.2f} | Recall@{top_k}: {ret_metrics['recall_at_k']:.2f} | Hit@{top_k}: {ret_metrics['hit_at_k']:.2f} | Faith: {gen_metrics['faithfulness']:.2f}")
+                print(f"  [{idx+1}/{total_count}] Prec@{top_k}: {ret_metrics['precision_at_k']:.2f} | Recall@{top_k}: {ret_metrics['recall_at_k']:.2f} | Hit@{top_k}: {ret_metrics['hit_at_k']:.2f} | Faith: {gen_metrics['faithfulness'] if gen_metrics.get('faithfulness') is None else round(gen_metrics['faithfulness'], 2)}")
 
     # Split into valid (included in scoring) and skipped
     valid_samples = [s for s in evaluated_samples if not s.get("skipped")]
@@ -634,6 +670,25 @@ def run_rag_triad_evaluation(
     retrieval_summary["mean_context_size"] = safe_avg([s["retrieval"].get("context_size", 0) for s in valid_samples])
     retrieval_summary["full_context_available"] = all(s["retrieval"].get("full_context_available") for s in valid_samples)
 
+    with_evidence = [s for s in valid_samples if s["retrieval"].get("evidence")]
+    if with_evidence:
+        def evidence_summary(samples):
+            out = {"n": len(samples)}
+            for cut in [str(k) for k in sorted({5, 10, 15, 20, top_k})] + ["context"]:
+                rows = [s["retrieval"]["evidence"][cut] for s in samples if cut in s["retrieval"]["evidence"]]
+                out[f"at_{cut}"] = {m: safe_avg([r[m] for r in rows]) for m in ("recall", "hit", "all", "mrr", "precision")}
+            gen = [s["generation"] for s in samples]
+            for m in ("faithfulness", "completeness", "answer_relevancy"):
+                out[m] = safe_avg([g[m] for g in gen if g.get(m) is not None])
+            return out
+
+        retrieval_summary["evidence"] = evidence_summary(with_evidence)
+        types = sorted({s["retrieval"].get("question_type") or "unknown" for s in with_evidence})
+        retrieval_summary["evidence_by_question_type"] = {
+            t: evidence_summary([s for s in with_evidence if (s["retrieval"].get("question_type") or "unknown") == t])
+            for t in types
+        }
+
     summary_report = {
         "total_cases": total_count,
         "evaluated_cases": len(valid_samples),
@@ -667,6 +722,11 @@ def run_rag_triad_evaluation(
             m = retrieval_summary[f"at_{k_str}"]
             print(f"   K={k_val:<5} | {m['mrr']*100:>8.2f}% | {m['recall']*100:>10.2f}% | {m['adjusted_precision']*100:>16.2f}%")
     print(f"   * Mean Context Recall: {retrieval_summary['mean_context_recall']*100:.2f}% (Average context pool: {retrieval_summary['mean_context_size']:.1f} chunks)")
+    if "evidence" in retrieval_summary:
+        print("   Evidence-span retrieval (by question type):")
+        for t, m in [("all", retrieval_summary["evidence"])] + list(retrieval_summary["evidence_by_question_type"].items()):
+            print(f"   {t:<16} n={m['n']:<3} recall@5={m['at_5']['recall']*100:6.2f}%  recall@10={m['at_10']['recall']*100:6.2f}%"
+                  f"  context recall={m['at_context']['recall']*100:6.2f}%  faithfulness={m['faithfulness']*100:6.2f}%")
     print("-" * 66)
     print("2. GENERATION LAYER:")
     if use_llm_judge and total_faithfulness:
@@ -691,6 +751,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-llm-judge", action="store_true", help="Skip LLM Judge and run deterministic evaluation only")
     parser.add_argument("--k", "-k", type=int, default=20, help="Number of evidence chunks to evaluate (default: 5)")
     parser.add_argument("--include-no-law-found", action="store_true", help="Include NO_LAW_FOUND cases in average score calculations (default is to skip them)")
+    parser.add_argument("--corpus-chunks", default=None, help="chunks.jsonl from scripts/build_corpus.py: enables evidence-span metrics and full-text judge context")
     args = parser.parse_args()
 
     # 1. Resolve results_file safely
@@ -754,5 +815,6 @@ if __name__ == "__main__":
         use_llm_judge=not args.no_llm_judge,
         workers=args.workers,
         top_k=args.k,
-        skip_no_law_found=not args.include_no_law_found
+        skip_no_law_found=not args.include_no_law_found,
+        corpus_chunks=args.corpus_chunks,
     )

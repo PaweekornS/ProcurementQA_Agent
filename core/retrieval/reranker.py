@@ -4,7 +4,7 @@ hybrid_reranker.py
 
 Implements Hybrid Retrieval (BM25 with PyThaiNLP + Dense Embedding)
 coupled with GPU-accelerated Cross-Encoder Reranker (BAAI/bge-reranker-v2-m3)
-and relevance gating for LegalGraphRAG.
+and relevance gating for ProcurementQA Agent.
 """
 
 import os

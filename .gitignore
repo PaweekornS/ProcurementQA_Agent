@@ -76,9 +76,13 @@ procurement_data/
 dmypy.json
 
 
-# Raw source data (OCR markdown, FAQ spreadsheet): kept out of git, provided locally / on the server
-datas/typhoon_ocr/
-datas/*.xlsx
+# Source data and anything derived from it may be confidential: kept out of git, provided locally
+# / on the server. data_ocr/ is the corpus source; the chunked corpus is written to outputs/corpus/.
+datas/
+data/
+data_ocr/
+corpus/
+*.zip
 
 
 # Runtime logs may contain user queries; tracked eval results in logs/ stay versioned

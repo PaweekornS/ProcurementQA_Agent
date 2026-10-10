@@ -47,7 +47,7 @@ echo "--- QA: graph expansion (item 7)"
 G='{"title":"REG GRAPH","source_id":"reg-graph","markdown":"<!-- Page 1 of 1 -->\n\nตรวจรับตามระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างฯ ข้อ 175 รหัสทดสอบ ZXQ-REG"}'
 GID=$(curl -s -X POST $QA/api/v1/documents -H "Content-Type: application/json" -H "X-Organization-Id: DGA" -d "$G" | jget 'd["doc_id"]')
 check "DGA tenant chunk retrieves cited ข้อ 175 via graph" "$(docker exec procurement-mcp python -c "
-from core.graph_construct.feature_graph import search_similar_nodes_direct as f
+from core.retrieval.search import search_similar_nodes_direct as f
 _, laws = f(None, None, 'ระเบียบกระทรวงการคลัง ข้อ 175 รหัสทดสอบ ZXQ-REG', top_k=5, org_id='DGA')
 ids = [l.get('id') or '' for l in laws]
 print(bool('$GID') and any(i.startswith('$GID') for i in ids) and any('ข้อ ๑๗๕' in (l.get('entry') or '') for l in laws))" 2>/dev/null | tail -1)" "True"

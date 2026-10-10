@@ -1,8 +1,8 @@
-"""Issue Decomposer & Intent Classifier Agent for LegalGraphRAG Agentic Workflow"""
+"""Issue Decomposer & Intent Classifier Agent for ProcurementQA Agent Agentic Workflow"""
 import json
 import re
 from typing import Dict, Any, List
-from core.prompt import get_prompt
+from core.prompts import get_prompt
 
 
 class IssueDecomposer:

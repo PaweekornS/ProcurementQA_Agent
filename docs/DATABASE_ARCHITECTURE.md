@@ -1,12 +1,12 @@
 # Database Architecture & Multi-Tenancy Specification
 
-## Thai Government Procurement LegalGraphRAG System
+## Thai Government Procurement ProcurementQAPipeline System
 
 ---
 
 ## 📌 1. Executive Summary & Design Principles
 
-The **Procurement LegalGraphRAG** backend transitions from a monolithic in-memory graph representation (`.pkl`) to a production-grade **Decoupled Tri-Store Architecture** (PostgreSQL 16, Qdrant 1.13, and Neo4j 5.26 Community).
+The **Procurement ProcurementQAPipeline** backend transitions from a monolithic in-memory graph representation (`.pkl`) to a production-grade **Decoupled Tri-Store Architecture** (PostgreSQL 16, Qdrant 1.13, and Neo4j 5.26 Community).
 
 This design delivers:
 
@@ -250,7 +250,7 @@ NEO4J_PASSWORD="procurement_secret123"
 To ingest or re-synchronize the statutory corpus into Tri-Store:
 
 ```bash
-python scripts/migrate_to_tri_store.py --laws-path datas/law_to_crime.json --cases-path datas/cases_with_feature.json
+python scripts/migrate_to_tri_store.py   # chunks data_ocr/ into outputs/corpus/, then ingests
 ```
 
 ---

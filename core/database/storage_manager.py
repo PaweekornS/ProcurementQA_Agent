@@ -2,7 +2,7 @@
 """
 core/database/storage_manager.py
 
-Unified Storage Manager Facade for Thai Procurement LegalGraphRAG.
+Unified Storage Manager Facade for ProcurementQA Agent.
 Coordinates queries and data flows between PostgreSQL (SSOT), Qdrant (VectorDB),
 and Neo4j (GraphDB).
 """

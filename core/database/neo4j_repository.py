@@ -2,7 +2,7 @@
 """
 core/database/neo4j_repository.py
 
-Neo4j Graph Database Repository for Thai Procurement LegalGraphRAG.
+Neo4j Graph Database Repository for ProcurementQA Agent.
 Manages topological relationships: document hierarchies, sequential clause adjacency
 (ADJACENT_SECTION), cross-statutory citations (CITES_CLAUSE), and precedent links (RELATES_TO_LAW).
 """
@@ -185,6 +185,25 @@ class Neo4jRepository:
                 with self.driver.session() as session:
                     session.run(query, batch=chunk)
             logger.info(f"Synced {len(edge_list)} relationships of type ':{rel_type}' to Neo4j.")
+
+    def delete_corpus(self, org_id: str, batch_size: int = 5000) -> int:
+        """Detach-delete one tenant's seeded corpus nodes (documents, clauses, FAQ cases) before a
+        re-ingest. Tenant-uploaded TenantDocument/TenantChunk nodes are not touched."""
+        self.connect()
+        query = """
+        MATCH (n) WHERE (n:LegalDocument OR n:StatuteClause OR n:FAQCase) AND n.org_id = $org_id
+        WITH n LIMIT $limit
+        DETACH DELETE n
+        RETURN count(*) AS n
+        """
+        removed = 0
+        with self.driver.session() as session:
+            while True:
+                n = session.run(query, org_id=org_id, limit=batch_size).single()["n"]
+                removed += n
+                if n < batch_size:
+                    break
+        return removed
 
     def clear_derived_relationships(self, rel_types: List[str], org_id: str = "PUBLIC", batch_size: int = 10000) -> int:
         """

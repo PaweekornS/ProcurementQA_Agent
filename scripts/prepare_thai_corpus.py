@@ -3,7 +3,7 @@
 """
 prepare_thai_corpus.py
 
-Prepares Thai procurement corpus files for LegalGraphRAG:
+Prepares Thai procurement corpus files for ProcurementQA Agent:
 1. Ingests procurement_data/typhoon_ocr (markdown statutes) and procurement_data/FAQ_กรมบัญชีกลาง.xlsx (Q&A pairs)
    to build the vectorDB / knowledge graph database.
 2. Ingests procurement_data/qa_*.csv (qa_single_doc_test.csv, qa_multi_doc_test.csv) as strict test sets
@@ -672,7 +672,7 @@ def build_benchmark_datasets(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare Thai Procurement Corpus for LegalGraphRAG")
+    parser = argparse.ArgumentParser(description="Prepare Thai Procurement Corpus for ProcurementQA Agent")
     parser.add_argument("--procurement_dir", type=str, default="./procurement_data", help="Path to procurement_data directory")
     parser.add_argument("--chunks_file", type=str, default="", help="Optional path to precomputed chunks.json")
     parser.add_argument("--typhoon_dir", type=str, default="", help="Path to typhoon_ocr directory")

@@ -2,7 +2,7 @@
 """
 core/database/qdrant_repository.py
 
-Qdrant Vector Database Repository for Thai Procurement LegalGraphRAG.
+Qdrant Vector Database Repository for ProcurementQA Agent.
 Provides 1024-dim dense vector search (BGE-M3) and native sparse vector search (BM25)
 with server-side Reciprocal Rank Fusion (RRF) and metadata payload filtering.
 """
@@ -488,6 +488,12 @@ class QdrantRepository:
             ))
         for i in range(0, len(points), batch_size):
             self.client.upsert(collection_name=self.TENANT_DOCS_COLLECTION, points=points[i:i + batch_size])
+
+    def delete_corpus(self, org_id: str) -> None:
+        """Remove one tenant's seeded statute and case points before a re-ingest."""
+        own = models.Filter(must=[models.FieldCondition(key="org_id", match=models.MatchValue(value=org_id))])
+        for collection in (self.STATUTES_COLLECTION, self.CASES_COLLECTION):
+            self.client.delete(collection_name=collection, points_selector=models.FilterSelector(filter=own), wait=True)
 
     def delete_tenant_document(self, org_id: str, doc_id: str):
         self.client.delete(

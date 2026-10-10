@@ -1,12 +1,12 @@
-from core.preprocess.get_features import get_features
-from core.preprocess.case_seg import segment_case_text_withname
+from core.query.features import extract_query_features
+from core.query.summarize import summarize_question
 
-from core.graph_construct.feature_graph import query_similar_nodes, query_similar_laws, query_similar_laws_naive, query_similar_nodes_naive, update_insights_in_graph
+from core.retrieval.search import query_similar_nodes, query_similar_laws, query_similar_laws_naive, query_similar_nodes_naive, update_insights_in_graph
 
-from core.judge.judge_crime import judge_crime, judge_crime_all
+from core.generation.answer import select_applicable_laws, generate_answer
 
 import json
-from core.prompt import get_prompt
+from core.prompts import get_prompt
 
 
 def filter_facts(retrieved_laws, retrieved_facts):
@@ -192,7 +192,7 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_co
     if len(raw_fact) < 800:
         case_by_defendant = [{"name": names[0], "description": raw_fact}]
     else:
-        case_by_defendant = segment_case_text_withname(
+        case_by_defendant = summarize_question(
             chatbot, raw_fact[:1024], names)
         if not case_by_defendant:
             case_by_defendant = [{"name": names[0], "description": raw_fact[:1024]}]
@@ -205,7 +205,7 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_co
     return res_list
 
     for item in case_by_defendant:
-        item["feature"] = get_features(chatbot, item)
+        item["feature"] = extract_query_features(chatbot, item)
         original_retrieved_res, retrieved_laws, retrieved_facts = retrieve(
             chatbot, item, law_to_crime, cases_db, retrieve_config)
         if not (retrieved_laws or retrieved_facts):
@@ -230,7 +230,7 @@ def analyze_case(chatbot, case, law_to_crime, cases_db, retrieve_config, crag_co
         law_used = retrieved_laws[:max_laws]
             
         fact_used = filter_facts(law_used, retrieved_facts) if retrieved_facts else []
-        judge_result = judge_crime_all(
+        judge_result = generate_answer(
             chatbot, law_used, fact_used, item['description'])
         item["judge_result"] = judge_result
         item["retrieved_laws"] = retrieved_laws

@@ -13,7 +13,7 @@ python-dotenv>=1.0.0
 # OpenAI API client (for DeepSeek, GPT-4o-mini)
 openai>=1.0.0
 
-# Hybrid retrieval: Thai BM25 + dense/cross-encoder reranking (core/graph_construct/)
+# Hybrid retrieval: Thai BM25 + dense/cross-encoder reranking (core/retrieval/)
 pythainlp>=5.0.0
 rank_bm25>=0.2.2
 sentence-transformers>=3.0.0

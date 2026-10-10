@@ -1,4 +1,4 @@
-"""LegalGraphRAG main class"""
+"""ProcurementQA Agent main class"""
 import os
 import json
 import uuid
@@ -8,8 +8,27 @@ from pathlib import Path
 from tqdm import tqdm
 
 from core.models import BaseModel
-from core.graph_construct.graph_db import GraphDBManager
+from core.graph.local_graph import GraphDBManager
 from core.utils.settings import env
+
+
+def _tri_store_enabled() -> bool:
+    return os.getenv("USE_TRI_STORE", "false").lower() in ("true", "1", "yes")
+
+
+def _ensure_local_corpus(path: str) -> None:
+    """The corpus JSON is not committed: build it from the OCR directory (OCR_DIR, default
+    data_ocr/) when it is missing or older than the OCR files, so a fresh clone needs only data_ocr/."""
+    from core.chunking.corpus import ensure_corpus
+    ocr_dir = os.getenv("OCR_DIR", "data_ocr")
+    if not os.path.isdir(ocr_dir) and os.path.exists(path):
+        return
+    try:
+        summary = ensure_corpus(ocr_dir, os.path.dirname(path) or ".")
+        if summary:
+            print(f"Built corpus from {ocr_dir}: {summary['chunks']} chunks -> {os.path.dirname(path)}")
+    except FileNotFoundError:
+        pass  # reported by the caller with the expected path
 
 
 @dataclass
@@ -49,8 +68,8 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     """Data path configuration"""
-    case_db_path: str = "./datas/cases_with_feature.json"
-    law_to_crime_path: str = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
+    case_db_path: str = "./outputs/corpus/cases_with_feature.json"
+    law_to_crime_path: str = "./outputs/corpus/law_to_crime.json"
     datasets_path: Optional[str] = None  # Dataset root directory
     output_dir: str = "./outputs"
     
@@ -107,8 +126,8 @@ class CRAGConfig:
 
 
 @dataclass
-class LegalGraphRAGConfig:
-    """LegalGraphRAG complete configuration"""
+class PipelineConfig:
+    """ProcurementQA Agent complete configuration"""
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     retrieve: RetrieveConfig = field(default_factory=RetrieveConfig)
@@ -118,7 +137,7 @@ class LegalGraphRAGConfig:
     agentic_max_retries: int = 2
     
     @classmethod
-    def from_env_file(cls, dotenv_path: str = None) -> "LegalGraphRAGConfig":
+    def from_env_file(cls, dotenv_path: str = None) -> "PipelineConfig":
         """
         Load configuration from .env file
         
@@ -126,7 +145,7 @@ class LegalGraphRAGConfig:
             dotenv_path: Path to .env file
             
         Returns:
-            LegalGraphRAGConfig instance
+            PipelineConfig instance
         """
         if dotenv_path is None:
             dotenv_path = "configs/thai_procurement.env" if os.path.exists("configs/thai_procurement.env") else ".env"
@@ -163,8 +182,9 @@ class LegalGraphRAGConfig:
         )
         
         # Data configuration
-        default_case_db = "./datas/cases_with_feature.json"
-        default_law_to_crime = "./datas/law_to_crime_section_level.json" if os.path.exists("./datas/law_to_crime_section_level.json") else "./datas/law_to_crime.json"
+        # Written by scripts/build_corpus.py (or the migration) from data_ocr/
+        default_case_db = "./outputs/corpus/cases_with_feature.json"
+        default_law_to_crime = "./outputs/corpus/law_to_crime.json"
         data_config = DataConfig(
             case_db_path=env("CASE_DB_PATH", default_case_db),
             law_to_crime_path=env("LAW_TO_CRIME_PATH", default_law_to_crime),
@@ -221,7 +241,7 @@ class LegalGraphRAGConfig:
         )
     
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "LegalGraphRAGConfig":
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "PipelineConfig":
         """
         Create configuration from dictionary
         
@@ -229,7 +249,7 @@ class LegalGraphRAGConfig:
             config_dict: Configuration dictionary
             
         Returns:
-            LegalGraphRAGConfig instance
+            PipelineConfig instance
         """
         model_config = ModelConfig(**config_dict.get("model", {}))
         data_config = DataConfig(**config_dict.get("data", {}))
@@ -290,26 +310,26 @@ class LegalGraphRAGConfig:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
     
     @classmethod
-    def load(cls, filepath: str) -> "LegalGraphRAGConfig":
+    def load(cls, filepath: str) -> "PipelineConfig":
         """Load configuration from JSON file"""
         with open(filepath, "r", encoding="utf-8") as f:
             config_dict = json.load(f)
         return cls.from_dict(config_dict)
 
 
-class LegalGraphRAG:
-    """LegalGraphRAG main class"""
+class ProcurementQAPipeline:
+    """ProcurementQA Agent main class"""
     
-    def __init__(self, config: Optional[LegalGraphRAGConfig] = None):
+    def __init__(self, config: Optional[PipelineConfig] = None):
         """
-        Initialize LegalGraphRAG
+        Initialize ProcurementQA Agent
         
         Args:
             config: Configuration object, if None use default configuration
         """
-        self.config = config or LegalGraphRAGConfig()
-        from core.prompt import set_prompt_language
-        from core.graph_construct.feature_graph import configure_embedding
+        self.config = config or PipelineConfig()
+        from core.prompts import set_prompt_language
+        from core.retrieval.search import configure_embedding
         set_prompt_language(self.config.model.prompt_language)
         configure_embedding(
             api_url=self.config.graph.embedding_api_url,
@@ -372,7 +392,11 @@ class LegalGraphRAG:
 
     def _load_cases_db(self) -> List[Dict[str, Any]]:
         """Load case database"""
+        _ensure_local_corpus(self.config.data.case_db_path)
         if not os.path.exists(self.config.data.case_db_path):
+            if _tri_store_enabled():
+                # Retrieval reads the stores; the local corpus file only feeds the legacy path
+                return []
             raise FileNotFoundError(
                 f"Case database not found: {self.config.data.case_db_path}"
             )
@@ -381,7 +405,11 @@ class LegalGraphRAG:
     
     def _load_law_to_crime(self) -> List[Dict[str, Any]]:
         """Load law to crime mapping"""
+        _ensure_local_corpus(self.config.data.law_to_crime_path)
         if not os.path.exists(self.config.data.law_to_crime_path):
+            if _tri_store_enabled():
+                # Retrieval reads the stores; the local corpus file only feeds the legacy path
+                return []
             raise FileNotFoundError(
                 f"Law to crime mapping not found: {self.config.data.law_to_crime_path}"
             )
@@ -577,7 +605,7 @@ class LegalGraphRAG:
         Args:
             force_rebuild: If True, rebuild even if graph database already exists
         """
-        from core.graph_construct.feature_graph import construct_feature_graph
+        from core.retrieval.search import construct_feature_graph
         
         # Check if graph database already exists
         if not force_rebuild and self.config.graph.graph_db_path and os.path.exists(self.config.graph.graph_db_path):

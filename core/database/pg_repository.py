@@ -2,7 +2,7 @@
 """
 core/database/pg_repository.py
 
-PostgreSQL Data Access Layer (SSOT) for Thai Procurement LegalGraphRAG.
+PostgreSQL Data Access Layer (SSOT) for ProcurementQA Agent.
 Provides transactional persistence for legal documents, statutory macro-clauses,
 Comptroller General FAQ cases, and QA audit logs.
 
@@ -275,6 +275,15 @@ class PostgresRepository:
             conn.execute(text(ddl))
         self._init_rls()
         logger.info("PostgreSQL schema successfully initialized with multi-tenancy.")
+
+    def delete_corpus(self, org_id: str) -> Dict[str, int]:
+        """Remove one tenant's seeded corpus (documents, clauses, FAQ cases) before a re-ingest.
+        Tenant-uploaded documents live in other tables and are not touched."""
+        with self.engine.begin() as conn:
+            faq = conn.execute(text("DELETE FROM faq_cases WHERE org_id = :o"), {"o": org_id}).rowcount
+            clauses = conn.execute(text("DELETE FROM statute_clauses WHERE org_id = :o"), {"o": org_id}).rowcount
+            docs = conn.execute(text("DELETE FROM legal_documents WHERE org_id = :o"), {"o": org_id}).rowcount
+        return {"legal_documents": docs, "statute_clauses": clauses, "faq_cases": faq}
 
     def upsert_documents(self, documents: List[Dict[str, Any]], org_id: str = "PUBLIC"):
         """Batch upsert legal documents."""

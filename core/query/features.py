@@ -1,19 +1,19 @@
 import json
 import re
-from core.prompt import get_prompt
+from core.prompts import get_prompt
 
 
-def get_features(model, cases):
+def extract_query_features(model, cases):
     fact = cases.get("description", "")
     name = cases.get("name", "ผู้สอบถาม")
 
-    input_template = get_prompt("GET_FEATURES_INPUT_TEMPLATE")
+    input_template = get_prompt("QUERY_FEATURES_INPUT_TEMPLATE")
     try:
         formatted_input = input_template.format(name=name, fact=fact)
     except KeyError:
         formatted_input = f"\nคำถาม/ข้อหารือ: {fact}"
 
-    prompt_formatted = get_prompt("GET_FEATURES_PROMPT") + formatted_input
+    prompt_formatted = get_prompt("QUERY_FEATURES_PROMPT") + formatted_input
     # Fast extraction: 512 tokens is more than enough for 4-key JSON schema, prevents LLM stalling
     response = model.generate_response(prompt_formatted, max_length=512)
     

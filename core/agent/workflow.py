@@ -20,7 +20,7 @@ from core.utils.agent_logger import AgentTraceLogger
 from core.agent.decomposer import IssueDecomposer
 from core.agent.synthesizer import LegalSynthesizer
 from core.agent.refiner import QueryRefiner
-from core.graph_construct.feature_graph import query_similar_nodes
+from core.retrieval.search import query_similar_nodes
 from core.utils.util import concat_feature_descriptions
 
 
@@ -197,8 +197,8 @@ class ProcurementAgenticWorkflow:
         try:
             if tri_store:
                 raise LookupError("legacy graph backup disabled in tri-store mode")
-            from core.graph_construct.citation_linker import LegalCitationLinker
-            from core.graph_construct.graph_db import GraphDBManager
+            from core.graph.citation_linker import LegalCitationLinker
+            from core.graph.local_graph import GraphDBManager
             db_inst = GraphDBManager.get_db()
             graph_results = LegalCitationLinker.graph_search_backup(
                 db=db_inst,
@@ -226,7 +226,7 @@ class ProcurementAgenticWorkflow:
 
         # Cross-encoder late-stage rerank over all merged candidates against raw_query
         try:
-            from core.graph_construct.hybrid_reranker import get_reranker, is_reranker_enabled
+            from core.retrieval.reranker import get_reranker, is_reranker_enabled
             if is_reranker_enabled() and all_candidates:
                 reranker_model = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
                 reranker_device = os.getenv("RERANKER_DEVICE", "cuda:0")

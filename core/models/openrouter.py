@@ -86,8 +86,8 @@ class OpenRouterChatbot(OpenAIBaseModel):
                     "temperature": temperature,
                     "stream": False,
                     "extra_headers": {
-                        "HTTP-Referer": "https://github.com/DEEP-PolyU/LegalGraphRAG",
-                        "X-Title": "LegalGraphRAG-AutoTOR",
+                        "HTTP-Referer": "https://github.com/PaweekornS/ProcurementQA_Agent",
+                        "X-Title": "ProcurementQA-Agent",
                     },
                 }
                 if extra_body:

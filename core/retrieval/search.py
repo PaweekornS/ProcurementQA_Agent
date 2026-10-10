@@ -7,7 +7,7 @@ from collections import OrderedDict, defaultdict
 import numpy as np
 import requests
 import re
-from .graph_db import GraphDBManager
+from core.graph.local_graph import GraphDBManager
 from tqdm import tqdm
 from core.utils.settings import env
 
@@ -240,7 +240,7 @@ def get_embedding(text):
 
 def summarize_texts(model, text):
     try:
-        from core.prompt import get_prompt
+        from core.prompts import get_prompt
         prefix = ""
         try:
             prefix = get_prompt("SUMMARIZE_TEXTS_INPUT_PREFIX")
@@ -258,12 +258,12 @@ def summarize_texts(model, text):
 def rerank_clusters(model, clusters, query_text):
     if not clusters:
         return []
-    from .hybrid_reranker import is_reranker_enabled
+    from .reranker import is_reranker_enabled
     if not is_reranker_enabled():
         return [c['code'] for c in clusters]
     # Try GPU Cross-Encoder Reranker first
     try:
-        from .hybrid_reranker import get_reranker
+        from .reranker import get_reranker
         reranker = get_reranker()
         if reranker and reranker.model is not None:
             candidates = [{'code': c['code'], 'description': c.get('summary', '')} for c in clusters]
@@ -274,7 +274,7 @@ def rerank_clusters(model, clusters, query_text):
 
     # Fallback to LLM if requested
     try:
-        from core.prompt import get_prompt
+        from core.prompts import get_prompt
         cluster_summaries = "\n".join(
             [f"code{c['code']}：{c['summary']}\n" for c in clusters])
         prompt = get_prompt("RERANK_CLUSTERS_PROMPT_TEMPLATE").format(
@@ -296,13 +296,13 @@ def rerank_clusters(model, clusters, query_text):
 def rerank(model, query_text, neighbors):
     if not neighbors:
         return []
-    from .hybrid_reranker import is_reranker_enabled
+    from .reranker import is_reranker_enabled
     if not is_reranker_enabled():
         return neighbors
 
     # Use GPU Cross-Encoder Reranker (BAAI/bge-reranker-v2-m3)
     try:
-        from .hybrid_reranker import get_reranker
+        from .reranker import get_reranker
         reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
         reranker_device = env("RERANKER_DEVICE", "cuda:0")
         reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
@@ -318,7 +318,7 @@ def rerank(model, query_text, neighbors):
 
     # Fallback to LLM Prompting if CrossEncoder is not available
     try:
-        from core.prompt import get_prompt
+        from core.prompts import get_prompt
         neighbor_summaries = "\n".join(
             [f"code{n.get('rank', i+1)}：{n.get('description', '')}\n" for i, n in enumerate(neighbors)])
         prompt = get_prompt("RERANK_PROMPT_TEMPLATE").format(
@@ -771,7 +771,7 @@ def _ensure_bm25_index(db):
         if _bm25_initialized:
             return
         try:
-            from .hybrid_reranker import get_bm25_index
+            from .reranker import get_bm25_index
             bm25_idx = get_bm25_index()
             docs = []
             for node_id, node_info in db.nodes_data.items():
@@ -796,7 +796,7 @@ def _ensure_bm25_index(db):
             _bm25_initialized = True
 
             # Warm up GPUReranker safely in the same lock so workers don't race on GPU allocation
-            from .hybrid_reranker import get_reranker, is_reranker_enabled
+            from .reranker import get_reranker, is_reranker_enabled
             if is_reranker_enabled():
                 reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
                 reranker_device = env("RERANKER_DEVICE", "cuda:0")
@@ -876,7 +876,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
                 return [], []
             else:
                 # 2. Cross-Encoder reranking if enabled
-                from .hybrid_reranker import get_reranker, is_reranker_enabled
+                from .reranker import get_reranker, is_reranker_enabled
                 reranker_thresh = float(env("RERANKER_THRESHOLD", "0.20"))
                 reranker_model = env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
                 reranker_device = env("RERANKER_DEVICE", "cuda:0")
@@ -983,7 +983,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
     _ensure_bm25_index(db)
 
     # 1. Sparse Search (BM25 with PyThaiNLP + Numeric Query Expansion)
-    from .hybrid_reranker import get_bm25_index, get_reranker, weighted_rrf, expand_numeric_query
+    from .reranker import get_bm25_index, get_reranker, weighted_rrf, expand_numeric_query
     bm25_idx = get_bm25_index()
     bm25_query = expand_numeric_query(query_text)
     sparse_raw = bm25_idx.search(bm25_query, top_k=bm25_top_k)
@@ -1031,7 +1031,7 @@ def search_similar_nodes_direct(model, query_embedding, query_text, top_k=5, org
     )
 
     # 4. GPU/CPU Cross-Encoder Reranker with Relevance Gate (>= threshold)
-    from .hybrid_reranker import is_reranker_enabled
+    from .reranker import is_reranker_enabled
     if is_reranker_enabled():
         # Default candidate pool: 50 on GPU, 15 on CPU for fast sub-8s latency
         default_pool_size = 15 if "cpu" in str(reranker_device).lower() else 50
@@ -1449,5 +1449,5 @@ def construct_feature_graph(model, nodes_data):
     create_clusters(model)
 
     # Link cross-statute, empowered, and inter-section citation edges
-    from core.graph_construct.citation_linker import LegalCitationLinker
+    from core.graph.citation_linker import LegalCitationLinker
     LegalCitationLinker.link_citations(GraphDBManager.get_db())

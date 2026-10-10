@@ -31,7 +31,7 @@ def readiness(response: Response, service: ProcurementService = Depends(get_serv
         model_name = service.rag.config.model.model_name
         sections_indexed = len(service._section_index)
 
-        from core.graph_construct.hybrid_reranker import reranker_status
+        from core.retrieval.reranker import reranker_status
         reranker = reranker_status()
         if not reranker["loaded"]:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-core/preprocess/page_locator.py
+core/chunking/page_locator.py
 
 Recovers page numbers for corpus chunks from the Typhoon OCR markdown they were cut from.
 The OCR files carry '<!-- Page N of M -->' markers; a chunk's page range is found by locating

@@ -17,7 +17,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
+from core.pipeline import ProcurementQAPipeline, PipelineConfig
 from evaluation.evaluate_rag_triad import compute_retrieval_metrics
 
 
@@ -214,7 +214,7 @@ def process_cases_worker(
         except Exception:
             pass
 
-    config = LegalGraphRAGConfig.from_dict(config_dict)
+    config = PipelineConfig.from_dict(config_dict)
     
     config.model.device = device
     config.model.model_name = model_name
@@ -222,7 +222,7 @@ def process_cases_worker(
     config.graph.auto_build = False
     config.graph.auto_save = False
     
-    rag = LegalGraphRAG(config=config)
+    rag = ProcurementQAPipeline(config=config)
     
     results = []
     section_hits = 0
@@ -394,7 +394,7 @@ def run_evaluation(
     workers: int = 4,
     rag_mode: str = "agentic"
 ):
-    config = LegalGraphRAGConfig.from_env_file(dotenv_path)
+    config = PipelineConfig.from_env_file(dotenv_path)
     config.rag_mode = (rag_mode or "agentic").lower()
     os.environ["RAG_MODE"] = config.rag_mode
     clean_dataset = sanitize_dataset_name(datasets)
@@ -424,16 +424,16 @@ def run_evaluation(
             build_device = config.model.device
         
         # Create configuration for graph construction (using first device)
-        build_config = LegalGraphRAGConfig.from_dict(config.to_dict())
+        build_config = PipelineConfig.from_dict(config.to_dict())
         build_config.model.device = build_device
         build_config.model.model_name = model_name
         # run_evaluation controls graph construction explicitly below.
         build_config.graph.auto_build = False
         build_config.graph.auto_save = False
         
-        # Create LegalGraphRAG instance and build graph
+        # Create ProcurementQA Agent instance and build graph
         print(f"Using device {build_device} for graph construction...")
-        rag_builder = LegalGraphRAG(config=build_config)
+        rag_builder = ProcurementQAPipeline(config=build_config)
         rag_builder.build_graph(force_rebuild=force_rebuild)
         
         # Release model resources used for graph construction
@@ -516,12 +516,12 @@ def run_evaluation(
         config.graph.auto_build = False
         config.graph.auto_save = False
         
-        rag = LegalGraphRAG(config=config)
+        rag = ProcurementQAPipeline(config=config)
         
         # Warmup embedder and reranker in main thread to prevent multi-threaded CUDA initialization races
         try:
-            from core.graph_construct.feature_graph import get_embedding
-            from core.graph_construct.hybrid_reranker import get_reranker
+            from core.retrieval.search import get_embedding
+            from core.retrieval.reranker import get_reranker
             _ = get_embedding("warmup query")
             _ = get_reranker()
             print("[Warmup] Local embedder and GPU reranker successfully initialized in main thread.")
@@ -742,7 +742,7 @@ def run_evaluation(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Legal Case Analysis with Different Models using LegalGraphRAG"
+        description="Legal Case Analysis with Different Models using ProcurementQA Agent"
     )
     parser.add_argument(
         "--model",

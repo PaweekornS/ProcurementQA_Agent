@@ -31,12 +31,12 @@ from scripts.migrate_to_tri_store import GRAPH_LINKER_VERSION, normalize_doc_nam
 
 def _corpus_expectations() -> dict:
     """
-    Minimum counts derived from the real corpus in datas/ (the PUBLIC tenant), parsed exactly as
+    Minimum counts derived from the chunked corpus in outputs/corpus/ (the PUBLIC tenant), parsed exactly as
     scripts/migrate_to_tri_store.py does. Stores may hold more when tenant benchmark data is
     loaded on top, hence the >= assertions.
     """
-    laws_path = os.getenv("law_to_crime_path", str(PROJECT_ROOT / "datas" / "law_to_crime.json"))
-    cases_path = os.getenv("case_db_path", str(PROJECT_ROOT / "datas" / "cases_with_feature.json"))
+    laws_path = os.getenv("law_to_crime_path", str(PROJECT_ROOT / "outputs" / "corpus" / "law_to_crime.json"))
+    cases_path = os.getenv("case_db_path", str(PROJECT_ROOT / "outputs" / "corpus" / "cases_with_feature.json"))
     with open(laws_path, encoding="utf-8") as f:
         laws = [r for r in json.load(f) if r.get("items")]
     with open(cases_path, encoding="utf-8") as f:
@@ -80,7 +80,7 @@ class TestTriStoreIntegration(unittest.TestCase):
     def test_02_hybrid_search_clauses(self):
         """Verify hybrid vector + sparse search in Qdrant with Postgres hydration."""
         query = "การจัดซื้อจัดจ้างโดยวิธีเฉพาะเจาะจง วงเงินไม่เกิน 500,000 บาท"
-        from core.graph_construct.feature_graph import get_embedding
+        from core.retrieval.search import get_embedding
         q_emb = get_embedding(query)
 
         results = self.storage.hybrid_search_clauses(
@@ -153,8 +153,8 @@ class TestTriStoreIntegration(unittest.TestCase):
         The cross-encoder must actually load and score candidates. A missing runtime dependency
         once made it fail silently: retrieval ran unreranked and Hit/MRR collapsed with no error.
         """
-        from core.graph_construct.feature_graph import search_similar_nodes_direct
-        from core.graph_construct.hybrid_reranker import reranker_status
+        from core.retrieval.search import search_similar_nodes_direct
+        from core.retrieval.reranker import reranker_status
 
         status = reranker_status()
         self.assertTrue(status["loaded"], f"reranker not usable: {status}")

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-core/graph_construct/citation_linker.py
+core/graph/citation_linker.py
 
 Legal Citation & Relationship Linker for Thai Procurement Knowledge Graph.
 Extracts and builds rich, deterministic graph edges across sections:

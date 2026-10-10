@@ -1,19 +1,19 @@
-"""Unified import interface for prompt module (Thai Procurement LegalGraphRAG)"""
+"""Unified import interface for prompt module (ProcurementQA Agent)"""
 
 from typing import Optional
 
-# Preprocess prompts
-from .preprocess import (
+# Query understanding prompts
+from .query import (
     GET_PROCUREMENT_FEATURES_PROMPT,
 )
 
-# Judge prompts
-from .judge import (
+# Answer generation prompts
+from .answer import (
     ANSWER_LEGAL_QA_PROMPT,
 )
 
-# CRAG prompts
-from .crag import (
+# Agent (decompose / audit / refine) prompts
+from .agent import (
     INTENT_DECOMPOSE_PROMPT,
     AUDIT_COMPLETENESS_PROMPT,
     QUERY_REFINE_PROMPT,
@@ -21,16 +21,16 @@ from .crag import (
 
 _PROMPTS = {
     "th": {
-        "GET_FEATURES_PROMPT": GET_PROCUREMENT_FEATURES_PROMPT,
-        "GET_FEATURES_INPUT_TEMPLATE": "\nคำถาม/ข้อหารือ: {fact}",
-        "CASE_SEG_PROMPT": "คำถาม/ข้อหารือ:\n{fact}\n\nจงสรุปข้อเท็จจริงและประเด็นคำถามให้กระชับ ชัดเจน:",
-        "JUDGE_CRIME_PROMPT": ANSWER_LEGAL_QA_PROMPT,
-        "JUDGE_CRIME_ALL_PROMPT": ANSWER_LEGAL_QA_PROMPT,
+        "QUERY_FEATURES_PROMPT": GET_PROCUREMENT_FEATURES_PROMPT,
+        "QUERY_FEATURES_INPUT_TEMPLATE": "\nคำถาม/ข้อหารือ: {fact}",
+        "SUMMARIZE_QUESTION_PROMPT": "คำถาม/ข้อหารือ:\n{fact}\n\nจงสรุปข้อเท็จจริงและประเด็นคำถามให้กระชับ ชัดเจน:",
+        "SELECT_LAWS_PROMPT": ANSWER_LEGAL_QA_PROMPT,
+        "ANSWER_PROMPT": ANSWER_LEGAL_QA_PROMPT,
         "ANSWER_LEGAL_QA_PROMPT": ANSWER_LEGAL_QA_PROMPT,
         "INTENT_DECOMPOSE_PROMPT": INTENT_DECOMPOSE_PROMPT,
         "AUDIT_COMPLETENESS_PROMPT": AUDIT_COMPLETENESS_PROMPT,
         "QUERY_REFINE_PROMPT": QUERY_REFINE_PROMPT,
-        "JUDGE_CRIME_ALL_INPUT_TEMPLATE": (
+        "ANSWER_INPUT_TEMPLATE": (
             "ข้อกฎหมายและระเบียบ:\n-----\n{law}\n-----\n"
             "คำถาม/ข้อหารือ:\n-----\n{case}\n-----\nคำตอบ (JSON):"
         ),

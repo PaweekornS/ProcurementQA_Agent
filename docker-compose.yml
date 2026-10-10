@@ -36,7 +36,8 @@ services:
     volumes:
       # Embedding cache lives here so re-seeding an empty Qdrant does not re-call the embedding API
       - ./outputs:/app/outputs
-      - ./datas:/app/datas:ro
+      # The only corpus source: chunked into outputs/corpus on every run, never baked into the image
+      - ./data_ocr:/app/data_ocr:ro
       - ./.env:/app/.env:ro
     depends_on:
       postgres:
@@ -66,8 +67,7 @@ services:
       - ./logs:/app/logs
       # Persistent HuggingFace model cache (rerankers / tokenizers)
       - hf_cache:/app/.cache/huggingface
-      # Source data & env mounted read-only
-      - ./datas:/app/datas:ro
+      # Env mounted read-only (the corpus lives in the stores; outputs/corpus is mounted above)
       - ./.env:/app/.env:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "-s", "http://localhost:8000/ready"]

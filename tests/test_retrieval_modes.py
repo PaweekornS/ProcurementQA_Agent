@@ -2,7 +2,7 @@
 """
 tests/test_retrieval_modes.py
 
-Validates all retrieval strategies supported by LegalGraphRAG:
+Validates all retrieval strategies supported by ProcurementQA Agent:
 1. Exact Section Lookup (Verbatim paragraph matching without LLM overhead)
 2. Direct Hybrid Search (Dense vector + Thai BM25 sparse + GPU Cross-Encoder Reranker)
 3. Knowledge Graph Traversal (Subordinate regulations and statutory citation edges)

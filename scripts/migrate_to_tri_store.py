@@ -2,9 +2,9 @@
 """
 scripts/migrate_to_tri_store.py
 
-Production ETL & Migration Pipeline for Thai Procurement LegalGraphRAG.
-Migrates prepared statutory macro-chunks (datas/law_to_crime.json) and FAQ precedents
-(datas/cases_with_feature.json) into the Tri-Store Architecture:
+Production ETL & Migration Pipeline for ProcurementQA Agent.
+Chunks the OCR corpus (data_ocr/, via scripts/build_corpus.py and core/chunking) and migrates
+the chunks and FAQ pairs into the Tri-Store Architecture:
   1. PostgreSQL (SSOT & relational metadata)
   2. Qdrant (1024-dim BGE-M3 Dense + PyThaiNLP Sparse BM25 + RRF)
   3. Neo4j (Topological Knowledge Graph: Hierarchies, Adjacency, Citations, Precedents)
@@ -34,9 +34,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.database import StorageManager
-from core.preprocess.page_locator import load_ocr_documents
+from core.chunking.page_locator import load_ocr_documents
 from core.utils.settings import env
-from core.graph_construct.citation_linker import (
+from core.graph.citation_linker import (
     ACT_TITLE,
     extract_legal_edges,
     parse_unit_label,
@@ -47,6 +47,9 @@ from core.graph_construct.citation_linker import (
 # a seeded store whose Neo4j graph carries an older version is re-upserted into PostgreSQL and
 # relinked on the next `--skip-if-seeded` run (Qdrant is skipped while in parity).
 GRAPH_LINKER_VERSION = 4
+
+# Chunks are sized to fit (core/chunking keeps them <= ~2,000 chars plus a short context header)
+EMBED_MAX_CHARS = int(os.getenv("EMBED_MAX_CHARS", "2500"))
 
 # Shared linker relations -> Neo4j relationship types queried by Neo4jRepository
 NEO4J_REL_TYPES = {
@@ -149,7 +152,7 @@ def batch_embed_texts(
     failed = 0
 
     for i in tqdm(range(0, len(texts), batch_size), desc="Embedding batches"):
-        chunk = [str(t)[:2000] for t in texts[i:i + batch_size]]
+        chunk = [str(t)[:EMBED_MAX_CHARS] for t in texts[i:i + batch_size]]
         try:
             payload = {"model": model, "input": chunk}
             resp = requests.post(
@@ -203,15 +206,16 @@ def is_already_seeded(storage: StorageManager) -> bool:
 
 
 def run_migration(
-    laws_path: str = "datas/law_to_crime.json",
-    cases_path: str = "datas/cases_with_feature.json",
+    laws_path: str = "outputs/corpus/law_to_crime.json",
+    cases_path: str = "outputs/corpus/cases_with_feature.json",
     cache_dir: str = "outputs/migration_cache",
     limit: Optional[int] = None,
     skip_embed: bool = False,
     skip_if_seeded: bool = False,
     force_embed: bool = False,
-    ocr_dir: str = "datas/typhoon_ocr",
+    ocr_dir: str = "data_ocr",
     org_id: str = "DGA",
+    reset_corpus: bool = False,
 ):
     print("=" * 65)
     print("LEGAL-GRAPH-RAG: TRI-STORE DATABASE MIGRATION PIPELINE")
@@ -224,7 +228,7 @@ def run_migration(
     storage = StorageManager.get_instance()
     storage.init_all_stores()
 
-    if skip_if_seeded and is_already_seeded(storage):
+    if skip_if_seeded and not reset_corpus and is_already_seeded(storage):
         print("Tri-Store already seeded (PostgreSQL/Qdrant/Neo4j clause counts in parity). Skipping.")
         return
 
@@ -256,7 +260,7 @@ def run_migration(
 
     doc_map: Dict[str, Dict[str, Any]] = {}
     clauses: List[Dict[str, Any]] = []
-    # Inputs for the shared citation linker (core/graph_construct/citation_linker.py)
+    # Inputs for the shared citation linker (core/graph/citation_linker.py)
     linker_units: List[Dict[str, Any]] = []
 
     for raw in raw_laws:
@@ -375,6 +379,15 @@ def run_migration(
         record["org_id"] = org_id
     print(f"\nCorpus tenant (org_id): {org_id}")
 
+    if reset_corpus:
+        # Chunk ids are hashes of their entries, so a re-chunked corpus would otherwise sit next
+        # to the previous one instead of replacing it. Tenant-uploaded documents are kept.
+        print(f"\n[Reset] Removing the existing corpus of tenant {org_id} from all three stores...")
+        print(f"  PostgreSQL: {storage.pg.delete_corpus(org_id)}")
+        storage.qdrant.delete_corpus(org_id)
+        print(f"  Neo4j: {storage.neo4j.delete_corpus(org_id)} nodes")
+        force_embed = True
+
     print("\n[Step 3] Upserting records into PostgreSQL (SSOT)...")
     storage.pg.upsert_documents(documents)
     storage.pg.upsert_clauses(clauses)
@@ -396,7 +409,11 @@ def run_migration(
         print(f"Qdrant already holds {len(clauses)} statute / {len(faq_cases)} case points. Skipping (use --force-embed to re-index).")
         skip_embed = True
 
-    cache_file = os.path.join(cache_dir, f"dense_embeddings_{len(clauses)}.json")
+    # Keyed by content as well as count: a re-chunked corpus of the same size must not reuse vectors
+    corpus_digest = hashlib.md5(
+        "".join(c["clause_id"] + c["content_thai"] for c in clauses).encode("utf-8")
+    ).hexdigest()[:10]
+    cache_file = os.path.join(cache_dir, f"dense_embeddings_{len(clauses)}_{corpus_digest}.json")
     dense_embeddings = None
 
     if not skip_embed and os.path.exists(cache_file):
@@ -414,7 +431,9 @@ def run_migration(
         raise RuntimeError("TOKENMIND_API_KEY is not set; it is required to embed the corpus into Qdrant.")
 
     if dense_embeddings is None and not skip_embed:
-        clause_texts = [f"{c['entry']}\n{c['content_thai'][:1500]}" for c in clauses]
+        # Unchanged input format (entry + text) so earlier embedding caches stay comparable;
+        # batch_embed_texts caps each text at EMBED_MAX_CHARS
+        clause_texts = [f"{c['entry']}\n{c['content_thai']}" for c in clauses]
         print(f"Calling Tokenmind Embedding API ({tokenmind_model}) for {len(clause_texts)} clauses...")
         dense_embeddings = batch_embed_texts(
             clause_texts,
@@ -532,17 +551,28 @@ def run_migration(
 if __name__ == "__main__":
     load_dotenv(override=False)
     parser = argparse.ArgumentParser(description="Migrate Thai Procurement QA corpus to Tri-Store")
-    parser.add_argument("--laws-path", default=env("LAW_TO_CRIME_PATH", "datas/law_to_crime.json"), help="Path to law_to_crime.json")
-    parser.add_argument("--cases-path", default=env("CASE_DB_PATH", "datas/cases_with_feature.json"), help="Path to cases_with_feature.json")
+    parser.add_argument("--ocr-dir", default="data_ocr", help="OCR markdown root: the only corpus source; it is chunked on every run")
+    parser.add_argument("--corpus-dir", default="outputs/corpus", help="Where the chunked corpus is written (git-ignored)")
+    parser.add_argument("--laws-path", default=None, help="Ingest a prebuilt law_to_crime.json instead of chunking --ocr-dir")
+    parser.add_argument("--cases-path", default=None, help="Prebuilt cases_with_feature.json (with --laws-path)")
     parser.add_argument("--cache-dir", default="outputs/migration_cache", help="Cache directory for embeddings")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of chunks to ingest (for testing)")
     parser.add_argument("--skip-embed", action="store_true", help="Skip embedding generation and Qdrant ingestion")
-    parser.add_argument("--ocr-dir", default="datas/typhoon_ocr", help="Typhoon OCR markdown root used to recover page numbers")
     parser.add_argument("--force-embed", action="store_true", help="Re-embed and re-index Qdrant even if it is already in parity")
     parser.add_argument("--org-id", default=env("DEFAULT_ORG_ID", "DGA"), help="Tenant that owns the seeded corpus (default: DEFAULT_ORG_ID, else DGA)")
     parser.add_argument("--skip-if-seeded", action="store_true", help="Exit early if all three stores are already populated and in parity")
+    parser.add_argument("--reset-corpus", action="store_true", help="Delete the tenant's existing corpus from all three stores before ingesting (use after re-chunking)")
 
     args = parser.parse_args()
+    if not args.laws_path:
+        from core.chunking.corpus import build
+        if not os.path.isdir(args.ocr_dir):
+            raise SystemExit(f"OCR corpus not found at '{args.ocr_dir}' (mount it, or pass --ocr-dir)")
+        # Always rebuilt: chunking takes seconds and the stores must match the current OCR files
+        summary = build(Path(args.ocr_dir), Path(args.corpus_dir), verbose=False)
+        print(f"Chunked {summary['documents']} documents from {args.ocr_dir} into {summary['chunks']} chunks ({args.corpus_dir})")
+        args.laws_path = os.path.join(args.corpus_dir, "law_to_crime.json")
+        args.cases_path = os.path.join(args.corpus_dir, "cases_with_feature.json")
     run_migration(
         laws_path=args.laws_path,
         cases_path=args.cases_path,
@@ -553,4 +583,5 @@ if __name__ == "__main__":
         force_embed=args.force_embed,
         ocr_dir=args.ocr_dir,
         org_id=args.org_id,
+        reset_corpus=args.reset_corpus,
     )

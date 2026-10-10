@@ -1,4 +1,4 @@
-"""Judgment related prompts for Thai Procurement LegalGraphRAG"""
+"""Judgment related prompts for ProcurementQA Agent"""
 
 ANSWER_LEGAL_QA_PROMPT = """
 คุณคือผู้เชี่ยวชาญด้านกฎหมายและระเบียบการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ

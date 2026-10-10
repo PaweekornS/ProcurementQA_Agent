@@ -1,4 +1,4 @@
-# LegalGraphRAG: Pure Agentic RAG for Thai Government Procurement Law
+# ProcurementQA Agent: Agentic RAG for Thai Government Procurement
 
 > **State-of-the-Art Multi-Agent Legal Reasoning & Statutory Retrieval for Thai Public Procurement Laws.**  
 > Powered by **Pure Agentic RAG with LangGraph**, combining **Multi-Aspect Hybrid Retrieval (Dense Vector + Thai BM25 + GPU Cross-Encoder Reranking)**, **Knowledge Graph Traversal (Neo4j)**, and **Dual-Protocol Serving (FastAPI REST + FastMCP)**.
@@ -9,7 +9,7 @@
 
 - ✅ **Pure LangGraph Agentic Workflow**:
   1. **Issue Decomposer (`core/agent/decomposer.py`)**: Decomposes complex, multi-faceted inquiries into atomic sub-questions (`Q1`, `Q2`), preventing dominant topics from masking secondary issues during search.
-  2. **Multi-Aspect Hybrid Retrieval (`core/graph_construct/feature_graph.py`)**: Concurrently queries Dense Vector Embeddings (BGE-M3), Tokenized Thai BM25 (PyThaiNLP), and Cross-Encoder Reranker (`BAAI/bge-reranker-v2-m3`) with Reciprocal Rank Fusion.
+  2. **Multi-Aspect Hybrid Retrieval (`core/retrieval/search.py`)**: Concurrently queries Dense Vector Embeddings (BGE-M3), Tokenized Thai BM25 (PyThaiNLP), and Cross-Encoder Reranker (`BAAI/bge-reranker-v2-m3`) with Reciprocal Rank Fusion.
   3. **Knowledge Graph Traversal (`core/database/neo4j_repository.py`)**: Traverses statutory hierarchies, cross-citations (`CITES_CLAUSE`), sequential sections (`ADJACENT_SECTION`), and FAQ precedents (`RELATES_TO_LAW`).
   4. **Iterative Self-Reflection & Query Refiner (`core/agent/refiner.py`)**: Automatically detects retrieval gaps across sub-issues and triggers sharpened follow-up queries before synthesizing the final answer.
   5. **Grounding Guardrail (`core/agent/guardrail.py`)**: Extracts verbatim statutory quotes (`decisive_quotes`) and validates conclusions against hallucination.
@@ -51,10 +51,14 @@ ProcurementQA_Agent/
 │   │   ├── synthesizer.py          # Legal Synthesizer & Adjudicator
 │   │   └── guardrail.py            # Grounding Guardrail & Decisive Quotes Extraction
 │   ├── database/                   # Tri-Store Multi-Tenant Engine (PostgreSQL, Qdrant, Neo4j)
-│   ├── judge/                      # LLM-as-a-Judge & Legal Synthesizer Implementation
-│   ├── models/                     # Embedding & Cross-Encoder Reranker Singletons
-│   ├── preprocess/                 # Legal Document Chunking & Text Splitters
-│   ├── prompt/                     # Centralized Prompt Templates
+│   ├── chunking/                   # Structure-aware chunking: statute units, sections, tables, FAQ pairs
+│   ├── retrieval/                  # Hybrid search (dense + BM25 + RRF) and cross-encoder reranker
+│   ├── graph/                      # Citation linker and legacy in-memory graph
+│   ├── query/                      # Query feature extraction and summarization
+│   ├── generation/                 # Answer generation from retrieved evidence
+│   ├── models/                     # LLM client wrappers
+│   ├── prompts/                    # Prompt templates (query / answer / agent)
+│   ├── pipeline.py                 # ProcurementQAPipeline: config and workflow wiring
 │   ├── service.py                  # Business Service Facade (ProcurementService)
 │   └── utils/                      # Agent Trace Logger, Config, Thai Text Normalization
 │
@@ -150,7 +154,7 @@ The same contract is returned by the MCP tool `ask_procurement_law(query, org_id
 | `status` | `COMPLIANT`, `PARTIALLY_RESOLVED`, `NO_LAW_FOUND` or `OUT_OF_LEGAL_SCOPE` |
 | `answer` | Direct legal answer covering every resolved sub-question |
 | `conditions` | Exceptions, thresholds or prerequisites qualifying the answer; `null` if none |
-| `citations[]` | Laws relied on. `quote` is verbatim statutory text. `filename` is the OCR document path under `datas/typhoon_ocr/` and `page` its page range (`start-end/total`); both are `null` when the cited law is not in the corpus (e.g. a repealed regulation) or its page could not be recovered |
+| `citations[]` | Laws relied on. `quote` is verbatim statutory text. `filename` is the OCR document path under `data_ocr/` and `page` its page range (`start-end/total`); both are `null` when the cited law is not in the corpus (e.g. a repealed regulation) or its page could not be recovered |
 | `unresolved_issues[]` | Only sub-questions that were **not** answered (`NO_LAW_FOUND` / `OUT_OF_LEGAL_SCOPE`), with `missing_aspect`, so the orchestrator can delegate them to another agent |
 | `grounded` | `true` when every cited section appears in the retrieved evidence (guardrail); `false` means treat the answer with caution; `null` if not evaluated |
 | `org_id` | Tenant the answer was scoped to |
@@ -171,6 +175,7 @@ See [docs/MULTI_TENANCY_CHECKLIST.md](docs/MULTI_TENANCY_CHECKLIST.md) for detai
 ```bash
 # QA Agent: Postgres + Qdrant + Neo4j + API on :8000 (first run seeds the corpus via the migrate container)
 git clone https://github.com/PaweekornS/ProcurementQA_Agent.git && cd ProcurementQA_Agent
+# The corpus is not in git: copy the OCR markdown to ./data_ocr/ (mounted read-only into the migrate container)
 cp env.example .env        # set TOKENMIND_API_KEY, OPPER_API_KEY (or RERANKER_ENABLED=false), LLM key
 mkdir -p outputs logs && sudo chown -R 10001:10001 outputs logs   # Linux only; not needed on Docker Desktop
 docker compose up -d --build
@@ -189,8 +194,9 @@ bash ../ProcurementQA_Agent/tests/regression_deploy.sh
 `/api/v1/documents` always requires a tenant. Tenant documents (`POST /api/v1/documents`, or pushed by OCR)
 are visible only to their owner; they are indexed in Postgres (RLS), Qdrant and Neo4j, where chunks link to
 the statutes they cite (`มาตรา N` → the Act, `ระเบียบฯ ข้อ N` → the MoF regulation).
-The migrate container seeds the statute corpus as tenant `DGA` (`DEFAULT_ORG_ID`; override with
+The migrate container chunks `data_ocr/` (core/chunking; output in `outputs/corpus/`) and seeds it as tenant `DGA` (`DEFAULT_ORG_ID`; override with
 `python scripts/migrate_to_tri_store.py --org-id <ORG>`), so other tenants see only their own documents.
+After changing the OCR files or the chunker, re-ingest with `python scripts/migrate_to_tri_store.py --reset-corpus`.
 
 ---
 

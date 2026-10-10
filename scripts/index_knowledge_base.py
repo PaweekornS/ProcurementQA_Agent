@@ -38,7 +38,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.LegalGraphRAG import LegalGraphRAG, LegalGraphRAGConfig
+from core.pipeline import ProcurementQAPipeline, PipelineConfig
 import scripts.prepare_thai_corpus as corpus_builder
 
 
@@ -61,7 +61,7 @@ def run_indexing_pipeline(
             dotenv_path = fallback_env
             
     print(f"[Config] Loading settings from: {dotenv_path}")
-    config = LegalGraphRAGConfig.from_env_file(dotenv_path)
+    config = PipelineConfig.from_env_file(dotenv_path)
 
     if output_db_path:
         config.graph.graph_db_path = output_db_path
@@ -112,7 +112,7 @@ def run_indexing_pipeline(
     # Initialize builder
     config.graph.auto_build = False
     config.graph.auto_save = False
-    rag_builder = LegalGraphRAG(config=config)
+    rag_builder = ProcurementQAPipeline(config=config)
 
     print("Building knowledge nodes, relations, and embeddings...")
     rag_builder.build_graph(force_rebuild=True)

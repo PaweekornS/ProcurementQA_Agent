@@ -36,12 +36,12 @@ if hasattr(sys.stdout, 'reconfigure'):
 from dotenv import load_dotenv
 load_dotenv(".env", override=False)
 
-from core.graph_construct.feature_graph import (
+from core.retrieval.search import (
     GraphDBManager,
     get_embedding,
     _ensure_bm25_index
 )
-from core.graph_construct.hybrid_reranker import (
+from core.retrieval.reranker import (
     get_bm25_index,
     get_reranker,
     weighted_rrf,

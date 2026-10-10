@@ -3,7 +3,7 @@
 """
 server.py
 
-Production entrypoint for the LegalGraphRAG Thai Procurement Law Service.
+Production entrypoint for the ProcurementQA Agent Service.
 Supports:
   1. Default ASGI HTTP Mode: Runs FastAPI + mounted MCP on Uvicorn
   2. Legacy MCP Stdio Mode: Runs FastMCP over standard input/output for local desktop clients
