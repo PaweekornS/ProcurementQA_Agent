@@ -493,7 +493,7 @@ def run_rag_triad_evaluation(
 
         pred_status = (
             pred.get("status")
-            or pred.get("judge_result", {}).get("status")
+            or (pred.get("answer_result") or pred.get("judge_result") or {}).get("status")
             or pred.get("pred_status", "")
         )
         is_no_law_found = (

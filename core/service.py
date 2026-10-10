@@ -313,19 +313,19 @@ class ProcurementService:
         from core.agent import ProcurementAgenticWorkflow
         workflow = ProcurementAgenticWorkflow(self.rag.model, max_retries=self.rag.config.agentic_max_retries)
         agent_res = workflow.invoke(case)
-        judge = agent_res.get("judge_result", {})
+        answer = agent_res.get("answer_result", {})
         used_laws = agent_res.get("used_laws", [])
 
-        raw_quotes = judge.get("decisive_quotes", [])
+        raw_quotes = answer.get("decisive_quotes", [])
         enriched_quotes = self._enrich_decisive_quotes(raw_quotes, used_laws, active_org)
 
         return {
-            "status": judge.get("status", "COMPLIANT"),
-            "direct_answer": judge.get("direct_answer", ""),
+            "status": answer.get("status", "COMPLIANT"),
+            "direct_answer": answer.get("direct_answer", ""),
             "decisive_quotes": enriched_quotes,
-            "applicable_laws": judge.get("applicable_laws", []),
-            "exceptions_or_conditions": judge.get("exceptions_or_conditions", ""),
-            "issues_breakdown": judge.get("issues_breakdown", []),
+            "applicable_laws": answer.get("applicable_laws", []),
+            "exceptions_or_conditions": answer.get("exceptions_or_conditions", ""),
+            "issues_breakdown": answer.get("issues_breakdown", []),
             "citations": [
                 {
                     "entry": law.get("entry", ""),
@@ -337,7 +337,7 @@ class ProcurementService:
                 law.get("chunk_id") or law.get("id") for law in used_laws if law.get("chunk_id") or law.get("id")
             ],
             "crag_meta": agent_res.get("crag_meta", {}),
-            "guardrail_verdict": judge.get("guardrail_verdict", {}),
+            "guardrail_verdict": answer.get("guardrail_verdict", {}),
             "org_id": active_org
         }
 

@@ -399,7 +399,7 @@ class ProcurementAgenticWorkflow:
             "name": name,
             "description": raw_fact,
             "feature": final_state.get("features", {}),
-            "judge_result": {
+            "answer_result": {
                 "status": final_state.get("status", "COMPLIANT"),
                 "direct_answer": final_state.get("direct_answer", ""),
                 "decisive_quotes": final_state.get("decisive_quotes", []),

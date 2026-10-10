@@ -220,12 +220,12 @@ def process_cases_worker(
             pred_quotes = []
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
-                judge_result = case_res[0].get("judge_result", {})
-                pred_status = judge_result.get("status", "COMPLIANT")
-                pred_direct_answer = judge_result.get("direct_answer", "")
-                pred_quotes = judge_result.get("decisive_quotes", [])
-                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                exceptions = judge_result.get("exceptions_or_conditions", "")
+                answer_result = case_res[0].get("answer_result", {})
+                pred_status = answer_result.get("status", "COMPLIANT")
+                pred_direct_answer = answer_result.get("direct_answer", "")
+                pred_quotes = answer_result.get("decisive_quotes", [])
+                pred_laws = list(answer_result.get("applicable_laws", answer_result.get("law_article", [])))
+                exceptions = answer_result.get("exceptions_or_conditions", "")
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
@@ -479,13 +479,13 @@ def run_evaluation(
             pred_quotes = []
             
             if case_res and isinstance(case_res, list) and len(case_res) > 0:
-                judge_result = case_res[0].get("judge_result", {})
-                pred_status = judge_result.get("status", "COMPLIANT")
-                pred_direct_answer = judge_result.get("direct_answer", "")
-                pred_quotes = judge_result.get("decisive_quotes", [])
-                pred_laws = list(judge_result.get("applicable_laws", judge_result.get("law_article", [])))
-                exceptions = judge_result.get("exceptions_or_conditions", "")
-                pred_issues_breakdown = judge_result.get("issues_breakdown", case_res[0].get("issues_breakdown", []))
+                answer_result = case_res[0].get("answer_result", {})
+                pred_status = answer_result.get("status", "COMPLIANT")
+                pred_direct_answer = answer_result.get("direct_answer", "")
+                pred_quotes = answer_result.get("decisive_quotes", [])
+                pred_laws = list(answer_result.get("applicable_laws", answer_result.get("law_article", [])))
+                exceptions = answer_result.get("exceptions_or_conditions", "")
+                pred_issues_breakdown = answer_result.get("issues_breakdown", case_res[0].get("issues_breakdown", []))
                 
                 if pred_status == "NO_LAW_FOUND":
                     pred_laws = []
