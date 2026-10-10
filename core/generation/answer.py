@@ -9,8 +9,7 @@ TH_TO_AR = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 def format_law(law_used):
     res = ""
     for law in law_used:
-        law["crimes"] = law.get("crimes", [])
-        topics = [c.replace("\n", " ") for c in law["crimes"] if c]
+        topics = [str(t).replace("\n", " ") for t in law.get("topics", []) if t]
         entry = law.get("entry", "")
         desc = law.get("description", "")
         if desc:
@@ -23,7 +22,7 @@ def format_law(law_used):
 def format_fact(facts):
     res = ""
     for fact in facts:
-        topics = fact.get("crime", [])
+        topics = fact.get("topics", [])
         desc = fact.get("description", "")
         res += f"ประเด็นที่เกี่ยวข้อง: {', '.join(topics)}\nรายละเอียด/แนวทาง: {desc}\n"
     return res

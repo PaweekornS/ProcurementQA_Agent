@@ -47,7 +47,7 @@ def readiness(response: Response, service: ProcurementService = Depends(get_serv
             from core.database import StorageManager
             # Raises if any of PostgreSQL / Qdrant / Neo4j is unreachable
             tri_store_stats = StorageManager.get_instance().get_stats()
-            if tri_store_stats["postgres"]["statute_clauses"] == 0 or tri_store_stats["qdrant"]["statutes_points"] == 0:
+            if tri_store_stats["postgres"]["chunks"] == 0 or tri_store_stats["qdrant"]["chunk_points"] == 0:
                 response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
                 return ReadinessStatus(
                     ready=False,

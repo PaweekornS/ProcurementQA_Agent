@@ -52,17 +52,17 @@ The previous implementation bundled the entire knowledge base into a single Pyth
 PostgreSQL serves as the immutable system of record for all legal statutes, executive decrees, and precedent consultations.
 
 - **Key Tables:**
-  - `legal_documents`: Master statutory acts, ministerial regulations, and administrative orders.
-  - `statute_clauses`: Section/clause-level legal articles with `org_id` scoping and chapter hierarchies.
+  - `documents`: Master statutory acts, ministerial regulations, and administrative orders.
+  - `chunks`: Section/clause-level legal articles with `org_id` scoping and chapter hierarchies.
   - `faq_cases`: Historical procurement consultation rulings from the Comptroller General's Department (CGD).
   - `query_audit_logs`: Immutable compliance audit trail logging timestamp, client IP, querying `org_id`, and retrieved clause IDs.
 - **Relational Optimization & Indexing:**
-  - `idx_statute_org_id`: B-Tree index on `org_id` to guarantee tenant isolation during hydration.
-  - `idx_statute_doc_sec`: Composite index on `(doc_id, section_num)` providing exact statutory lookups (e.g., *Section 56*) in **$< 5$ ms**.
-  - `idx_statute_content_trgm`: GIN Trigram index (`gin_trgm_ops`) on `content_thai` for typo-tolerant lexical searching.
+  - `idx_chunk_org_id`: B-Tree index on `org_id` to guarantee tenant isolation during hydration.
+  - `idx_chunk_doc_sec`: Composite index on `(doc_id, section_num)` providing exact statutory lookups (e.g., *Section 56*) in **$< 5$ ms**.
+  - `idx_chunk_content_trgm`: GIN Trigram index (`gin_trgm_ops`) on `content` for typo-tolerant lexical searching.
   - **Row-Level Security (RLS):** Enforces database-level isolation policies:
     ```sql
-    CREATE POLICY tenant_isolation_policy ON statute_clauses
+    CREATE POLICY tenant_isolation_policy ON chunks
     FOR SELECT USING (org_id IN ('PUBLIC', current_setting('app.current_org_id', true)));
     ```
 
@@ -92,8 +92,8 @@ Qdrant coordinates dense semantic representations and native lexical BM25 token 
 Neo4j models topological inter-statute dependencies and judicial precedents.
 
 - **Node Classifications:**
-  - `:LegalDocument`: Master legal enactments (e.g., พ.ร.บ. จัดซื้อจัดจ้างฯ พ.ศ. 2560).
-  - `:StatuteClause`: Granular statutory sections and sub-clauses.
+  - `:Document`: Master legal enactments (e.g., พ.ร.บ. จัดซื้อจัดจ้างฯ พ.ศ. 2560).
+  - `:Chunk`: Granular statutory sections and sub-clauses.
   - `:FAQCase`: Precedent advisory cases.
   - `:LegalTopic`: Procurement domain ontology clusters.
 - **Directed Semantic Relationships:**
@@ -137,7 +137,7 @@ sequenceDiagram
     Note over QD: Inverted Index skips all other tenant vertices<br/>Computes Cosine only on valid points
     QD-->>API: Return Top-K Candidate IDs & RRF Scores
   
-    API->>PG: Batch Hydration SELECT WHERE clause_id IN (...) AND org_id IN (...)
+    API->>PG: Batch Hydration SELECT WHERE chunk_id IN (...) AND org_id IN (...)
     PG-->>API: Authoritative Legal Texts
   
     API->>NEO: Cypher Traversal WHERE org_id IN [PUBLIC, ORG_05_MOPH]
@@ -156,7 +156,7 @@ sequenceDiagram
 - **Mechanism:** Qdrant maintains an inverted index on payload keywords.
   ```python
   client.create_payload_index(
-      collection_name="procurement_statutes",
+      collection_name="procurement_chunks",
       field_name="org_id",
       field_schema=models.PayloadSchemaType.KEYWORD
   )
@@ -167,10 +167,10 @@ sequenceDiagram
 
 - **Mechanism:** B-Tree/Range indexes on node labels and properties:
   ```cypher
-  CREATE INDEX clause_org_id_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.org_id);
-  CREATE INDEX clause_section_lookup IF NOT EXISTS FOR (c:StatuteClause) ON (c.doc_id, c.section_num);
+  CREATE INDEX chunk_org_id_lookup IF NOT EXISTS FOR (c:Chunk) ON (c.org_id);
+  CREATE INDEX chunk_section_lookup IF NOT EXISTS FOR (c:Chunk) ON (c.doc_id, c.section_num);
   ```
-- **Performance Impact:** Node lookup by `clause_id` or `(doc_id, section_num)` operates in $O(1)$ to $O(\log N)$ time ($< 0.05\text{ ms}$). Graph traversals enforce boundary checks without full database scans, running 1-to-2 hop traversals in **$< 46\text{ ms}$**.
+- **Performance Impact:** Node lookup by `chunk_id` or `(doc_id, section_num)` operates in $O(1)$ to $O(\log N)$ time ($< 0.05\text{ ms}$). Graph traversals enforce boundary checks without full database scans, running 1-to-2 hop traversals in **$< 46\text{ ms}$**.
 
 ### 5.3 Memory Decoupling via Memory-Mapped I/O (mmap)
 

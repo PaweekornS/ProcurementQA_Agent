@@ -376,7 +376,7 @@ class GenerationEvaluator:
                 ctx_parts = []
                 for c in (retrieved_contexts or [])[:5]:
                     if isinstance(c, dict):
-                        txt = c.get("content_thai") or c.get("snippet") or c.get("text") or str(c)
+                        txt = c.get("content") or c.get("snippet") or c.get("text") or str(c)
                     elif isinstance(c, str):
                         txt = c
                     else:

@@ -41,7 +41,8 @@ echo "--- QA: search isolation"
 S=$(curl -s -X POST $QA/api/v1/search -H 'Content-Type: application/json' -H "X-Organization-Id: $B" -d '{"query":"REG TOR ค่าปรับร้อยละ 0.2 ต่อวัน"}')
 check "tenant B never sees tenant A chunks" "$(echo "$S" | grep -c "tdoc:$A")" "0"
 check "header beats body org_id (REST)" "$(curl -s -X POST $QA/api/v1/search -H 'Content-Type: application/json' -H "X-Organization-Id: $B" -d "{\"query\":\"REG TOR ค่าปรับ\",\"org_id\":\"$A\"}" | grep -c "tdoc:$A")" "0"
-check "DGA statutes still present" "$(neo "MATCH (c:StatuteClause {org_id:'DGA'}) RETURN count(c)")" "2633"
+CORPUS_CHUNKS=$("$PY" -c "import json; print(json.load(open('$(dirname "$0")/../outputs/corpus/manifest.json', encoding='utf-8'))['chunks'])")
+check "DGA corpus still present" "$(neo "MATCH (c:Chunk {org_id:'DGA'}) RETURN count(c)")" "$CORPUS_CHUNKS"
 
 echo "--- QA: graph expansion (item 7)"
 G='{"title":"REG GRAPH","source_id":"reg-graph","markdown":"<!-- Page 1 of 1 -->\n\nตรวจรับตามระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างฯ ข้อ 175 รหัสทดสอบ ZXQ-REG"}'

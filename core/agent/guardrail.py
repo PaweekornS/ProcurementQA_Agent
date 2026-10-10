@@ -58,7 +58,7 @@ class GroundingGuardrail:
         grounded_circulars = set()
 
         for ctx in contexts or []:
-            combined = f"{ctx.get('entry', '')} {ctx.get('content_thai', '')} {ctx.get('text', '')} {str(ctx.get('related_laws', ''))}"
+            combined = f"{ctx.get('entry', '')} {ctx.get('content', '')} {ctx.get('text', '')}"
             norm = normalize_digits(combined)
             grounded_sections.update(re.findall(r"(?:มาตรา|ม\.)\s*(\d+)", norm))
             grounded_clauses.update(re.findall(r"(?:ข้อ|ระเบียบฯ\s*ข้อ)\s*(\d+)", norm))

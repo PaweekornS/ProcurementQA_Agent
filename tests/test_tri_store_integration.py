@@ -26,26 +26,17 @@ import json
 
 from core.database import StorageManager
 from core.service import ProcurementService
-from scripts.migrate_to_tri_store import GRAPH_LINKER_VERSION, normalize_doc_name
+from scripts.migrate_to_tri_store import GRAPH_LINKER_VERSION, load_corpus
 
 
 def _corpus_expectations() -> dict:
     """
-    Minimum counts derived from the chunked corpus in outputs/corpus/ (the PUBLIC tenant), parsed exactly as
-    scripts/migrate_to_tri_store.py does. Stores may hold more when tenant benchmark data is
-    loaded on top, hence the >= assertions.
+    Minimum counts from the chunked corpus (outputs/corpus/chunks.jsonl), parsed exactly as the
+    migration does. Stores may hold more when tenant benchmark data is loaded on top, hence >=.
     """
-    laws_path = os.getenv("law_to_crime_path", str(PROJECT_ROOT / "outputs" / "corpus" / "law_to_crime.json"))
-    cases_path = os.getenv("case_db_path", str(PROJECT_ROOT / "outputs" / "corpus" / "cases_with_feature.json"))
-    with open(laws_path, encoding="utf-8") as f:
-        laws = [r for r in json.load(f) if r.get("items")]
-    with open(cases_path, encoding="utf-8") as f:
-        cases = json.load(f)
-    return {
-        "legal_documents": len({normalize_doc_name(str(r.get("id", "")).split("|")[0]) for r in laws}),
-        "statute_clauses": len(laws),
-        "faq_cases": len(cases),
-    }
+    path = os.getenv("CORPUS_DIR", str(PROJECT_ROOT / "outputs" / "corpus"))
+    documents, chunks, faq_cases, _ = load_corpus(os.path.join(path, "chunks.jsonl"))
+    return {"documents": len(documents), "chunks": len(chunks), "faq_cases": len(faq_cases)}
 
 
 class TestTriStoreIntegration(unittest.TestCase):
@@ -67,14 +58,14 @@ class TestTriStoreIntegration(unittest.TestCase):
             self.assertGreaterEqual(stats["postgres"][key], minimum, f"{key} below corpus size")
 
         # Qdrant assertions
-        self.assertEqual(stats["qdrant"]["statutes_points"], stats["postgres"]["statute_clauses"])
+        self.assertEqual(stats["qdrant"]["chunk_points"], stats["postgres"]["chunks"])
         self.assertEqual(stats["qdrant"]["cases_points"], stats["postgres"]["faq_cases"])
 
         # Neo4j assertions
-        self.assertEqual(stats["neo4j"]["documents"], stats["postgres"]["legal_documents"])
-        self.assertEqual(stats["neo4j"]["clauses"], stats["postgres"]["statute_clauses"])
+        self.assertEqual(stats["neo4j"]["documents"], stats["postgres"]["documents"])
+        self.assertEqual(stats["neo4j"]["chunks"], stats["postgres"]["chunks"])
         # Every clause hangs off its document via CONTAINS, so citations/adjacency must add more
-        self.assertGreater(stats["neo4j"]["relationships"], stats["neo4j"]["clauses"])
+        self.assertGreater(stats["neo4j"]["relationships"], stats["neo4j"]["chunks"])
         self.assertEqual(self.storage.neo4j.get_graph_meta("linker_version"), GRAPH_LINKER_VERSION)
 
     def test_02_hybrid_search_clauses(self):
@@ -83,7 +74,7 @@ class TestTriStoreIntegration(unittest.TestCase):
         from core.retrieval.embedding import get_embedding
         q_emb = get_embedding(query)
 
-        results = self.storage.hybrid_search_clauses(
+        results = self.storage.hybrid_search_chunks(
             query_text=query,
             query_dense=q_emb,
             top_k=5
@@ -91,9 +82,9 @@ class TestTriStoreIntegration(unittest.TestCase):
         print(f"\n[Test 2] Hybrid search returned {len(results)} clauses.")
         self.assertGreater(len(results), 0)
         top_clause = results[0]
-        self.assertIn("clause_id", top_clause)
-        self.assertIn("content_thai", top_clause)
-        self.assertGreater(len(top_clause["content_thai"]), 20)
+        self.assertIn("chunk_id", top_clause)
+        self.assertIn("content", top_clause)
+        self.assertGreater(len(top_clause["content"]), 20)
         print(f"Top result: {top_clause.get('entry')} (score: {top_clause.get('score'):.4f})")
 
     def test_03_graph_traversal(self):
@@ -101,9 +92,9 @@ class TestTriStoreIntegration(unittest.TestCase):
         # Query section 56
         records = self.storage.pg.lookup_section("พระราชบัญญัติ", 56)
         self.assertGreater(len(records), 0)
-        clause_id = records[0]["clause_id"]
+        chunk_id = records[0]["chunk_id"]
 
-        graph_ctx = self.storage.traverse_clause_graph(clause_id)
+        graph_ctx = self.storage.traverse_chunk_graph(chunk_id)
         print(f"\n[Test 3] Graph traversal around '{records[0]['entry']}':")
         print(f"  - Adjacent sections: {len(graph_ctx['adjacent_sections'])}")
         print(f"  - Cited clauses: {len(graph_ctx['cited_clauses'])}")
@@ -130,7 +121,7 @@ class TestTriStoreIntegration(unittest.TestCase):
         self.assertGreater(len(records), 0)
         self.assertTrue(records[0]["doc_title"].startswith("พระราชบัญญัติ"), "bare section lookup must rank the Act first")
 
-        subordinates = self.storage.neo4j.get_subordinate_laws(records[0]["clause_id"])
+        subordinates = self.storage.neo4j.get_subordinate_laws(records[0]["chunk_id"])
         print(f"\n[Test 5] มาตรา 56 has {len(subordinates)} subordinate clauses.")
         self.assertGreater(len(subordinates), 0)
         self.assertIn("EMPOWERED_BY", {s["relation"] for s in subordinates})

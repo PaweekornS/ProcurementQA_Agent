@@ -87,10 +87,10 @@ def _sync_graph(storage, org_id: str, doc: Dict[str, Any], chunks: List[Dict[str
         resolved = storage.neo4j.resolve_statute_refs(
             [{"title": t, "kind": k, "num": n} for t, k, n in wanted])
         citations = [
-            {"chunk_id": cid, "clause_id": clause_id, "quote": r["quote"]}
+            {"chunk_id": cid, "chunk_id": chunk_id, "quote": r["quote"]}
             for cid, refs in per_chunk
             for r in refs
-            for clause_id in resolved.get((r["title"], r["kind"], r["num"]), [])
+            for chunk_id in resolved.get((r["title"], r["kind"], r["num"]), [])
         ]
         linked = storage.neo4j.replace_tenant_document(org_id, doc, chunks, citations)
         return {"graph_status": "synced", "graph_citations": linked}

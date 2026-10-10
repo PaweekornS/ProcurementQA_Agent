@@ -34,7 +34,7 @@ def main():
     args = parser.parse_args()
     s = build(Path(args.ocr_dir), Path(args.out))
     print(f"\n{s['documents']} documents {s['doc_types']} -> {s['chunks']} chunks {s['chunk_kinds']}, "
-          f"{s['faq_cases']} FAQ cases written to {args.out}")
+          f"{s['faq_pairs']} FAQ pairs written to {args.out}")
 
 
 if __name__ == "__main__":

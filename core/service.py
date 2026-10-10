@@ -145,7 +145,7 @@ class ProcurementService:
             "found": True,
             "section": section,
             "source_id": top["entry"],
-            "clause_id": top["chunk_id"],
+            "chunk_id": top["chunk_id"],
             "doc_title": top.get("doc_title"),
             "source_file": top.get("source_file"),
             "page": format_page_range(top.get("page_start"), top.get("page_end"), top.get("total_pages")),
@@ -200,7 +200,7 @@ class ProcurementService:
             data = law.get("data", {}) or law
             entry = law.get("entry") or data.get("entry") or law.get("id", "")
             desc = data.get("description") or law.get("description", "")
-            topics = data.get("crimes", data.get("crime", []))
+            topics = law.get("topics", [])
 
             if doc_filter:
                 combined_meta = f"{entry} {' '.join(topics)}".lower()
@@ -247,10 +247,10 @@ class ProcurementService:
         if not found.get("found"):
             return {"target": section_reference, "matched_graph_node": None,
                     "graph_neighbors_count": 0, "related_nodes": []}
-        related = get_retriever().store.related(found["clause_id"], active_org)
+        related = get_retriever().store.related(found["chunk_id"], active_org)
         return {
             "target": section_reference,
-            "matched_graph_node": found["clause_id"],
+            "matched_graph_node": found["chunk_id"],
             "matched_entry": found["source_id"],
             "graph_neighbors_count": len(related),
             "related_nodes": related,
@@ -329,12 +329,12 @@ class ProcurementService:
             "citations": [
                 {
                     "entry": law.get("entry", ""),
-                    "topics": law.get("crimes", law.get("crime", []))
+                    "topics": law.get("topics", [])
                 }
                 for law in used_laws
             ],
             "retrieved_clause_ids": [
-                law.get("clause_id") or law.get("id") for law in used_laws if law.get("clause_id") or law.get("id")
+                law.get("chunk_id") or law.get("id") for law in used_laws if law.get("chunk_id") or law.get("id")
             ],
             "crag_meta": agent_res.get("crag_meta", {}),
             "guardrail_verdict": judge.get("guardrail_verdict", {}),
@@ -374,13 +374,13 @@ class ProcurementService:
         except Exception as exc:
             print(f"[ProcurementService] WARNING: audit log write failed for {query_id}: {exc}", file=sys.stderr)
 
-    def _clause_source_record(self, clause_id: Optional[str], org_id: str) -> Optional[Dict[str, Any]]:
+    def _clause_source_record(self, chunk_id: Optional[str], org_id: str) -> Optional[Dict[str, Any]]:
         """Authoritative clause row (with source_file / page range) from PostgreSQL in tri-store mode."""
-        if not clause_id or os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
+        if not chunk_id or os.getenv("USE_TRI_STORE", "false").lower() not in ("true", "1", "yes"):
             return None
         try:
             from core.database import StorageManager
-            return StorageManager.get_instance().pg.get_clause_by_id(clause_id, org_id=org_id)
+            return StorageManager.get_instance().pg.get_chunk_by_id(chunk_id, org_id=org_id)
         except Exception:
             return None
 
@@ -393,13 +393,13 @@ class ProcurementService:
         norm = lambda s: re.sub(r"\s+", "", normalize_digits(s or ""))
         target = norm(law_name.split("|")[0])
         quote = norm(quote_text)[:60]
-        tenant_cands = [c for c in used_laws if is_tenant_chunk_id(c.get("clause_id") or c.get("id"))]
+        tenant_cands = [c for c in used_laws if is_tenant_chunk_id(c.get("chunk_id") or c.get("id"))]
         # A paraphrased quote labelled only "หน้า N" is attributed only when one document has that page
         page_m = re.search(r"หน้า\s*(\d+)", normalize_digits(law_name))
         on_page = [c for c in tenant_cands if page_m and str(c.get("entry", "")).endswith(f"หน้า {page_m.group(1)}")]
         page_unique = len({str(c.get("entry", "")).split("|")[0] for c in on_page}) == 1
         for cand in tenant_cands:
-            cid = cand.get("clause_id") or cand.get("id")
+            cid = cand.get("chunk_id") or cand.get("id")
             title = norm(str(cand.get("entry", "")).split("|")[0])
             quoted = len(quote) >= 10 and quote in norm(cand.get("description", ""))
             titled = bool(title and target) and (title in target or target in title)
@@ -472,28 +472,28 @@ class ProcurementService:
             doc_part, kind, num = split_law(law_name)
 
             # 1. A retrieved chunk of the same document and the same มาตรา/ข้อ
-            matched = None  # (doc_name, entry, text, clause_id)
+            matched = None  # (doc_name, entry, text, chunk_id)
             for cand in used_laws:
                 entry = str(cand.get("entry", "") or cand.get("id", ""))
                 cand_doc, _, cand_label = entry.partition("|")
                 cand_kind, cand_num, _, _ = parse_unit_label(cand_label)
                 if kind and cand_kind == kind and cand_num == num and same_doc(doc_part, cand_doc):
-                    cid = cand.get("clause_id") or (cand.get("data") or {}).get("clause_id")
+                    cid = cand.get("chunk_id") or (cand.get("data") or {}).get("chunk_id")
                     matched = (cand_doc.strip(), entry, str(cand.get("description", "")), cid)
                     break
 
-            # 2. Otherwise (or when the workflow dropped clause_id while merging candidates)
+            # 2. Otherwise (or when the workflow dropped chunk_id while merging candidates)
             #    an exact store lookup scoped to that document
             if (not matched or not matched[3]) and kind and doc_part:
                 res = self.lookup_section(f"{'มาตรา' if kind == 'section' else 'ข้อ'} {num}", doc_title=doc_part)
                 if res.get("found") and same_doc(doc_part, str(res.get("source_id", "")).split("|")[0]):
                     entry = str(res.get("source_id", ""))
-                    matched = (entry.split("|")[0].strip(), entry, str(res.get("full_macro_chunk", "")), res.get("clause_id"))
+                    matched = (entry.split("|")[0].strip(), entry, str(res.get("full_macro_chunk", "")), res.get("chunk_id"))
 
             filename, page = None, None
             if matched:
-                doc_name, entry, text, clause_id = matched
-                record = self._clause_source_record(clause_id, org_id)
+                doc_name, entry, text, chunk_id = matched
+                record = self._clause_source_record(chunk_id, org_id)
                 if record:
                     # Tri-store: OCR-relative path and page range recovered at ingestion
                     filename = record.get("source_file") or f"{doc_name}.md"

@@ -91,7 +91,7 @@ class TestMultiTenancyIsolation(unittest.TestCase):
     def test_01_postgres_isolation(self):
         """Postgres queries must filter out records belonging to other tenants."""
         # Querying as DGA
-        dga_visible = self.storage.pg.get_clause_by_id("ACT_2560_SEC_56", org_id="DGA")
+        dga_visible = self.storage.pg.get_chunk_by_id("ACT_2560_SEC_56", org_id="DGA")
         # Public statute is visible
         if dga_visible:
             self.assertEqual(dga_visible.get("org_id", "PUBLIC"), "PUBLIC")

@@ -48,7 +48,7 @@ class StorageManager:
         self._initialized = True
         logger.info("Tri-Store databases successfully initialized and ready.")
 
-    def hybrid_search_clauses(
+    def hybrid_search_chunks(
         self,
         query_text: str,
         query_dense: List[float],
@@ -62,7 +62,7 @@ class StorageManager:
         and legal metadata from PostgreSQL in a single batch, isolated by organization.
         """
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
-        qdrant_results = self.qdrant.hybrid_search_statutes(
+        qdrant_results = self.qdrant.hybrid_search_chunks(
             query_text=query_text,
             query_dense=query_dense,
             top_k=top_k,
@@ -74,16 +74,16 @@ class StorageManager:
         if not qdrant_results:
             return []
 
-        # Map scores by clause_id
-        score_map = {r["clause_id"]: r["score"] for r in qdrant_results if r.get("clause_id")}
-        clause_ids = list(score_map.keys())
+        # Map scores by chunk_id
+        score_map = {r["chunk_id"]: r["score"] for r in qdrant_results if r.get("chunk_id")}
+        chunk_ids = list(score_map.keys())
 
         # Hydrate from PostgreSQL with tenant check
-        pg_records = self.pg.get_clauses_by_ids(clause_ids, org_id=active_org)
-        pg_map = {r["clause_id"]: r for r in pg_records}
+        pg_records = self.pg.get_chunks_by_ids(chunk_ids, org_id=active_org)
+        pg_map = {r["chunk_id"]: r for r in pg_records}
 
         hydrated = []
-        for cid in clause_ids:
+        for cid in chunk_ids:
             if cid in pg_map:
                 item = dict(pg_map[cid])
                 item["similarity"] = score_map.get(cid, 0.0)
@@ -140,14 +140,14 @@ class StorageManager:
         rows.sort(key=lambda r: r["score"], reverse=True)
         return rows
 
-    def traverse_clause_graph(self, clause_id: str, org_id: Optional[str] = None) -> Dict[str, Any]:
+    def traverse_chunk_graph(self, chunk_id: str, org_id: Optional[str] = None) -> Dict[str, Any]:
         """Traverses Neo4j for structural and citation graph context around a clause, isolated by organization."""
         active_org = org_id or os.getenv("DEFAULT_ORG_ID", "DGA")
         return {
-            "adjacent_sections": self.neo4j.get_adjacent_sections(clause_id, org_id=active_org),
-            "cited_clauses": self.neo4j.get_cited_clauses(clause_id, org_id=active_org),
-            "subordinate_laws": self.neo4j.get_subordinate_laws(clause_id, org_id=active_org),
-            "related_cases": self.neo4j.get_related_cases(clause_id, org_id=active_org),
+            "adjacent_sections": self.neo4j.get_adjacent_sections(chunk_id, org_id=active_org),
+            "cited_clauses": self.neo4j.get_cited_clauses(chunk_id, org_id=active_org),
+            "subordinate_laws": self.neo4j.get_subordinate_laws(chunk_id, org_id=active_org),
+            "related_cases": self.neo4j.get_related_cases(chunk_id, org_id=active_org),
         }
 
     def get_stats(self) -> Dict[str, Any]:

@@ -81,14 +81,12 @@ class Candidate:
         d = self.data
         return {
             "id": self.chunk_id,
-            "clause_id": self.chunk_id,
+            "chunk_id": self.chunk_id,
             "entry": self.entry,
             "description": self.text,
-            "text": f"[{self.entry}]\n{self.text}",
-            "crimes": d.get("topics", []),
-            "judge_dep": d.get("judge_dep", []),
-            "related_laws": d.get("related_laws", []),
-            "insights": "",
+            "text": self.text,  # already opens with its [document | section] header
+            # Where the chunk sits in its document ('หมวด 6 การจัดซื้อจัดจ้าง > ...')
+            "topics": d.get("section_path") or [],
             "rerank_score": float(self.rerank_score if self.rerank_score is not None else self.fused_score),
             "source_type": self.source_type,
             "retrieval_origin": self.origin,
@@ -131,8 +129,8 @@ class TriStore:
             raise RuntimeError("No query embedding (check EMBEDDING_PROVIDER / TOKENMIND_API_KEY); "
                                "the tri-store hybrid search needs the dense vector")
         out = []
-        for r in self.storage.hybrid_search_clauses(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id):
-            out.append(Candidate(chunk_id=r["clause_id"], entry=r.get("entry", ""), text=r.get("content_thai", ""),
+        for r in self.storage.hybrid_search_chunks(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id):
+            out.append(Candidate(chunk_id=r["chunk_id"], entry=r.get("entry", ""), text=r.get("content", ""),
                                  fused_score=float(r.get("score", 0.0)), data=r))
         try:
             for t in self.storage.hybrid_search_tenant_docs(query_text=query, query_dense=vector, org_id=org_id,
@@ -155,15 +153,15 @@ class TriStore:
             rows = pg.lookup_section(doc_hint, num, org_id=org_id)
             if not rows and kind is None:
                 rows = pg.lookup_clause(doc_hint, num, org_id=org_id)
-        return [_unit_record(r.get("clause_id"), r.get("entry", ""), r.get("content_thai", ""), r) for r in rows]
+        return [_unit_record(r.get("chunk_id"), r.get("entry", ""), r.get("content", ""), r) for r in rows]
 
     def related(self, chunk_id: str, org_id: str) -> List[Dict[str, Any]]:
-        ctx = self.storage.traverse_clause_graph(chunk_id, org_id=org_id)
-        out = [{"node_id": a.get("clause_id"), "relation": "ADJACENT_SECTION", "entry": a.get("entry", "")}
+        ctx = self.storage.traverse_chunk_graph(chunk_id, org_id=org_id)
+        out = [{"node_id": a.get("chunk_id"), "relation": "ADJACENT_SECTION", "entry": a.get("entry", "")}
                for a in ctx.get("adjacent_sections", [])]
-        out += [{"node_id": c.get("clause_id"), "relation": "CITES_CLAUSE", "entry": c.get("entry", "")}
+        out += [{"node_id": c.get("chunk_id"), "relation": "CITES_CLAUSE", "entry": c.get("entry", "")}
                 for c in ctx.get("cited_clauses", [])]
-        out += [{"node_id": s.get("clause_id"), "relation": "SUBORDINATE_RULE", "entry": s.get("entry", "")}
+        out += [{"node_id": s.get("chunk_id"), "relation": "SUBORDINATE_RULE", "entry": s.get("entry", "")}
                 for s in ctx.get("subordinate_laws", [])]
         out += [{"node_id": c.get("case_id"), "relation": "RELATES_TO_LAW", "entry": c.get("question", "")}
                 for c in ctx.get("related_cases", [])]
@@ -180,23 +178,23 @@ class TriStore:
     def catalog(self, org_id: str) -> Dict[str, Any]:
         stats = self.storage.get_stats()
         return {"documents": self.storage.pg.list_document_titles(org_id),
-                "chunks": stats["postgres"].get("statute_clauses", 0),
+                "chunks": stats["postgres"].get("chunks", 0),
                 "faq_pairs": stats["postgres"].get("faq_cases", 0)}
 
     def expand(self, seeds: Sequence[Candidate], org_id: str) -> Dict[str, List[Candidate]]:
-        clause_ids = [s.chunk_id for s in seeds if s.source_type == "statute"]
+        chunk_ids = [s.chunk_id for s in seeds if s.source_type == "statute"]
         tenant_ids = [s.chunk_id for s in seeds if s.source_type == "tenant_document"]
-        edges = self.storage.neo4j.get_cited_clauses_batch(clause_ids, org_id=org_id) if clause_ids else []
+        edges = self.storage.neo4j.get_cited_clauses_batch(chunk_ids, org_id=org_id) if chunk_ids else []
         if tenant_ids:
             edges += self.storage.neo4j.get_tenant_chunk_citations_batch(tenant_ids, org_id=org_id)
         targets = list({e["target_id"] for e in edges})
-        rows = {r["clause_id"]: r for r in self.storage.pg.get_clauses_by_ids(targets, org_id=org_id)} if targets else {}
+        rows = {r["chunk_id"]: r for r in self.storage.pg.get_chunks_by_ids(targets, org_id=org_id)} if targets else {}
         by_seed: Dict[str, List[Candidate]] = {}
         for e in edges:
             r = rows.get(e["target_id"])
             if r:
                 by_seed.setdefault(e["source_id"], []).append(Candidate(
-                    chunk_id=r["clause_id"], entry=r.get("entry", ""), text=r.get("content_thai", ""),
+                    chunk_id=r["chunk_id"], entry=r.get("entry", ""), text=r.get("content", ""),
                     origin=GRAPH, seed_id=e["source_id"], relation=e.get("rel_type"), data=r))
         return by_seed
 
@@ -227,7 +225,8 @@ class InMemoryStore:
         units = []
         for r in records:
             text = r.get("embed_text") or r["content"]
-            data = {"entry": r["entry"], "content_thai": text, "page_start": r.get("page_start"),
+            data = {"entry": r["entry"], "content": text, "section_path": r.get("section_path", []),
+                    "page_start": r.get("page_start"),
                     "page_end": r.get("page_end"), "source_file": r.get("source_file"),
                     "total_pages": r.get("total_pages"), "doc_title": r.get("doc_title"), "kind": r.get("kind")}
             self.items.append(Candidate(chunk_id=r["chunk_id"], entry=r["entry"], text=text, data=data))
