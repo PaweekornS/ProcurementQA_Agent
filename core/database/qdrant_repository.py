@@ -164,7 +164,7 @@ class QdrantRepository:
                 },
                 sparse_vectors_config={
                     "sparse_bm25": models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
+                        index=models.SparseIndexParams(on_disk=False), modifier=models.Modifier.IDF
                     )
                 },
             )
@@ -315,6 +315,8 @@ class QdrantRepository:
         doc_filter: Optional[str] = None,
         section_filter: Optional[int] = None,
         org_id: str = "DGA",
+        include_kinds: Optional[List[str]] = None,
+        exclude_kinds: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executes server-side Reciprocal Rank Fusion (RRF) between dense and sparse vectors in Qdrant,
@@ -340,7 +342,10 @@ class QdrantRepository:
                     key="section_num", match=models.MatchValue(value=section_filter)
                 )
             )
-        query_filter = models.Filter(must=must_conditions)
+        if include_kinds:
+            must_conditions.append(models.FieldCondition(key="kind", match=models.MatchAny(any=list(include_kinds))))
+        must_not = [models.FieldCondition(key="kind", match=models.MatchAny(any=list(exclude_kinds)))] if exclude_kinds else None
+        query_filter = models.Filter(must=must_conditions, must_not=must_not)
 
         sparse_indices, sparse_values = self.vectorizer.vectorize_query(query_text)
 
@@ -497,6 +502,19 @@ class QdrantRepository:
             ))
         for i in range(0, len(points), batch_size):
             self.client.upsert(collection_name=self.TENANT_DOCS_COLLECTION, points=points[i:i + batch_size])
+
+    def tenant_collection_has_idf(self) -> bool:
+        info = self.client.get_collection(self.TENANT_DOCS_COLLECTION)
+        sparse = info.config.params.sparse_vectors or {}
+        return getattr(sparse.get("sparse_bm25"), "modifier", None) == models.Modifier.IDF
+
+    def recreate_tenant_collection(self) -> None:
+        """Drop and recreate the tenant collection with the current configuration (all tenants'
+        points are removed; scripts/rebuild_tenant_index.py re-indexes them from PostgreSQL)."""
+        existing = {c.name for c in self.client.get_collections().collections}
+        if self.TENANT_DOCS_COLLECTION in existing:
+            self.client.delete_collection(self.TENANT_DOCS_COLLECTION)
+        self.init_collections()
 
     def drop_legacy_collections(self) -> None:
         existing = {c.name for c in self.client.get_collections().collections}

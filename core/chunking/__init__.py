@@ -25,10 +25,12 @@ from .schema import FAQ as FAQ_KIND, Chunk, dedupe_labels
 from .statute import StatuteChunker, dominant_unit_kind
 from .structured import StructuredChunker
 
-MIN_STATUTE_UNITS = 3
+MIN_STATUTE_UNITS = 2
+# Label of a document that fits in one chunk: the chunk holds every clause of it
+WHOLE_DOCUMENT_LABEL = "ทั้งฉบับ"
 
 __all__ = [
-    "Chunk", "FAQ_KIND", "ParsedDocument", "parse_document", "classify_document", "chunk_document",
+    "Chunk", "FAQ_KIND", "WHOLE_DOCUMENT_LABEL", "ParsedDocument", "parse_document", "classify_document", "chunk_document",
     "doc_title_from_path", "StatuteChunker", "StructuredChunker", "FAQChunker",
 ]
 
@@ -59,4 +61,7 @@ def chunk_document(markdown: str, rel_path: str, doc_title: Optional[str] = None
     if not chunks and doc_type != "general":
         # A misclassified document must still be indexed
         doc_type, chunks = "general", StructuredChunker().chunk(doc, title, rel_path.replace("\\", "/"))
+    if len(chunks) == 1 and chunks[0].kind != "table":
+        # Short amendments often carry no 'ข้อ 1' at all; the one chunk is the whole instrument
+        chunks[0].label = WHOLE_DOCUMENT_LABEL
     return doc_type, dedupe_labels(chunks)

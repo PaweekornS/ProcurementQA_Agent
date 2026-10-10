@@ -27,6 +27,9 @@ UNIT_START = re.compile(
     r"^\s*(?:\*\*)?\s*(มาตรา|ข้อ)\s*([๐-๙\d]+)\s*(ทวิ|ตรี|จัตวา|เบญจ|ฉ|สัตต|อัฏฐ|นว)?(?:\*\*)?(?=\s|$|/)"
 )
 
+# A numbered item of an attachment ('๑๓) อัตราดอกเบี้ย...'); '(๑)' sub-items are not matched
+ITEM_START = re.compile(r"^\s*(?:\*\*)?\s*([๐-๙\d]{1,3})\)(?:\*\*)?\s+\S")
+
 HEADING, PARAGRAPH, TABLE = "heading", "paragraph", "table"
 
 
@@ -122,7 +125,7 @@ def _parse_page(text: str, page: Optional[int]) -> List[Block]:
         elif not stripped:
             flush()
         else:
-            if UNIT_START.match(stripped):
+            if UNIT_START.match(stripped) or ITEM_START.match(stripped):
                 flush()
             para.append(stripped)
         i += 1

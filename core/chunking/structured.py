@@ -15,8 +15,8 @@ price-calculation rules, TOR, contracts without clause numbering).
 import re
 from typing import List, Optional
 
-from .blocks import HEADING, PARAGRAPH, TABLE, Block, ParsedDocument
-from .schema import SECTION, TABLE as TABLE_KIND, Chunk, clean_label, make_parent_id
+from .blocks import HEADING, ITEM_START, PARAGRAPH, TABLE, UNIT_START, Block, ParsedDocument
+from .schema import SECTION, TABLE as TABLE_KIND, TH_TO_AR, Chunk, clean_label, make_parent_id
 from .tables import split_table
 from .text import pack
 
@@ -40,20 +40,37 @@ def _promote_numbered_lines(blocks: List[Block]) -> List[Block]:
     return out
 
 
+def _item_headings(blocks: List[Block], level: int = 4) -> List[Block]:
+    """Give every 'ข้อ N' / 'N)' item its own heading 'ข้อ N <opening words>' so each item is a
+    section that can be cited by number (attachments number their items this way)."""
+    out = []
+    for b in blocks:
+        m = (UNIT_START.match(b.text) or ITEM_START.match(b.text)) if b.type == PARAGRAPH else None
+        if m:
+            num = (m.group(2) if m.re is UNIT_START else m.group(1)).translate(TH_TO_AR)
+            opening = clean_label(b.text[m.end(0) if m.re is UNIT_START else m.end(1) + 1:], 50)
+            out.append(Block(HEADING, text=f"ข้อ {num} {opening}".strip(), level=level,
+                             page_start=b.page_start, page_end=b.page_end))
+        out.append(b)
+    return out
+
+
 class StructuredChunker:
     doc_type = "general"
 
     def __init__(self, max_chars: int = 1500, min_chars: int = 300, max_table_chars: int = 2000,
-                 caption_chars: int = 250):
+                 caption_chars: int = 250, item_headings: bool = False):
         self.max_chars = max_chars
         self.min_chars = min_chars
         self.max_table_chars = max_table_chars
         self.caption_chars = caption_chars
+        self.item_headings = item_headings
 
-    def chunk(self, doc: ParsedDocument, doc_title: str, source_file: str) -> List[Chunk]:
-        blocks = _promote_numbered_lines(doc.blocks)
+    def chunk(self, doc: ParsedDocument, doc_title: str, source_file: str,
+              path_prefix: Optional[List[str]] = None) -> List[Chunk]:
+        blocks = _item_headings(doc.blocks) if self.item_headings else _promote_numbered_lines(doc.blocks)
         chunks: List[Chunk] = []
-        stack: List[tuple] = []          # (level, title)
+        stack: List[tuple] = [(0, p) for p in (path_prefix or [])]  # (level, title)
         section: List[Block] = []
         held: Optional[dict] = None      # small section waiting to be merged with the next one
         table_no = 0
@@ -98,7 +115,7 @@ class StructuredChunker:
         for b in blocks:
             if b.type == HEADING:
                 flush_section()
-                while stack and stack[-1][0] >= b.level:
+                while stack and stack[-1][0] >= b.level and stack[-1][0] > 0:
                     stack.pop()
                 stack.append((b.level, b.text))
             else:

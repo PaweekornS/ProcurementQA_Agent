@@ -12,7 +12,7 @@ class FakeStore:
         self.edges = edges or {}        # seed chunk_id -> [neighbour chunk_id, ...]
         self.expand_calls = 0
 
-    def search(self, query, vector, org_id, top_k):
+    def search(self, query, vector, org_id, top_k, include_kinds=None, exclude_kinds=None):
         return [Candidate(chunk_id=c, entry=f"doc | {c}", text=f"text {c}") for c in self.results.get(query, [])[:top_k]]
 
     def expand(self, seeds, org_id):

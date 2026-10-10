@@ -155,6 +155,8 @@ def match_chunk(pair: Dict[str, str], item: Any) -> bool:
     if not _same_document(pair.get("doc", ""), chunk_doc):
         return False
     section = pair.get("section", "")
+    if label.strip() == "ทั้งฉบับ":
+        return True  # core.chunking.WHOLE_DOCUMENT_LABEL: the chunk is the entire document
     expected_ref = _unit_ref(section)
     if expected_ref is not None:
         return _unit_ref(label) == expected_ref

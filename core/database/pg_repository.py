@@ -522,6 +522,17 @@ class PostgresRepository:
         with self.tenant_connection(org_id) as conn:
             return [dict(r) for r in conn.execute(query, {"o": org_id}).mappings().all()]
 
+    def all_tenant_chunks(self) -> List[Dict[str, Any]]:
+        """Every tenant chunk with its document title, in document order (owner role, all tenants).
+        Used only to rebuild the vector index; never exposed to a request."""
+        query = text("""
+            SELECT c.chunk_id, c.org_id, c.doc_id, c.chunk_index, c.page_start, c.page_end, c.content, d.title
+            FROM tenant_chunks c JOIN tenant_documents d ON c.doc_id = d.doc_id
+            ORDER BY c.org_id, c.doc_id, c.chunk_index
+        """)
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(query).mappings().all()]
+
     def get_tenant_chunks_by_ids(self, chunk_ids: List[str], org_id: str) -> List[Dict[str, Any]]:
         if not chunk_ids:
             return []

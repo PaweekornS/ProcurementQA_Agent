@@ -46,8 +46,19 @@ class RetrieverConfig:
     top_k: int = 15              # reranked seeds returned (the generator reads 15)
     graph_per_seed: int = 2      # graph neighbours carried per kept seed
     rrf_k: int = 60
-    rerank_threshold: float = 0.20
+    # Cross-encoder scores rank the pool; they no longer drop chunks (a 0.20 logit cut-off removed
+    # relevant clauses and left fewer than top_k chunks). Set RETRIEVE_RERANK_THRESHOLD to gate again.
+    rerank_threshold: float = float("-inf")
     rerank_chars: int = 1200
+    # "max": a seed's score is its best over all query variants; "primary": its score against the
+    # first variant (the user's question). Variant slots use their own scores either way.
+    rank_by: str = "primary"
+    # "after_seed": cited clauses follow the seed that cites them; "end": after every seed
+    graph_position: str = "after_seed"
+    # "mixed": FAQ pairs compete with statutes and sections in one pool; "separate": the main pool
+    # excludes them and the best `faq_k` FAQ pairs are appended after it as supporting precedent
+    faq_mode: str = "mixed"
+    faq_k: int = 2
 
     @classmethod
     def from_env(cls) -> "RetrieverConfig":
@@ -58,7 +69,11 @@ class RetrieverConfig:
             top_k=int(env("RETRIEVE_TOP_K", "15")),
             graph_per_seed=int(env("RETRIEVE_GRAPH_PER_SEED", "2")),
             rrf_k=int(env("RRF_K", "60")),
-            rerank_threshold=float(env("RERANKER_THRESHOLD", "0.20")),
+            rerank_threshold=float(env("RETRIEVE_RERANK_THRESHOLD", "-inf")),
+            rank_by=env("RETRIEVE_RANK_BY", "primary"),
+            graph_position=env("RETRIEVE_GRAPH_POSITION", "after_seed"),
+            faq_mode=env("RETRIEVE_FAQ_MODE", "mixed"),
+            faq_k=int(env("RETRIEVE_FAQ_K", "2")),
         )
 
 
@@ -124,14 +139,19 @@ class TriStore:
             storage = StorageManager.get_instance()
         self.storage = storage
 
-    def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int) -> List[Candidate]:
+    def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int,
+               include_kinds: Optional[Sequence[str]] = None,
+               exclude_kinds: Optional[Sequence[str]] = None) -> List[Candidate]:
         if vector is None:
             raise RuntimeError("No query embedding (check EMBEDDING_PROVIDER / TOKENMIND_API_KEY); "
                                "the tri-store hybrid search needs the dense vector")
         out = []
-        for r in self.storage.hybrid_search_chunks(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id):
+        for r in self.storage.hybrid_search_chunks(query_text=query, query_dense=vector, top_k=top_k, org_id=org_id,
+                                                   include_kinds=include_kinds, exclude_kinds=exclude_kinds):
             out.append(Candidate(chunk_id=r["chunk_id"], entry=r.get("entry", ""), text=r.get("content", ""),
                                  fused_score=float(r.get("score", 0.0)), data=r))
+        if include_kinds:  # a kind-restricted search (e.g. FAQ only) never includes tenant uploads
+            return out
         try:
             for t in self.storage.hybrid_search_tenant_docs(query_text=query, query_dense=vector, org_id=org_id,
                                                             top_k=max(top_k // 3, 5)):
@@ -320,13 +340,32 @@ class InMemoryStore:
         return {"documents": sorted({m["doc_title"] for m in self.meta}),
                 "chunks": len(self.items), "faq_pairs": len(self.faq_idx)}
 
-    def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int) -> List[Candidate]:
-        sparse = np.asarray(self.bm25.get_scores(self.tokenize(query)))
-        lists = [np.argsort(-sparse)[:max(top_k * 3, 30)]]
+    def _kind_mask(self, include_kinds, exclude_kinds) -> Optional[np.ndarray]:
+        if not include_kinds and not exclude_kinds:
+            return None
+        kinds = np.array([m.get("kind") for m in self.meta])
+        ok = np.ones(len(kinds), dtype=bool)
+        if include_kinds:
+            ok &= np.isin(kinds, list(include_kinds))
+        if exclude_kinds:
+            ok &= ~np.isin(kinds, list(exclude_kinds))
+        return ok
+
+    def search(self, query: str, vector: Optional[List[float]], org_id: str, top_k: int,
+               include_kinds: Optional[Sequence[str]] = None,
+               exclude_kinds: Optional[Sequence[str]] = None) -> List[Candidate]:
+        mask = self._kind_mask(include_kinds, exclude_kinds)
+        sparse = np.asarray(self.bm25.get_scores(self.tokenize(query)), dtype=np.float64)
+        if mask is not None:
+            sparse[~mask] = -np.inf
+        depth = max(top_k * 3, 30)
+        lists = [[i for i in np.argsort(-sparse)[:depth] if np.isfinite(sparse[i])]]
         if self.matrix is not None and vector is not None:
             v = np.asarray(vector, dtype=np.float32)
-            dense = self.matrix @ (v / max(float(np.linalg.norm(v)), 1e-9))
-            lists.append(np.argsort(-dense)[:max(top_k * 3, 30)])
+            dense = (self.matrix @ (v / max(float(np.linalg.norm(v)), 1e-9))).astype(np.float64)
+            if mask is not None:
+                dense[~mask] = -np.inf
+            lists.append([i for i in np.argsort(-dense)[:depth] if np.isfinite(dense[i])])
         fused: Dict[int, float] = {}
         for ranked in lists:
             for rank, i in enumerate(ranked, 1):
@@ -401,9 +440,12 @@ class Retriever:
 
         # 1. Recall per variant, fused across variants
         fused: Dict[str, Candidate] = {}
-        for qi, q in enumerate(queries):
-            vector = self.embed(q)
-            for rank, c in enumerate(self.store.search(q, vector, org_id, cfg.search_top_k), 1):
+        separate_faq = cfg.faq_mode == "separate"
+        vectors = [self.embed(q) for q in queries]
+        for qi, (q, vector) in enumerate(zip(queries, vectors)):
+            hits = self.store.search(q, vector, org_id, cfg.search_top_k,
+                                     exclude_kinds=("faq",) if separate_faq else None)
+            for rank, c in enumerate(hits, 1):
                 hit = fused.setdefault(c.chunk_id, c)
                 if hit is not c:
                     hit.fused_score += 1.0 / (cfg.rrf_k + rank)
@@ -432,7 +474,7 @@ class Retriever:
                 flat = self.scorer.score(pairs)
                 per_query_scores = np.asarray(flat, dtype=np.float64).reshape(len(seeds), len(queries))
                 for s, row in zip(seeds, per_query_scores):
-                    s.rerank_score = float(row.max())
+                    s.rerank_score = float(row[0] if cfg.rank_by == "primary" else row.max())
                     s.best_query = int(row.argmax())
                 reranked = True
             except Exception as e:
@@ -440,9 +482,11 @@ class Retriever:
 
         # 5. Assemble: guaranteed slots per variant, then best remaining, then carried neighbours
         if reranked:
-            passing = [i for i, s in enumerate(seeds) if s.rerank_score >= cfg.rerank_threshold]
+            # Relevant to any variant is enough to stay; rank_by only decides the order
+            best = per_query_scores.max(axis=1)
+            passing = [i for i in range(len(seeds)) if best[i] >= cfg.rerank_threshold]
             if not passing:  # keep the single best rather than return nothing
-                passing = [int(np.argmax([s.rerank_score for s in seeds]))]
+                passing = [int(np.argmax(best))]
             chosen: List[int] = []
             for qi in range(len(queries)):
                 order = sorted(passing, key=lambda i: per_query_scores[i, qi], reverse=True)
@@ -461,21 +505,45 @@ class Retriever:
         # Each seed is followed directly by the clauses it cites, so an empowering section stays
         # next to the regulation clause that invokes it instead of sinking below every other seed
         result: List[Candidate] = []
+        tail: List[Candidate] = []
         seen = {s.chunk_id for s in kept}
         carried = 0
         for s in kept:
             result.append(s)
             for n in neighbours.get(s.chunk_id, [])[:cfg.graph_per_seed]:
                 if n.chunk_id not in seen:
-                    # Ranked just below its seed's score so the generator sees it as supporting context
-                    n.rerank_score = (s.rerank_score if s.rerank_score is not None else s.fused_score) - 1e-3
-                    result.append(n)
+                    seed_score = s.rerank_score if s.rerank_score is not None else s.fused_score
+                    if cfg.graph_position == "end":
+                        n.rerank_score = min((k.rerank_score or 0.0) for k in kept) - 1e-3 * (carried + 1)
+                        tail.append(n)
+                    else:
+                        # Ranked just below its seed so the generator sees it as supporting context
+                        n.rerank_score = seed_score - 1e-3
+                        result.append(n)
                     seen.add(n.chunk_id)
                     carried += 1
+        result.extend(tail)
+
+        # FAQ precedents after the statutes and sections: they help the answer, but must not push
+        # the governing text out of the top ranks
+        faq_added = 0
+        if separate_faq and cfg.faq_k > 0:
+            try:
+                faq = self.store.search(queries[0], vectors[0], org_id, cfg.faq_k, include_kinds=("faq",))
+            except Exception as e:
+                logger.warning("FAQ search failed: %s", e)
+                faq = []
+            floor = min([c.rerank_score for c in result if c.rerank_score is not None] or [0.0])
+            for c in faq[:cfg.faq_k]:
+                if c.chunk_id not in seen:
+                    faq_added += 1
+                    c.rerank_score = floor - 1.0 - faq_added * 1e-3
+                    result.append(c)
+                    seen.add(c.chunk_id)
 
         stats = {
             "queries": len(queries), "recalled": len(ranked), "seeds": len(seeds), "kept": len(kept),
-            "graph_carried": carried, "reranked": reranked,
+            "graph_carried": carried, "faq_appended": faq_added, "reranked": reranked,
         }
         return RetrievalResult(result, queries, stats)
 

@@ -20,6 +20,8 @@ from .tables import split_table, to_markdown
 from .text import pack, page_range
 
 _CHAPTER = re.compile(r"^\s*(หมวด|ส่วนที่|บทเฉพาะกาล|บทกำหนดโทษ|บททั่วไป)")
+# 'ประกาศ ณ วันที่ ...' / 'ให้ไว้ ณ วันที่ ...' closes the instrument; anything after it is an attachment
+_SIGNATURE = re.compile(r"^\s*(?:\*\*)?\s*(?:ประกาศ|ให้ไว้)\s*ณ\s*วันที่")
 _SUFFIX = re.compile(r"(ทวิ|ตรี|จัตวา|เบญจ|ฉ|สัตต|อัฏฐ|นว)")
 
 
@@ -76,6 +78,39 @@ class StatuteChunker:
     def chunk(self, doc: ParsedDocument, doc_title: str, source_file: str) -> List[Chunk]:
         kind, _ = dominant_unit_kind(doc)
         starts = set(_accepted_units(doc.blocks, kind)) if kind else set()
+        body_blocks, attachment = self._split_attachment(doc.blocks, starts)
+        chunks = self._chunk_units(ParsedDocument(body_blocks, doc.total_pages), doc_title, source_file, kind, starts)
+        if attachment:
+            from .structured import StructuredChunker
+            att = StructuredChunker(min_chars=0, item_headings=True).chunk(
+                ParsedDocument(attachment, doc.total_pages), doc_title, source_file, path_prefix=["เอกสารแนบท้าย"])
+            for c in att:
+                c.doc_type = self.doc_type
+                c.label = c.label if c.label.startswith("เอกสารแนบท้าย") else f"เอกสารแนบท้าย {c.label}"
+            chunks.extend(att)
+        return chunks
+
+    @staticmethod
+    def _split_attachment(blocks: List[Block], starts) -> Tuple[List[Block], List[Block]]:
+        """Blocks of the instrument (through its signature and signer lines) and of its attachment."""
+        if not starts:
+            return blocks, []
+        last = max(starts)
+        sig = next((i for i in range(last + 1, len(blocks))
+                    if blocks[i].type == PARAGRAPH and _SIGNATURE.match(blocks[i].text)), None)
+        if sig is None:
+            return blocks, []
+        end = sig + 1
+        # Signer name and position lines stay with the instrument
+        while (end < len(blocks) and blocks[end].type == PARAGRAPH and len(blocks[end].text) < 120
+               and blocks[end].page_start == blocks[sig].page_start and end - sig <= 6):
+            end += 1
+        attachment = blocks[end:]
+        if sum(len(b.text) for b in attachment if b.type != TABLE) + sum(1 for b in attachment if b.type == TABLE) * 200 < 200:
+            return blocks, []  # a page footer or two, not an attachment
+        return blocks[:end], attachment
+
+    def _chunk_units(self, doc: ParsedDocument, doc_title: str, source_file: str, kind, starts) -> List[Chunk]:
         chunks: List[Chunk] = []
         chapter: List[str] = []
         context = ""            # heading that introduced a restarted numbering (e.g. one contract template)

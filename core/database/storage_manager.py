@@ -56,6 +56,8 @@ class StorageManager:
         doc_filter: Optional[str] = None,
         section_filter: Optional[int] = None,
         org_id: Optional[str] = None,
+        include_kinds: Optional[List[str]] = None,
+        exclude_kinds: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executes hybrid dense/sparse search in Qdrant, then hydrates authoritative text
@@ -69,6 +71,8 @@ class StorageManager:
             doc_filter=doc_filter,
             section_filter=section_filter,
             org_id=active_org,
+            include_kinds=include_kinds,
+            exclude_kinds=exclude_kinds,
         )
 
         if not qdrant_results:
